@@ -47,3 +47,19 @@ def track(iterable: Iterable[T], description: str = "Working", *,
 
     return tqdm(iterable, desc=description, total=total, unit=unit, disable=disable,
                 leave=leave, dynamic_ncols=True, position=position, initial=initial)
+
+
+def progress_bar(total: int | None = None, description: str = "Working", *, unit: str = "it",
+                 position: int | None = None, leave: bool = True, initial: int = 0,
+                 disable: bool = False):
+    """A manually-updated progress bar (call ``.update(n)`` / ``.set_postfix(...)``).
+
+    Use for loops that aren't a simple ``for x in track(iterable)`` — e.g. two
+    fixed nested bars where the inner one is ``reset()`` each outer step (the
+    reliable way to render stacked bars in a terminal; recreating the inner bar
+    each iteration breaks the nesting).
+    """
+    from tqdm.auto import tqdm
+
+    return tqdm(total=total, desc=description, unit=unit, position=position, leave=leave,
+                dynamic_ncols=True, initial=initial, disable=disable)

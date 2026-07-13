@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from mole.config import config_hash, load_config
-from mole.progress import track
+from mole.progress import progress_bar
 from mole.selfsup._train_utils import (cancel_gradients_last_layer, clip_gradients,
                                        cosine_scheduler)
 from mole.selfsup.attmask import AttMask
@@ -173,18 +173,20 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     it = start_step
     print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
 
-    # Two bars: outer = epochs (persists), inner = steps within the current epoch
-    # (clears each epoch). tqdm auto-nests when positions are left unset — do NOT
-    # hard-code position here or the bars overwrite each other in a real terminal.
-    epoch_bar = track(range(start_epoch, epochs), "epochs", unit="epoch", total=epochs,
-                      initial=start_epoch)
-    for epoch in epoch_bar:
+    # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
+    # steps within the current epoch (position 1, reset() each epoch). Both created
+    # ONCE — recreating the inner bar each epoch is what breaks nested rendering.
+    epoch_bar = progress_bar(epochs, "epochs", unit="epoch", position=0, initial=start_epoch)
+    step_bar = progress_bar(steps_per_epoch, "steps", unit="step", position=1)
+    for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
                                pin_memory=(device.type == "cuda"))
-        bar = track(loader, f"epoch {epoch + 1}/{epochs}", total=steps_per_epoch, unit="step",
-                    leave=False)
-        for i, (images, _) in enumerate(bar):
+        step_bar.reset(total=steps_per_epoch)
+        step_bar.set_description(f"epoch {epoch + 1}/{epochs}")
+        if epoch == start_epoch and skip:
+            step_bar.update(skip)  # already-done steps of a resumed epoch
+        for i, (images, _) in enumerate(loader):
             if epoch == start_epoch and i < skip:
                 continue
             for j, pg in enumerate(optimizer.param_groups):
@@ -240,7 +242,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                 _ema_update(student, teacher, mom_sched[it])
 
             it += 1
-            bar.set_postfix(loss=f"{loss.item():.3f}", lr=f"{lr_sched[it - 1]:.2e}")
+            step_bar.update(1)
+            step_bar.set_postfix(loss=f"{loss.item():.3f}", lr=f"{lr_sched[it - 1]:.2e}")
 
             if it % int(cfg["train"]["save_every_steps"]) == 0:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
@@ -248,6 +251,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
             if state["stop"]:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
+                step_bar.close()
+                epoch_bar.close()
                 print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
                 return
 
@@ -256,10 +261,13 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                         ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg,
                         epoch_snapshot=snap)
+        epoch_bar.update(1)
         epoch_bar.set_postfix(loss=f"{float(loss.item()):.3f}")
         with (run_dir / "log.txt").open("a") as f:
             f.write(json.dumps({"epoch": epoch, "step": it, "loss": float(loss.item())}) + "\n")
 
+    step_bar.close()
+    epoch_bar.close()
     print(f"[mole] done — {it} steps → {run_dir}/checkpoint.pth")
     return run_dir
 
