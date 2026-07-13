@@ -171,6 +171,12 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     pred_shape = cfg["mask"]["pred_shape"]
     start_epoch, skip = divmod(start_step, steps_per_epoch)
     it = start_step
+    total_steps = epochs * steps_per_epoch
+    if start_step >= total_steps:
+        print(f"[mole] run already complete: {start_step}/{total_steps} steps "
+              f"({epochs} epochs). Nothing to do — raise train.epochs "
+              f"(e.g. --set train.epochs={epochs * 2}) or use a fresh --output-dir.")
+        return run_dir
     print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
 
     # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
