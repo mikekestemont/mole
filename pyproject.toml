@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mole"
+version = "0.0.1"
+description = "Continual self-supervised handwriting embeddings for premodern documents (AttMask-based)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Mike Kestemont" }]
+keywords = ["paleography", "handwriting", "self-supervised", "vision-transformer", "attmask", "retrieval"]
+
+# Runtime deps for training + embedding. Preprocessing (kraken) is an OPTIONAL
+# extra on purpose: kraken pins its own torch/torchvision versions that can
+# conflict with a recent training stack. See README / the [prep] extra below.
+dependencies = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "kornia>=0.7",           # morphological (erosion/dilation) augmentations
+    "timm>=1.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",     # k-means for VLAD codebooks
+    "pillow>=10.0",
+    "tqdm>=4.66",
+    "typer>=0.12",           # CLI
+    "rich>=13.0",            # pretty CLI output / lineage trees
+    "pyyaml>=6.0",           # YAML config files
+    "petname>=2.6",          # human-friendly run names
+    "tensorboard>=2.16",
+]
+
+[project.optional-dependencies]
+# Preprocessing stack — install into a SEPARATE environment if kraken's torch
+# pins conflict with the training env (they often do). See prep/README notes.
+prep = ["kraken>=5.2"]
+# Parquet embedding output (optional; .npy always works without it).
+parquet = ["pyarrow>=15.0"]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+mole = "mole.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

@@ -216,3 +216,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- MOLE project data & artifacts (keep large/binary things out of git) ----
+# NOTE: gitignore does not support inline comments — keep patterns on their own line.
+# datasets: folders of images (+ optional labels.csv)
+data/
+# preprocessing output (alto/ + images/)
+prep/
+# checkpoints + lineage registry
+models/
+# training run dirs (checkpoints, logs, manifests)
+runs/
+# embeddings, augview grids, QC sheets
+outputs/
+# checkpoints / embeddings
+*.pth
+*.npy
+*.npz
+*.parquet
+
+# macOS
+.DS_Store

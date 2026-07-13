@@ -1,0 +1,22 @@
+# Pinned training + embedding environment for MOLE.
+# Derived from Tim Raven's attmask/requirements.txt, modernized for Python 3.11+.
+#
+# NOTE: torch/torchvision below assume a CUDA build. On the CUDA server, install
+# the matching wheel index, e.g.:
+#   pip install torch==2.8.0 torchvision==0.23.0 --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# kraken (preprocessing) is intentionally NOT listed here — see requirements-prep.txt.
+
+torch==2.8.0
+torchvision==0.23.0
+kornia==0.8.2
+timm==1.0.27
+numpy==2.1.1
+scikit-learn==1.5.2
+Pillow==10.4.0
+tqdm==4.67.3
+typer==0.12.5
+rich==13.9.4
+PyYAML==6.0.2
+petname==2.6
+tensorboard==2.18.0

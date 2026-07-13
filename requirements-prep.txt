@@ -1,0 +1,15 @@
+# OPTIONAL preprocessing environment for `mole prep` (kraken text-zone isolation).
+#
+# Keep this SEPARATE from the training env. kraken pins specific torch /
+# torchvision / numpy versions that frequently conflict with a bleeding-edge
+# training stack. Recommended setup:
+#
+#   python -m venv .venv-prep
+#   . .venv-prep/bin/activate
+#   pip install -r requirements-prep.txt
+#   pip install -e .            # installs `mole` so `mole prep` is available
+#
+# The exact kraken-compatible torch pin is resolved in Phase 3, when kraken is
+# actually wired in. Until then this file just declares the dependency.
+
+kraken>=5.2
