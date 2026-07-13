@@ -145,8 +145,24 @@ class YoloTextZoneDetector:
 
     def __init__(self, repo: str = DEFAULT_YOLO_REPO, weights: str = DEFAULT_YOLO_WEIGHTS,
                  conf: float = 0.25, device: str | None = None):
+        # Silence OpenCV/libtiff "unknown field" warnings from proprietary camera
+        # TIFF tags (harmless: pixels read fine). OpenCV reads this env var when it
+        # is first imported, so set it BEFORE importing ultralytics (which pulls cv2).
+        import os
+
+        os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+
         from huggingface_hub import hf_hub_download
         from ultralytics import YOLO
+
+        # Quiet the "unauthenticated requests to the HF Hub" info line (harmless:
+        # the weights are public and cached after the first download).
+        try:
+            from huggingface_hub.utils import logging as _hf_logging
+
+            _hf_logging.set_verbosity_error()
+        except Exception:
+            pass
 
         weight_path = hf_hub_download(repo_id=repo, filename=weights)
         self.model = YOLO(weight_path)
