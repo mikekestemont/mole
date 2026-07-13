@@ -184,9 +184,9 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     # ONCE — recreating the inner bar each epoch is what breaks nested rendering.
     # Equal-width labels + a shared bar_format so the two bars align vertically.
     label_w = max(len("epochs"), len(f"epoch {epochs}/{epochs}"))
-    # Fixed {bar:24} width so the pipes align on both bars regardless of postfix
+    # Fixed {bar:36} width so the pipes align on both bars regardless of postfix
     # length (dynamic sizing would otherwise shrink the longer-postfix bar).
-    bar_fmt = ("{desc} {percentage:3.0f}%|{bar:24}| {n_fmt}/{total_fmt} "
+    bar_fmt = ("{desc} {percentage:3.0f}%|{bar:36}| {n_fmt}/{total_fmt} "
                "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
     epoch_bar = progress_bar(epochs, "epochs".rjust(label_w), unit="epoch", position=0,
                              initial=start_epoch, bar_format=bar_fmt)
