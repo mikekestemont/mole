@@ -262,19 +262,21 @@ def _pil_to_png_b64(img, box: int) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _pick_window_crops(image_path, img, window_size: int, n: int):
-    """Pick ``n`` random foreground window crops from across the page.
+def _pick_window_crops(image_path, img, window_size: int, n: int, bounds=None):
+    """Pick ``n`` random foreground window crops from within ``bounds`` (or the
+    whole page if ``bounds`` is ``None``).
 
     Each is a true training unit (a random ``window_size`` patch). Falls back to
-    the whole image if it is smaller than ``window_size`` / has no foreground
-    windows. Returns ``(crops, n_available_windows)``.
+    the region (or whole image) if it is smaller than ``window_size`` / has no
+    foreground windows. Returns ``(crops, n_available_windows)``.
     """
     from mole.data.patches import sample_windows
 
     wins = sample_windows(image_path, window_size=window_size, overlap=0.5,
-                          foreground_min=0.05)
+                          foreground_min=0.05, bounds=bounds)
     if not wins:
-        return [img] * n, 0
+        ref = img.crop(bounds) if bounds else img
+        return [ref] * n, 0
     chosen = [random.choice(wins) for _ in range(n)]
     crops = [img.crop((w.x, w.y, w.x + w.size, w.y + w.size)) for w in chosen]
     return crops, len(wins)
@@ -282,19 +284,21 @@ def _pick_window_crops(image_path, img, window_size: int, n: int):
 
 def augview(folder: str, output: str, n_images: int = 5, n_views: int = 5,
             presets: list[AugPreset | str] | None = None, seed: int = 0,
-            window_size: int = 512):
+            window_size: int = 512, zones_path: str | None = None,
+            use_zones: bool = True):
     """Write an HTML grid of ``n_images`` x ``n_views`` augmented crops per preset.
 
     Faithful to the training distribution: each view is a RANDOM ``window_size``
-    patch-window sampled from across the page (the true training unit), then
-    augmented — so you see both spatial (where on the page) and photometric
-    variety, exactly as an epoch draws samples. The same window sequence is
-    reused across presets so strengths stay comparable. The first column shows
-    the whole page for context. Shows the global (model-size) view.
+    patch-window sampled — restricted to the prep TEXT ZONE when a ``zones.json``
+    is present (auto-discovered in ``folder``, or given via ``zones_path``), so
+    windows never come from background / clutter. The same window sequence is
+    reused across presets so strengths stay comparable. The first column shows the
+    zone (or whole page). Shows the global (model-size) view.
 
     Cheap, CPU-only, seconds to run.
     """
     from PIL import Image, ImageFile
+    from mole.data.zones import find_zones, load_zones
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     random.seed(seed)
@@ -308,24 +312,36 @@ def augview(folder: str, output: str, n_images: int = 5, n_views: int = 5,
         raise FileNotFoundError(f"No images found in {folder!r}")
     files = files[:n_images]
     images = [Image.open(f).convert("RGB") for f in files]
+
+    # Zone manifest: restrict sampling to the text zone if available.
+    manifest = None
+    zp = zones_path or (find_zones(folder) if use_zones else None)
+    if zp:
+        manifest = load_zones(zp)
+    bounds_by_file = [manifest.bbox_for(f.name) if manifest else None for f in files]
+    zoned = manifest is not None
+
     # Pick the window sequence ONCE (same crops reused across presets for a fair
-    # comparison); each view is a different random window from across the page.
-    per_image = [_pick_window_crops(f, img, window_size, n_views)
-                 for f, img in zip(files, images)]
+    # comparison); each view is a different random window from within the zone.
+    per_image = [_pick_window_crops(f, img, window_size, n_views, bounds=b)
+                 for f, img, b in zip(files, images, bounds_by_file)]
 
     sections = []
     for preset in presets:
         cfg = resolve_config(preset)
         aug = MoleMultiCropAugmentation(cfg)
         rows = []
-        for f, img, (crops, n_avail) in zip(files, images, per_image):
-            cells = [f'<td class="orig"><img src="data:image/png;base64,{_pil_to_png_b64(img, cfg.model_size)}">'
-                     f'<div class="cap">{f.name}<br>{img.size[0]}×{img.size[1]} · {n_avail} windows</div></td>']
+        for f, img, b, (crops, n_avail) in zip(files, images, bounds_by_file, per_image):
+            ref = img.crop(b) if b else img
+            tag = "zone" if b else ("no zone" if zoned else "full page")
+            cells = [f'<td class="orig"><img src="data:image/png;base64,{_pil_to_png_b64(ref, cfg.model_size)}">'
+                     f'<div class="cap">{f.name}<br>{tag} · {n_avail} windows</div></td>']
             for crop in crops:
                 view = aug.global_transfo1(crop)
                 cells.append(f'<td><img src="data:image/png;base64,{_tensor_to_png_b64(view)}"></td>')
             rows.append("<tr>" + "".join(cells) + "</tr>")
-        headers = "<th>full page</th>" + "".join(f"<th>rand window {i+1}</th>" for i in range(n_views))
+        zlabel = "zone" if zoned else "full page (no zones.json — run `mole prep` first)"
+        headers = f"<th>{zlabel}</th>" + "".join(f"<th>rand window {i+1}</th>" for i in range(n_views))
         key = preset.value if isinstance(preset, AugPreset) else str(preset)
         sections.append(
             f'<h2>preset: {key}</h2>'

@@ -22,11 +22,10 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 # YOLO-gen class FAMILIES that constitute the MAIN text zone. Matching is by
-# family (the part before the first "_"), so "Text" covers {Text, Text_Main} and
-# "Initial" covers every initial subtype {Initial, Initial_Printed,
-# Initial_P_DropCapital, Initial_Ms_Simple/Decorated/Historiated, ...}.
-# Paratext (marginalia/headers), Decoration, Marks, Damage stay EXCLUDED.
-ZONE_FAMILIES: tuple[str, ...] = ("Text", "Initial")
+# family (the part before the first "_"), so "Text" covers {Text, Text_Main}.
+# Everything else — Initial (drop capitals), Paratext (marginalia/headers),
+# Decoration, Marks, Damage — stays EXCLUDED. Add a family here to include it.
+ZONE_FAMILIES: tuple[str, ...] = ("Text",)
 DEFAULT_YOLO_REPO = "magistermilitum/YOLO_manuscripts"
 DEFAULT_YOLO_WEIGHTS = "best.pt"
 
@@ -151,6 +150,7 @@ class YoloTextZoneDetector:
 
         weight_path = hf_hub_download(repo_id=repo, filename=weights)
         self.model = YOLO(weight_path)
+        self.model_id = f"{repo}:{weights}"
         self.conf = conf
         self.device = device
 

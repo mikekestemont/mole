@@ -95,17 +95,27 @@ Phase 4 (training) can proceed without it.
 
 - **Phase 3 text-zone detector (BUILT).** `mole prep` in `src/mole/prep/`:
   `detect.py` (pluggable `TextZoneDetector`: `HeuristicTextZoneDetector` ink-density
-  CV default-safe backend + `YoloTextZoneDetector`), `run.py` (`prep_folder` → crops +
-  records), `qc.py` (self-contained HTML contact sheet: original+overlays vs crop,
-  fallbacks flagged). CLI `mole prep IN OUT --method yolo|heuristic --padding --conf
-  --sample --qc`.
+  CV default-safe backend + `YoloTextZoneDetector`), `run.py` (`prep_folder`),
+  `qc.py` (self-contained HTML contact sheet: original+overlays vs crop, fallbacks
+  flagged). CLI `mole prep IN --method yolo|heuristic --padding --conf --sample --qc
+  [--write-crops DIR] [--zones-out PATH]`.
+  - **Preprocessing reuse = zone manifest, not re-cropped images (LOCKED design).**
+    prep runs the detector ONCE and writes `zones.json` into the dataset folder
+    (`src/mole/data/zones.py`: `ZoneManifest`/`ZoneEntry`, stamped with detector +
+    model + padding + families + per-detection boxes). Auto-discovered downstream like
+    `labels.csv`. `sample_windows(..., bounds=bbox)` restricts patch-windows to the
+    zone; augview auto-loads it (`--zones PATH` / `--no-zones`). Physical crops are
+    opt-in (`--write-crops`). Rationale: no image duplication, no re-running YOLO per
+    training iteration, padding/classes re-derivable from stored detections, and
+    IIIF-streaming-compatible (store coords, not pixels). This also fixed augview
+    sampling windows from page background/clutter on full pages.
   - **YOLO backend = `magistermilitum/YOLO_manuscripts`** ("YOLO-gen", Sergio Torres
     Aguilar) — YOLOv11x-OBB, **MIT**, plain `ultralytics` (opt-in `mole[detect]`),
     trained on e-NDP (Parisian registers 1326–1504) + CATMuS + HORAE. Main zone =
-    union of class FAMILIES `Text` (Text/Text_Main) + `Initial` (drop capitals &
-    decorated/historiated initials — they carry scribe signal); excludes `Paratext`
-    (marginalia), Decoration, Marks, Damage. Family match = label.split('_')[0], via
-    `ZONE_FAMILIES` in detect.py. OBB → boxes follow skew (deskew angle free later).
+    union of class family `Text` (Text/Text_Main) only; Initial/Paratext/Decoration/
+    Marks/Damage excluded (tried including Initial, reverted — main text alone cropped
+    better). Family match = label.split('_')[0], via `ZONE_FAMILIES` in detect.py.
+    OBB → boxes follow skew (deskew angle free later).
     https://huggingface.co/magistermilitum/YOLO_manuscripts
   - **Verified** on the 11 sample charters: loads + detects Text/Text_Main on every
     page (+ Initial on the decorated one), 16 s total incl. 118 MB download, CPU. Samples

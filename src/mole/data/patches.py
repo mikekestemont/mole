@@ -64,29 +64,36 @@ def _foreground_fraction(crop) -> float:
 
 
 def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,
-                   overlap: float = DEFAULT_OVERLAP,
-                   foreground_min: float = 0.0) -> list[Window]:
+                   overlap: float = DEFAULT_OVERLAP, foreground_min: float = 0.0,
+                   bounds: tuple[int, int, int, int] | None = None) -> list[Window]:
     """Return window crop locations for a single page image.
 
     Grid stride is ``round(window_size * (1 - overlap))``. Windows whose
     foreground fraction is below ``foreground_min`` are skipped (only evaluated
-    when ``foreground_min > 0``). If the page is smaller than ``window_size`` in
+    when ``foreground_min > 0``). If the region is smaller than ``window_size`` in
     a dimension, a single origin-anchored window is returned for that axis.
+
+    ``bounds`` restricts sampling to a ``(x0, y0, x1, y1)`` sub-region — the prep
+    text zone — so windows never land on background / margins / clutter.
     """
     if not 0.0 <= overlap < 1.0:
         raise ValueError("overlap must be in [0, 1)")
 
     img = load_rgb(image_path)
     w, h = img.size
+    x0, y0, x1, y1 = (0, 0, w, h) if bounds is None else bounds
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(w, x1), min(h, y1)
+    region_w, region_h = x1 - x0, y1 - y0
     stride = max(1, round(window_size * (1.0 - overlap)))
 
-    def axis_starts(extent: int) -> list[int]:
+    def axis_starts(origin: int, extent: int) -> list[int]:
         if extent <= window_size:
-            return [0]
-        starts = list(range(0, extent - window_size + 1, stride))
-        return starts or [0]
+            return [origin]
+        starts = list(range(origin, origin + extent - window_size + 1, stride))
+        return starts or [origin]
 
-    xs, ys = axis_starts(w), axis_starts(h)
+    xs, ys = axis_starts(x0, region_w), axis_starts(y0, region_h)
     windows: list[Window] = []
     for y in ys:
         for x in xs:
@@ -99,9 +106,9 @@ def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZ
 
 
 def iter_window_crops(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,
-                      overlap: float = DEFAULT_OVERLAP,
-                      foreground_min: float = 0.0) -> Iterator:
+                      overlap: float = DEFAULT_OVERLAP, foreground_min: float = 0.0,
+                      bounds: tuple[int, int, int, int] | None = None) -> Iterator:
     """Yield cropped PIL windows for a page (convenience over :func:`sample_windows`)."""
     img = load_rgb(image_path)
-    for win in sample_windows(image_path, window_size, overlap, foreground_min):
+    for win in sample_windows(image_path, window_size, overlap, foreground_min, bounds):
         yield img.crop((win.x, win.y, win.x + win.size, win.y + win.size))

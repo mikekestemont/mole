@@ -73,7 +73,8 @@ def build_contact_sheet(records, output_html: str | Path, detector_name: str = "
     rows = []
     for r in records:
         overlay = _render_overlay(r, box_width)
-        crop = Image.open(r.crop_path).convert("RGB") if r.crop_path else Image.open(r.path)
+        full = Image.open(r.path).convert("RGB")
+        crop = full.crop(r.zone) if r.zone else full  # crop on the fly from bbox
         cw, ch = crop.size
         crop_disp = crop.resize((crop_width, max(1, int(ch * crop_width / cw))))
 

@@ -59,27 +59,36 @@ def _main(
 @app.command()
 def prep(
     input_dir: Path = typer.Argument(..., help="Folder of page images to preprocess."),
-    output_dir: Path = typer.Argument(Path("prep"), help="Where cropped pages + QC are written."),
+    zones_out: Optional[Path] = typer.Option(None, help="zones.json path (default: <input_dir>/zones.json)."),
     method: str = typer.Option("yolo", help="Detector: 'yolo' (mole[detect]) or 'heuristic'."),
     padding: int = typer.Option(16, help="Padding (px) around the detected text zone."),
     conf: float = typer.Option(0.25, help="YOLO confidence threshold."),
     sample: Optional[int] = typer.Option(None, help="Process only a random N pages (quick QC)."),
     qc: Path = typer.Option(Path("outputs/prep_qc.html"), help="QC contact-sheet HTML path."),
+    write_crops: Optional[Path] = typer.Option(None, help="Also materialise cropped images into this folder (opt-in)."),
 ) -> None:
-    """Isolate the main handwritten text zone of each page and crop it (optional stage)."""
+    """Detect the main handwritten text zone of each page and store coordinates.
+
+    Writes a zones.json manifest (reused by augview/train/embed) into the dataset
+    folder; the detector runs once. Cropped images are opt-in via --write-crops.
+    """
     from mole.prep import prep_folder
 
     try:
-        records = prep_folder(input_dir, output_dir, method=method, padding=padding,
-                              sample=sample, qc_html=qc, conf=conf)
+        manifest, records = prep_folder(input_dir, zones_out=zones_out, method=method,
+                                        padding=padding, sample=sample, qc_html=qc,
+                                        conf=conf, write_crops=write_crops)
     except ImportError as e:
         console.print(f"[red]Missing dependency for method '{method}': {e}[/red]")
         console.print("[yellow]For the YOLO detector: pip install 'mole[detect]'[/yellow]")
         raise typer.Exit(code=1)
 
+    zpath = zones_out or (input_dir / "zones.json")
     n_fb = sum(1 for r in records if r.fell_back)
-    console.print(f"[green]✓ prepped {len(records)} pages → {output_dir}/images[/green]"
+    console.print(f"[green]✓ {len(records)} pages → zones stored in {zpath}[/green]"
                   + (f" [yellow]({n_fb} fell back to whole page)[/yellow]" if n_fb else ""))
+    if write_crops:
+        console.print(f"[green]✓ cropped images → {write_crops}[/green]")
     console.print(f"[green]✓ QC sheet → {qc}[/green]")
 
 
@@ -93,14 +102,21 @@ def augview(
     preset: Optional[AugPreset] = typer.Option(
         None, help="Preview one preset only (default: all three side by side)."),
     window_size: int = typer.Option(512, help="Patch-window size sampled before augmenting."),
+    zones: Optional[Path] = typer.Option(None, help="zones.json to restrict sampling (default: auto-discover in folder)."),
+    no_zones: bool = typer.Option(False, "--no-zones", help="Ignore any zones.json; sample the whole page."),
     seed: int = typer.Option(0, help="Random seed for reproducible grids."),
 ) -> None:
-    """Preview augmentation strength as an image grid (CPU-only, seconds)."""
+    """Preview augmentation strength as an image grid (CPU-only, seconds).
+
+    Restricts sampling to the prep text zone when a zones.json is found in the
+    folder (or given via --zones), so windows never come from background/clutter.
+    """
     from mole.data.augment import augview as _augview
 
     presets = [preset] if preset is not None else None
     out = _augview(str(folder), str(output), n_images=n_images, n_views=n_views,
-                   presets=presets, seed=seed, window_size=window_size)
+                   presets=presets, seed=seed, window_size=window_size,
+                   zones_path=str(zones) if zones else None, use_zones=not no_zones)
     console.print(f"[green]✓ wrote augmentation grid → {out}[/green]")
 
 
