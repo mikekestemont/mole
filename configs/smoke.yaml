@@ -1,0 +1,27 @@
+# Fast LOCAL sanity config — tiny model, tiny batch, few epochs, single process.
+# For verifying the pipeline / resume on a laptop (CPU/MPS) in seconds, NOT for
+# real training. Use configs/pretrain.yaml on the GPU server for that.
+#
+#   mole train configs/smoke.yaml --output-dir runs/smoke
+#   # Ctrl-C partway, then rerun the same line — it auto-resumes at the same step.
+
+data:
+  path: data/samples
+  window_size: 512
+  num_workers: 0            # no worker subprocesses (simpler/faster to start)
+
+aug:
+  preset: mild
+
+model:
+  arch: vit_tiny            # ~11M params vs vit_small's ~28M
+
+optim:
+  batch_size: 16            # many small steps instead of one huge one
+  warmup_epochs: 1
+
+train:
+  epochs: 3
+  fp16: true                # only actually used on CUDA
+  output_dir: runs/smoke
+  save_every_steps: 20

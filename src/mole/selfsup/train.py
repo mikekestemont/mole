@@ -64,17 +64,23 @@ def _rand_masks(batch: int, n_tokens: int, ratio: float, device) -> torch.Tensor
     return m
 
 
-def _build_loader(dataset, batch_size, num_workers, epoch, seed):
+def _build_loader(dataset, batch_size, num_workers, epoch, seed, pin_memory=False):
     g = torch.Generator()
     g.manual_seed(seed * 100003 + epoch)  # deterministic per-epoch order for resume
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g,
-                      num_workers=num_workers, pin_memory=True, drop_last=True)
+                      num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
 
 
 def train(config_path: str | Path, output_dir: str | Path | None = None,
           mode: Literal["scratch", "continual"] = "scratch",
           resume: str | Path | None = None, overrides: list[str] | None = None):
     """Run (or resume) AttMask pretraining. Auto-resumes if the run dir has a checkpoint."""
+    import warnings
+
+    # Cosmetic: we deliberately keep the classic weight_norm (checkpoint-format
+    # continuity with the original AttMask heads).
+    warnings.filterwarnings("ignore", message=r".*torch\.nn\.utils\.weight_norm.*deprecated.*")
+
     cfg = load_config(config_path, overrides)
     if output_dir:
         cfg["train"]["output_dir"] = str(output_dir)
@@ -169,7 +175,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
 
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
-        loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed)
+        loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
+                               pin_memory=(device.type == "cuda"))
         bar = track(loader, f"epoch {epoch + 1}/{epochs}", total=steps_per_epoch, unit="step")
         for i, (images, _) in enumerate(bar):
             if epoch == start_epoch and i < skip:

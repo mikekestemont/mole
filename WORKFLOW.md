@@ -76,11 +76,17 @@ per dataset so windows come from the text zone. Seamless step-level resume:
 Ctrl-C checkpoints cleanly; re-running auto-resumes from the run dir.
 
 ```bash
+# GPU server — real training (vit_small, batch 128):
 mole train configs/pretrain.yaml --output-dir runs/base_v1
 mole train configs/pretrain.yaml --output-dir runs/base_v1        # auto-resumes
 mole train configs/pretrain.yaml --set optim.lr=1e-4 --set train.epochs=50
-# quick smoke: --set model.arch=vit_tiny --set optim.batch_size=32 --set data.num_workers=0
+
+# Laptop (CPU/MPS) — fast pipeline/resume sanity check only (~seconds):
+mole train configs/smoke.yaml --output-dir runs/smoke
 ```
+
+> The production config is heavy (vit_small on ~768 image-forwards/step) — run it on
+> the GPU server, not a laptop. Use `configs/smoke.yaml` (vit_tiny, batch 16) locally.
 
 Artifacts in the run dir: `checkpoint.pth` (rolling), `checkpoint_epochNNNN.pth`,
 `manifest.json`, `config.json`, `log.txt`. `--mode continual` (replay) lands in
