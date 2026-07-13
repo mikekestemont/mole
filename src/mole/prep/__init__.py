@@ -18,9 +18,10 @@ from __future__ import annotations
 
 from mole.prep.detect import (Detection, HeuristicTextZoneDetector,
                               TextZoneDetector, YoloTextZoneDetector, get_detector)
-from mole.prep.run import PrepRecord, prep_folder
+from mole.prep.run import PrepRecord, prep_folder, qc_from_zones
 
 __all__ = [
     "Detection", "TextZoneDetector", "HeuristicTextZoneDetector",
     "YoloTextZoneDetector", "get_detector", "PrepRecord", "prep_folder",
+    "qc_from_zones",
 ]

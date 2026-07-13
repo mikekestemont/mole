@@ -41,6 +41,9 @@ mole --help
 
 Commands: `prep`, `augview`, `train`, `finetune`, `embed`, `eval`, `models`.
 
+See **[WORKFLOW.md](WORKFLOW.md)** for the recommended end-to-end pipeline and exact
+commands, and **[ARCHITECTURE.md](ARCHITECTURE.md)** for design/decisions/build state.
+
 ## Acknowledgements
 
 - **AttMask** — Kakogeorgiou et al., *What to Hide from Your Students:

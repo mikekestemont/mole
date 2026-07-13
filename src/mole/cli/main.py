@@ -66,13 +66,22 @@ def prep(
     sample: Optional[int] = typer.Option(None, help="Process only a random N pages (quick QC)."),
     qc: Path = typer.Option(Path("outputs/prep_qc.html"), help="QC contact-sheet HTML path."),
     write_crops: Optional[Path] = typer.Option(None, help="Also materialise cropped images into this folder (opt-in)."),
+    from_zones: bool = typer.Option(False, "--from-zones", help="Rebuild QC (+crops) from existing zones.json — no detector, no GPU."),
 ) -> None:
     """Detect the main handwritten text zone of each page and store coordinates.
 
     Writes a zones.json manifest (reused by augview/train/embed) into the dataset
     folder; the detector runs once. Cropped images are opt-in via --write-crops.
+    Use --from-zones to just re-view results from a stored manifest (fast, no GPU).
     """
-    from mole.prep import prep_folder
+    from mole.prep import prep_folder, qc_from_zones
+
+    if from_zones:
+        records = qc_from_zones(input_dir, zones_out=zones_out, qc_html=qc, write_crops=write_crops)
+        console.print(f"[green]✓ rebuilt QC for {len(records)} pages from zones.json → {qc}[/green]")
+        if write_crops:
+            console.print(f"[green]✓ cropped images → {write_crops}[/green]")
+        return
 
     try:
         manifest, records = prep_folder(input_dir, zones_out=zones_out, method=method,

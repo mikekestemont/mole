@@ -114,3 +114,47 @@ def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
     if qc_html:
         build_contact_sheet(records, qc_html, detector_name=det.name)
     return manifest, records
+
+
+def qc_from_zones(input_dir: str | Path, zones_out: str | Path | None = None,
+                  qc_html: str | Path = "outputs/prep_qc.html",
+                  write_crops: str | Path | None = None) -> list[PrepRecord]:
+    """Rebuild the QC sheet (and optionally crops) from an existing ``zones.json``.
+
+    Fast: reuses stored coordinates + detections, so it runs the detector NOT at
+    all — no GPU, no ``mole[detect]`` needed. Use this to re-view prep results, or
+    after hand-editing the manifest. (OBB rotation is not restored — overlay boxes
+    are axis-aligned in reuse mode.)
+    """
+    from mole.data.patches import load_rgb
+    from mole.data.zones import find_zones, load_zones
+    from mole.prep.qc import build_contact_sheet
+
+    input_dir = Path(input_dir)
+    zones_path = Path(zones_out) if zones_out else (find_zones(input_dir) or input_dir / ZONES_FILENAME)
+    if not Path(zones_path).is_file():
+        raise FileNotFoundError(f"No zones.json at {zones_path}. Run `mole prep {input_dir}` first.")
+    manifest = load_zones(zones_path)
+
+    crops_dir = Path(write_crops) if write_crops else None
+    if crops_dir:
+        crops_dir.mkdir(parents=True, exist_ok=True)
+
+    records: list[PrepRecord] = []
+    for name, entry in track(list(manifest.images.items()), "Rebuilding QC", unit="page"):
+        img_path = input_dir / name
+        if not img_path.is_file():
+            continue
+        dets = [Detection(bbox=tuple(d[2:6]), label=d[0], score=float(d[1]))
+                for d in entry.detections]
+        crop_path = None
+        if crops_dir:
+            box = tuple(entry.bbox) if entry.bbox else (0, 0, *entry.size)
+            crop_path = crops_dir / name
+            load_rgb(img_path).crop(box).save(crop_path)
+        records.append(PrepRecord(path=img_path, size=tuple(entry.size), detections=dets,
+                                  zone=tuple(entry.bbox) if entry.bbox else None,
+                                  fell_back=entry.fell_back, crop_path=crop_path))
+
+    build_contact_sheet(records, qc_html, detector_name=manifest.meta.get("detector", ""))
+    return records

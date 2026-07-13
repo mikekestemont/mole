@@ -2,6 +2,7 @@
 
 Living design + progress doc for the `mole` rewrite. Read this first when resuming
 a session. It records what is **locked**, what is **parked**, and how to continue.
+For the operational command-by-command pipeline, see `WORKFLOW.md`.
 
 MOLE = continual self-supervised handwriting embeddings for premodern documents,
 refactored from Tim Raven's adaptation of **AttMask** (Kakogeorgiou et al.),
