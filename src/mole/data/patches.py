@@ -63,28 +63,20 @@ def _foreground_fraction(crop) -> float:
     return float((arr < 0.9 * 255).mean())
 
 
-def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,
-                   overlap: float = DEFAULT_OVERLAP, foreground_min: float = 0.0,
-                   bounds: tuple[int, int, int, int] | None = None) -> list[Window]:
-    """Return window crop locations for a single page image.
+def window_coords(width: int, height: int, window_size: int = DEFAULT_WINDOW_SIZE,
+                  overlap: float = DEFAULT_OVERLAP,
+                  bounds: tuple[int, int, int, int] | None = None) -> list[Window]:
+    """Pure-geometry grid of window locations — no image IO.
 
-    Grid stride is ``round(window_size * (1 - overlap))``. Windows whose
-    foreground fraction is below ``foreground_min`` are skipped (only evaluated
-    when ``foreground_min > 0``). If the region is smaller than ``window_size`` in
-    a dimension, a single origin-anchored window is returned for that axis.
-
-    ``bounds`` restricts sampling to a ``(x0, y0, x1, y1)`` sub-region — the prep
-    text zone — so windows never land on background / margins / clutter.
+    Given only the image ``(width, height)`` (and optional ``bounds`` text zone),
+    return the sliding-grid window origins. Lets datasets precompute windows from
+    stored sizes (zones.json) without loading pixels.
     """
     if not 0.0 <= overlap < 1.0:
         raise ValueError("overlap must be in [0, 1)")
-
-    img = load_rgb(image_path)
-    w, h = img.size
-    x0, y0, x1, y1 = (0, 0, w, h) if bounds is None else bounds
+    x0, y0, x1, y1 = (0, 0, width, height) if bounds is None else bounds
     x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(w, x1), min(h, y1)
-    region_w, region_h = x1 - x0, y1 - y0
+    x1, y1 = min(width, x1), min(height, y1)
     stride = max(1, round(window_size * (1.0 - overlap)))
 
     def axis_starts(origin: int, extent: int) -> list[int]:
@@ -93,16 +85,27 @@ def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZ
         starts = list(range(origin, origin + extent - window_size + 1, stride))
         return starts or [origin]
 
-    xs, ys = axis_starts(x0, region_w), axis_starts(y0, region_h)
-    windows: list[Window] = []
-    for y in ys:
-        for x in xs:
-            if foreground_min > 0.0:
-                crop = img.crop((x, y, x + window_size, y + window_size))
-                if _foreground_fraction(crop) < foreground_min:
-                    continue
-            windows.append(Window(x, y, window_size))
-    return windows
+    xs, ys = axis_starts(x0, x1 - x0), axis_starts(y0, y1 - y0)
+    return [Window(x, y, window_size) for y in ys for x in xs]
+
+
+def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,
+                   overlap: float = DEFAULT_OVERLAP, foreground_min: float = 0.0,
+                   bounds: tuple[int, int, int, int] | None = None) -> list[Window]:
+    """Return window crop locations for a single page image.
+
+    Wraps :func:`window_coords` and, when ``foreground_min > 0``, loads the image
+    to drop windows whose foreground (ink) fraction is below the threshold.
+    ``bounds`` restricts sampling to the prep text zone.
+    """
+    img = load_rgb(image_path)
+    w, h = img.size
+    coords = window_coords(w, h, window_size, overlap, bounds)
+    if foreground_min <= 0.0:
+        return coords
+    return [win for win in coords
+            if _foreground_fraction(img.crop((win.x, win.y, win.x + win.size, win.y + win.size)))
+            >= foreground_min]
 
 
 def iter_window_crops(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,

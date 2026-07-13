@@ -1,0 +1,43 @@
+# MOLE base pretraining config (AttMask).
+#
+# Every field falls back to mole.config.DEFAULTS, so you only need to override
+# what differs. Override any leaf on the CLI too: `mole train configs/pretrain.yaml
+# --set optim.lr=1e-4 --set train.epochs=50`.
+#
+# Crop counts (global/local views) are NOT set here — they come from the
+# augmentation preset (aug.preset), the single source of truth.
+
+data:
+  path: data/samples        # dataset root (flat, or subfolders-as-datasets)
+  window_size: 512          # physical crop from the page (locked in Phase 2)
+  model_size: 224           # ViT input
+  overlap: 0.5              # window grid overlap; raise (~0.7) if sample-starved
+  use_zones: true           # restrict windows to prep text zones (zones.json)
+  num_workers: 8
+
+aug:
+  preset: mild              # mild | default | aggressive (locked: mild)
+
+model:
+  arch: vit_small           # vit_tiny for quick smoke tests
+  patch_size: 16
+  out_dim: 256
+  patch_out_dim: 256
+
+mask:
+  pred_shape: attmask_high  # attmask_high | attmask_hint | attmask_low | rand | block
+  pred_ratio: 0.3
+  masking_prob: 0.5
+
+optim:
+  optimizer: adamw
+  lr: 5.0e-4                # peak LR at reference batch 256 (auto-scaled by batch)
+  warmup_epochs: 10
+  batch_size: 128
+
+train:
+  epochs: 100
+  fp16: true
+  output_dir: runs/base
+  save_every_steps: 500     # periodic checkpoint for seamless resume
+  seed: 0
