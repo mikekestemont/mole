@@ -70,8 +70,10 @@ def build_contact_sheet(records, output_html: str | Path, detector_name: str = "
     """Write the QC contact sheet for a list of ``PrepRecord``."""
     from PIL import Image
 
+    from mole.progress import track
+
     rows = []
-    for r in records:
+    for r in track(records, "Building QC sheet", unit="page"):
         overlay = _render_overlay(r, box_width)
         full = Image.open(r.path).convert("RGB")
         crop = full.crop(r.zone) if r.zone else full  # crop on the fly from bbox

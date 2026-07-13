@@ -21,6 +21,7 @@ from mole.data.datasets import IMAGE_EXTENSIONS
 from mole.data.zones import ZONES_FILENAME, ZoneEntry, ZoneManifest, save_zones
 from mole.prep.detect import (Detection, TextZoneDetector, get_detector,
                               main_text_zone, ZONE_FAMILIES)
+from mole.progress import track
 
 
 @dataclass
@@ -77,7 +78,7 @@ def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
 
     records: list[PrepRecord] = []
     entries: dict[str, ZoneEntry] = {}
-    for f in files:
+    for f in track(files, "Detecting text zones", unit="page"):
         img = load_rgb(f)
         dets = det.detect(f)
         zone = main_text_zone(dets, zone_families, img.size, padding=padding)

@@ -299,6 +299,7 @@ def augview(folder: str, output: str, n_images: int = 5, n_views: int = 5,
     """
     from PIL import Image, ImageFile
     from mole.data.zones import find_zones, load_zones
+    from mole.progress import track
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     random.seed(seed)
@@ -324,10 +325,11 @@ def augview(folder: str, output: str, n_images: int = 5, n_views: int = 5,
     # Pick the window sequence ONCE (same crops reused across presets for a fair
     # comparison); each view is a different random window from within the zone.
     per_image = [_pick_window_crops(f, img, window_size, n_views, bounds=b)
-                 for f, img, b in zip(files, images, bounds_by_file)]
+                 for f, img, b in track(list(zip(files, images, bounds_by_file)),
+                                        "Sampling windows", unit="img")]
 
     sections = []
-    for preset in presets:
+    for preset in track(presets, "Rendering presets", unit="preset"):
         cfg = resolve_config(preset)
         aug = MoleMultiCropAugmentation(cfg)
         rows = []

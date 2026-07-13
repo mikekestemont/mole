@@ -47,6 +47,11 @@ CLI ≙ Python API (feature parity). Stubbed commands print a "Phase N" notice a
 exit 1, so `mole --help` renders fully from day one. Heavy imports (torch/kornia)
 are lazy inside functions so `import mole` / `mole --help` stay fast.
 
+**Progress convention (project-wide):** every long-running loop (prep, augview,
+training, embedding, k-means, eval) wraps its iterable in `mole.progress.track(...)`
+(tqdm-based). No bare loops for anything >~1–2 s; no direct `tqdm` calls — route
+through `track` so the look is consistent and the backend is swappable in one place.
+
 ---
 
 ## Locked design decisions
