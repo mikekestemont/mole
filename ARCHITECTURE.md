@@ -97,11 +97,20 @@ Phase 4 (training) can proceed without it.
   use). Direction: **classical CV heuristic** (Sauvola binarization + morphology +
   connected-components → text-block bbox; fast, CPU, no heavy deps) as the default,
   behind a **pluggable `TextZoneDetector` interface**; **optional opt-in YOLO
-  backend** (`mole[detect]` = ultralytics + doc-layout weights). Roadmap: heuristic
-  auto-labels → fine-tune a tiny in-domain YOLO. Not built yet; user is "open to
-  YOLO but doesn't want dep bloat". Two build options recorded: (a) wire YOLO now for
+  backend** (`mole[detect]` = ultralytics + weights). Roadmap: heuristic auto-labels
+  → fine-tune a tiny in-domain YOLO. Two build options recorded: (a) wire YOLO now for
   A/B on full pages, (b) heuristic + interface only, add YOLO when full-page scans
   exist to validate against.
+  - **YOLO backend model chosen (research done):** `magistermilitum/YOLO_manuscripts`
+    ("YOLO-gen", Sergio Torres Aguilar) — YOLOv11x-OBB, **MIT**, loads with plain
+    `ultralytics` (no custom code), trained on e-NDP (Parisian registers 1326–1504) +
+    CATMuS + HORAE, has a parent `Text` class → take Text boxes for the main-zone crop;
+    OBB gives a deskew angle for free. https://huggingface.co/magistermilitum/YOLO_manuscripts
+  - **Rejected:** kraken; YALTAi/PonteIneptique (Clérice, @polyneptique) — it's a Kraken
+    *adapter* (custom code, buggy) not a clean weights drop; its reusable asset is the
+    Segmonto dataset (HF `biglam/yalta_ai_segmonto_manuscript_dataset`, Zenodo 6814770)
+    for optional future fine-tuning. Bill Mattingly = Qwen VL *transcription*, not
+    detection — not applicable.
 - **Finetune method (Phase 7):** full finetune vs LoRA/adapter — present options then.
 - **Config schema (Phase 4):** field set intentionally not frozen yet.
 
