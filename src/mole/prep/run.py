@@ -14,7 +14,7 @@ from pathlib import Path
 
 from mole.data.datasets import IMAGE_EXTENSIONS
 from mole.prep.detect import (Detection, TextZoneDetector, get_detector,
-                              main_text_zone, YOLO_TEXT_CLASSES)
+                              main_text_zone, ZONE_FAMILIES)
 
 
 @dataclass
@@ -36,7 +36,7 @@ def _list_images(folder: Path) -> list[Path]:
 
 def prep_folder(input_dir: str | Path, output_dir: str | Path,
                 method: str = "yolo", padding: int = 16, sample: int | None = None,
-                text_classes: tuple[str, ...] = YOLO_TEXT_CLASSES,
+                zone_families: tuple[str, ...] = ZONE_FAMILIES,
                 qc_html: str | Path | None = None, seed: int = 0,
                 detector: TextZoneDetector | None = None, **detector_kwargs) -> list[PrepRecord]:
     """Detect + crop the main text zone for every page in ``input_dir``.
@@ -73,7 +73,7 @@ def prep_folder(input_dir: str | Path, output_dir: str | Path,
     for f in files:
         img = load_rgb(f)
         dets = det.detect(f)
-        zone = main_text_zone(dets, text_classes, img.size, padding=padding)
+        zone = main_text_zone(dets, zone_families, img.size, padding=padding)
         fell_back = zone is None
         crop_box = zone if zone is not None else (0, 0, img.size[0], img.size[1])
         crop = img.crop(crop_box)

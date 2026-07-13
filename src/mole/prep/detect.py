@@ -21,9 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-# YOLO-gen classes that constitute the MAIN text zone (exclude Paratext = marg\
-# inalia/headers, Decoration, etc. — the whole point is to isolate main text).
-YOLO_TEXT_CLASSES: tuple[str, ...] = ("Text", "Text_Main")
+# YOLO-gen class FAMILIES that constitute the MAIN text zone. Matching is by
+# family (the part before the first "_"), so "Text" covers {Text, Text_Main} and
+# "Initial" covers every initial subtype {Initial, Initial_Printed,
+# Initial_P_DropCapital, Initial_Ms_Simple/Decorated/Historiated, ...}.
+# Paratext (marginalia/headers), Decoration, Marks, Damage stay EXCLUDED.
+ZONE_FAMILIES: tuple[str, ...] = ("Text", "Initial")
 DEFAULT_YOLO_REPO = "magistermilitum/YOLO_manuscripts"
 DEFAULT_YOLO_WEIGHTS = "best.pt"
 
@@ -60,14 +63,19 @@ def union_bbox(dets: list[Detection]) -> BBox | None:
     return (x0, y0, x1, y1)
 
 
-def main_text_zone(dets: list[Detection], text_labels: tuple[str, ...],
-                   image_size: tuple[int, int], padding: int = 0) -> BBox | None:
-    """Union of text-class detections, padded and clipped to the image.
+def _family(label: str) -> str:
+    """Top-level class family, e.g. 'Text_Main' -> 'Text', 'Initial_P_DropCapital' -> 'Initial'."""
+    return label.split("_", 1)[0]
 
-    Returns ``None`` when no text-class region was found (caller decides whether
-    to fall back to the whole page).
+
+def main_text_zone(dets: list[Detection], families: tuple[str, ...] = ZONE_FAMILIES,
+                   image_size: tuple[int, int] = (0, 0), padding: int = 0) -> BBox | None:
+    """Union of detections whose class FAMILY is in ``families``, padded + clipped.
+
+    Returns ``None`` when no in-family region was found (caller decides whether to
+    fall back to the whole page).
     """
-    text = [d for d in dets if d.label in text_labels]
+    text = [d for d in dets if _family(d.label) in families]
     box = union_bbox(text)
     if box is None:
         return None

@@ -102,8 +102,10 @@ Phase 4 (training) can proceed without it.
   - **YOLO backend = `magistermilitum/YOLO_manuscripts`** ("YOLO-gen", Sergio Torres
     Aguilar) — YOLOv11x-OBB, **MIT**, plain `ultralytics` (opt-in `mole[detect]`),
     trained on e-NDP (Parisian registers 1326–1504) + CATMuS + HORAE. Main zone =
-    union of classes `Text` (0) + `Text_Main` (9); excludes `Paratext` (marginalia).
-    OBB → boxes follow skew (deskew angle available for free later).
+    union of class FAMILIES `Text` (Text/Text_Main) + `Initial` (drop capitals &
+    decorated/historiated initials — they carry scribe signal); excludes `Paratext`
+    (marginalia), Decoration, Marks, Damage. Family match = label.split('_')[0], via
+    `ZONE_FAMILIES` in detect.py. OBB → boxes follow skew (deskew angle free later).
     https://huggingface.co/magistermilitum/YOLO_manuscripts
   - **Verified** on the 11 sample charters: loads + detects Text/Text_Main on every
     page (+ Initial on the decorated one), 16 s total incl. 118 MB download, CPU. Samples
