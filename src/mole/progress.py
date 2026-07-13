@@ -51,15 +51,16 @@ def track(iterable: Iterable[T], description: str = "Working", *,
 
 def progress_bar(total: int | None = None, description: str = "Working", *, unit: str = "it",
                  position: int | None = None, leave: bool = True, initial: int = 0,
-                 disable: bool = False):
+                 disable: bool = False, bar_format: str | None = None):
     """A manually-updated progress bar (call ``.update(n)`` / ``.set_postfix(...)``).
 
     Use for loops that aren't a simple ``for x in track(iterable)`` — e.g. two
     fixed nested bars where the inner one is ``reset()`` each outer step (the
     reliable way to render stacked bars in a terminal; recreating the inner bar
-    each iteration breaks the nesting).
+    each iteration breaks the nesting). Pass ``bar_format`` with equal-width
+    ``{desc}`` fields to align stacked bars vertically.
     """
     from tqdm.auto import tqdm
 
     return tqdm(total=total, desc=description, unit=unit, position=position, leave=leave,
-                dynamic_ncols=True, initial=initial, disable=disable)
+                dynamic_ncols=True, initial=initial, disable=disable, bar_format=bar_format)

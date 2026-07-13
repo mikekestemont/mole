@@ -182,14 +182,20 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
     # steps within the current epoch (position 1, reset() each epoch). Both created
     # ONCE — recreating the inner bar each epoch is what breaks nested rendering.
-    epoch_bar = progress_bar(epochs, "epochs", unit="epoch", position=0, initial=start_epoch)
-    step_bar = progress_bar(steps_per_epoch, "steps", unit="step", position=1)
+    # Equal-width labels + a shared bar_format so the two bars align vertically.
+    label_w = max(len("epochs"), len(f"epoch {epochs}/{epochs}"))
+    bar_fmt = ("{desc} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+               "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
+    epoch_bar = progress_bar(epochs, "epochs".ljust(label_w), unit="epoch", position=0,
+                             initial=start_epoch, bar_format=bar_fmt)
+    step_bar = progress_bar(steps_per_epoch, "steps".ljust(label_w), unit="step", position=1,
+                            bar_format=bar_fmt)
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
                                pin_memory=(device.type == "cuda"))
         step_bar.reset(total=steps_per_epoch)
-        step_bar.set_description(f"epoch {epoch + 1}/{epochs}")
+        step_bar.set_description_str(f"epoch {epoch + 1}/{epochs}".ljust(label_w))
         if epoch == start_epoch and skip:
             step_bar.update(skip)  # already-done steps of a resumed epoch
         for i, (images, _) in enumerate(loader):
