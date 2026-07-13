@@ -78,7 +78,7 @@ across presets for fair comparison.
 | 0 Audit | ✅ done |
 | 1 Skeleton + env | ✅ done (`import mole`, `mole --help` verified) |
 | 2 Data + augmentations + `mole augview` | ✅ done (preset + window_size locked visually) |
-| 3 `mole prep` (text-zone detector) | ⏸ **PARKED** — decision open (see below) |
+| 3 `mole prep` (text-zone detector) | ✅ done — heuristic + YOLO backends, QC contact sheet |
 | 4 `mole train` (port + resume + RNG state) | ⬜ next candidate |
 | 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ⬜ |
 | 6 Lineage registry + `mole models` + eval | ⬜ |
@@ -93,24 +93,27 @@ Phase 4 (training) can proceed without it.
 
 ## Parked / open decisions
 
-- **Phase 3 text-zone detector (PARKED).** Kraken rejected (unstable, slow, poor GPU
-  use). Direction: **classical CV heuristic** (Sauvola binarization + morphology +
-  connected-components → text-block bbox; fast, CPU, no heavy deps) as the default,
-  behind a **pluggable `TextZoneDetector` interface**; **optional opt-in YOLO
-  backend** (`mole[detect]` = ultralytics + weights). Roadmap: heuristic auto-labels
-  → fine-tune a tiny in-domain YOLO. Two build options recorded: (a) wire YOLO now for
-  A/B on full pages, (b) heuristic + interface only, add YOLO when full-page scans
-  exist to validate against.
-  - **YOLO backend model chosen (research done):** `magistermilitum/YOLO_manuscripts`
-    ("YOLO-gen", Sergio Torres Aguilar) — YOLOv11x-OBB, **MIT**, loads with plain
-    `ultralytics` (no custom code), trained on e-NDP (Parisian registers 1326–1504) +
-    CATMuS + HORAE, has a parent `Text` class → take Text boxes for the main-zone crop;
-    OBB gives a deskew angle for free. https://huggingface.co/magistermilitum/YOLO_manuscripts
-  - **Rejected:** kraken; YALTAi/PonteIneptique (Clérice, @polyneptique) — it's a Kraken
-    *adapter* (custom code, buggy) not a clean weights drop; its reusable asset is the
-    Segmonto dataset (HF `biglam/yalta_ai_segmonto_manuscript_dataset`, Zenodo 6814770)
-    for optional future fine-tuning. Bill Mattingly = Qwen VL *transcription*, not
-    detection — not applicable.
+- **Phase 3 text-zone detector (BUILT).** `mole prep` in `src/mole/prep/`:
+  `detect.py` (pluggable `TextZoneDetector`: `HeuristicTextZoneDetector` ink-density
+  CV default-safe backend + `YoloTextZoneDetector`), `run.py` (`prep_folder` → crops +
+  records), `qc.py` (self-contained HTML contact sheet: original+overlays vs crop,
+  fallbacks flagged). CLI `mole prep IN OUT --method yolo|heuristic --padding --conf
+  --sample --qc`.
+  - **YOLO backend = `magistermilitum/YOLO_manuscripts`** ("YOLO-gen", Sergio Torres
+    Aguilar) — YOLOv11x-OBB, **MIT**, plain `ultralytics` (opt-in `mole[detect]`),
+    trained on e-NDP (Parisian registers 1326–1504) + CATMuS + HORAE. Main zone =
+    union of classes `Text` (0) + `Text_Main` (9); excludes `Paratext` (marginalia).
+    OBB → boxes follow skew (deskew angle available for free later).
+    https://huggingface.co/magistermilitum/YOLO_manuscripts
+  - **Verified** on the 11 sample charters: loads + detects Text/Text_Main on every
+    page (+ Initial on the decorated one), 16 s total incl. 118 MB download, CPU. Samples
+    are pre-cropped so zone ≈ whole strip — real value is on full pages. Weights `best.pt`
+    (118 MB) fetched once via `hf_hub_download`, cached.
+  - **Rejected:** kraken; YALTAi/PonteIneptique (Clérice, @polyneptique) — Kraken
+    *adapter* (custom code, buggy) not a clean weights drop; its Segmonto dataset
+    (HF `biglam/yalta_ai_segmonto_manuscript_dataset`, Zenodo 6814770) kept for optional
+    future fine-tuning. Bill Mattingly = Qwen VL *transcription*, not detection.
+  - **Roadmap:** heuristic/YOLO auto-labels → fine-tune a tiny in-domain YOLO if needed.
 - **Finetune method (Phase 7):** full finetune vs LoRA/adapter — present options then.
 - **Config schema (Phase 4):** field set intentionally not frozen yet.
 

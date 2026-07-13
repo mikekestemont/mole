@@ -219,16 +219,19 @@ __marimo__/
 
 # ---- MOLE project data & artifacts (keep large/binary things out of git) ----
 # NOTE: gitignore does not support inline comments — keep patterns on their own line.
+# Leading slash ANCHORS to repo root, so these do NOT match the src/mole/data and
+# src/mole/prep source packages (an unanchored `data/`/`prep/` matched them and
+# silently dropped the data layer from git — do not un-anchor these).
 # datasets: folders of images (+ optional labels.csv)
-data/
-# preprocessing output (alto/ + images/)
-prep/
+/data/
+# preprocessing output (crops + QC)
+/prep/
 # checkpoints + lineage registry
-models/
+/models/
 # training run dirs (checkpoints, logs, manifests)
-runs/
+/runs/
 # embeddings, augview grids, QC sheets
-outputs/
+/outputs/
 # checkpoints / embeddings
 *.pth
 *.npy

@@ -59,12 +59,28 @@ def _main(
 @app.command()
 def prep(
     input_dir: Path = typer.Argument(..., help="Folder of page images to preprocess."),
-    output_dir: Path = typer.Argument(..., help="Where cropped pages + ALTO are written."),
-    padding: int = typer.Option(0, help="Padding (px) around the detected text zone."),
-    sample: Optional[int] = typer.Option(None, help="QC only a random N pages."),
+    output_dir: Path = typer.Argument(Path("prep"), help="Where cropped pages + QC are written."),
+    method: str = typer.Option("yolo", help="Detector: 'yolo' (mole[detect]) or 'heuristic'."),
+    padding: int = typer.Option(16, help="Padding (px) around the detected text zone."),
+    conf: float = typer.Option(0.25, help="YOLO confidence threshold."),
+    sample: Optional[int] = typer.Option(None, help="Process only a random N pages (quick QC)."),
+    qc: Path = typer.Option(Path("outputs/prep_qc.html"), help="QC contact-sheet HTML path."),
 ) -> None:
-    """Isolate the main text zone of each page with kraken (optional stage)."""
-    _todo("prep", phase=3)
+    """Isolate the main handwritten text zone of each page and crop it (optional stage)."""
+    from mole.prep import prep_folder
+
+    try:
+        records = prep_folder(input_dir, output_dir, method=method, padding=padding,
+                              sample=sample, qc_html=qc, conf=conf)
+    except ImportError as e:
+        console.print(f"[red]Missing dependency for method '{method}': {e}[/red]")
+        console.print("[yellow]For the YOLO detector: pip install 'mole[detect]'[/yellow]")
+        raise typer.Exit(code=1)
+
+    n_fb = sum(1 for r in records if r.fell_back)
+    console.print(f"[green]✓ prepped {len(records)} pages → {output_dir}/images[/green]"
+                  + (f" [yellow]({n_fb} fell back to whole page)[/yellow]" if n_fb else ""))
+    console.print(f"[green]✓ QC sheet → {qc}[/green]")
 
 
 # ------------------------------------------------------------------------ augview
