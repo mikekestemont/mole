@@ -173,14 +173,17 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     it = start_step
     print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
 
+    # Two bars: outer = epochs (persists), inner = steps within the current epoch
+    # (clears each epoch). tqdm auto-nests when positions are left unset — do NOT
+    # hard-code position here or the bars overwrite each other in a real terminal.
     epoch_bar = track(range(start_epoch, epochs), "epochs", unit="epoch", total=epochs,
-                      initial=start_epoch, position=0)
+                      initial=start_epoch)
     for epoch in epoch_bar:
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
                                pin_memory=(device.type == "cuda"))
         bar = track(loader, f"epoch {epoch + 1}/{epochs}", total=steps_per_epoch, unit="step",
-                    position=1, leave=False)
+                    leave=False)
         for i, (images, _) in enumerate(bar):
             if epoch == start_epoch and i < skip:
                 continue
