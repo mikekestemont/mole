@@ -35,14 +35,22 @@ CUDA server for training.
 ```
 data/        loaders, dataset manifests + partial labels, patch-windows, augmentations, augview
 prep/        (PARKED) main-text-zone isolation + QC contact sheet
-selfsup/     AttMask pretraining, continual updates, finetuning   [stubs → Phase 4]
+selfsup/     AttMask pretraining (vit/head/attmask/wrapper/loss/dataset/train/checkpoint) [Phase 4 DONE]
 supervised/  triplet/metric + probes (SCAFFOLD ONLY, interfaces fixed early)
 embed/       pooling (mean/cls/vlad/patches), reproducible VLAD, extraction  [stubs → Phase 5]
 lineage/     model registry, versioning, provenance  [stubs → Phase 6]
 eval/        retrieval benchmark from partial labels  [stubs → Phase 6]
 cli/         typer entry points (one per command)
-config.py    YAML load + --set overrides (schema deferred to Phase 4)
+config.py    YAML load + --set overrides + config_hash (schema: data/aug/model/mask/optim/loss/train)
+progress.py  track(iterable) + progress_bar(total) — the loop-progress helpers
 ```
+
+Configs: `configs/pretrain.yaml` (GPU, vit_small/batch128) and `configs/smoke.yaml`
+(laptop sanity, vit_tiny/batch16, ~seconds). `mole train` is single-GPU-first
+(CUDA/MPS/CPU), AMP on CUDA, seamless STEP-LEVEL resume (all RNG states, Ctrl-C
+ckpt, auto-resume from the run dir, "already complete" guard), dual aligned
+progress bars. Two smoke-fixed bugs recorded in git log: iBOT-center buffer shape
+drift (relaxed buffer load) and RNG-state CPU/uint8 coercion on GPU resume.
 
 CLI ≙ Python API (feature parity). Stubbed commands print a "Phase N" notice and
 exit 1, so `mole --help` renders fully from day one. Heavy imports (torch/kornia)
@@ -86,7 +94,7 @@ across presets for fair comparison.
 | 2 Data + augmentations + `mole augview` | ✅ done (preset + window_size locked visually) |
 | 3 `mole prep` (text-zone detector) | ✅ done — heuristic + YOLO backends, QC contact sheet |
 | 4 `mole train` (port + resume + RNG state) | ✅ done — single-GPU-first, step-level resume, Ctrl-C ckpt |
-| 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ⬜ |
+| 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ⬜ **← NEXT** |
 | 6 Lineage registry + `mole models` + eval | ⬜ |
 | 7 Continual + finetune (replay shards, LoRA vs full = open) | ⬜ |
 | 8 Supervised scaffold → implementation | ⬜ |
@@ -94,6 +102,28 @@ across presets for fair comparison.
 
 **Data is already text-cropped**, so Phase 3 is optional for current material and
 Phase 4 (training) can proceed without it.
+
+### Resume here (next session) — Phase 5 `mole embed`
+
+Stubs live in `src/mole/embed/` (`extract.py`, `pooling.py` (`Pooling` enum:
+mean/cls/vlad/patches), `vlad.py`). Plan:
+- Load a checkpoint's **teacher** weights into the canonical `mole.selfsup.vit`
+  (do NOT reimplement a ViT — the original `extract_embeddings.py` did, delete that
+  pattern). Strip the `backbone.` prefix; drop `masked_embed`.
+- Sample zone-aware windows (reuse `PatchWindowDataset` / `sample_windows` + zones),
+  resize window→`model_size` (224) **deterministically** (Phase-2 decision: no raw
+  256 + pos-embed interpolation at inference).
+- Pooling: `mean` (default) over patch tokens, `cls`, `patches` (raw), `vlad`.
+- **VLAD fix (from Phase 0):** k-means with a **fixed configurable seed**; save the
+  fitted codebook with the run; bind it to the producing model id. The original had
+  no seed → non-reproducible.
+- Output `.npy`/parquet + sidecar mapping (image path → row) stamped with model id +
+  embed dim; warn if the output dir already holds a different model version. Optional
+  PCA-whitening flag.
+- Wire the `mole embed` CLI (currently prints the Phase-5 stub notice).
+
+Everything routes long loops through `mole.progress.track`. Test with:
+`mole embed <ckpt> data/samples outputs/emb.npy --pooling mean` on CPU/MPS.
 
 ---
 
