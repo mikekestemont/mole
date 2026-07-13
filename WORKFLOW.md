@@ -69,12 +69,22 @@ mole augview data/samples --output outputs/augview.html --n-images 6 --n-views 6
 
 Artifact: `outputs/augview.html`. Locked defaults: preset `mild`, window 512.
 
-## 5. `train` — self-supervised pretraining 🚧 (Phase 4)
+## 5. `train` — self-supervised pretraining ✅
+
+Single-GPU-first (CUDA / MPS / CPU), mixed precision on CUDA. Reads `zones.json`
+per dataset so windows come from the text zone. Seamless step-level resume:
+Ctrl-C checkpoints cleanly; re-running auto-resumes from the run dir.
 
 ```bash
-mole train config.yaml --output-dir runs/base_v1        # reads zones.json per dataset
-mole train config.yaml --mode continual --resume runs/base_v1
+mole train configs/pretrain.yaml --output-dir runs/base_v1
+mole train configs/pretrain.yaml --output-dir runs/base_v1        # auto-resumes
+mole train configs/pretrain.yaml --set optim.lr=1e-4 --set train.epochs=50
+# quick smoke: --set model.arch=vit_tiny --set optim.batch_size=32 --set data.num_workers=0
 ```
+
+Artifacts in the run dir: `checkpoint.pth` (rolling), `checkpoint_epochNNNN.pth`,
+`manifest.json`, `config.json`, `log.txt`. `--mode continual` (replay) lands in
+Phase 7; today it trains like scratch.
 
 ## 6. `embed` — extract embeddings 🚧 (Phase 5)
 

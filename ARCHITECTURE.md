@@ -85,7 +85,7 @@ across presets for fair comparison.
 | 1 Skeleton + env | ✅ done (`import mole`, `mole --help` verified) |
 | 2 Data + augmentations + `mole augview` | ✅ done (preset + window_size locked visually) |
 | 3 `mole prep` (text-zone detector) | ✅ done — heuristic + YOLO backends, QC contact sheet |
-| 4 `mole train` (port + resume + RNG state) | ⬜ next candidate |
+| 4 `mole train` (port + resume + RNG state) | ✅ done — single-GPU-first, step-level resume, Ctrl-C ckpt |
 | 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ⬜ |
 | 6 Lineage registry + `mole models` + eval | ⬜ |
 | 7 Continual + finetune (replay shards, LoRA vs full = open) | ⬜ |

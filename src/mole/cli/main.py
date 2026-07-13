@@ -133,13 +133,15 @@ def augview(
 @app.command()
 def train(
     config: Path = typer.Argument(..., help="YAML config file."),
-    output_dir: Optional[Path] = typer.Option(None, help="Run directory."),
-    mode: str = typer.Option("scratch", help="'scratch' or 'continual' (replay)."),
-    resume: Optional[Path] = typer.Option(None, help="Resume from a run directory."),
+    output_dir: Optional[Path] = typer.Option(None, help="Run directory (overrides config)."),
+    mode: str = typer.Option("scratch", help="'scratch' or 'continual' (replay: Phase 7)."),
+    resume: Optional[Path] = typer.Option(None, help="Resume from a checkpoint (auto if run dir has one)."),
     set_: list[str] = typer.Option([], "--set", help="Override a config leaf, e.g. optim.lr=1e-4."),
 ) -> None:
     """Pretrain (or continually update) the base model with AttMask."""
-    _todo("train", phase=4)
+    from mole.selfsup.train import train as _train
+
+    _train(config, output_dir=output_dir, mode=mode, resume=resume, overrides=list(set_))
 
 
 # ----------------------------------------------------------------------- finetune
