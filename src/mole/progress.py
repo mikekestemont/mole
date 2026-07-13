@@ -20,7 +20,7 @@ T = TypeVar("T")
 
 def track(iterable: Iterable[T], description: str = "Working", *,
           total: int | None = None, unit: str = "it", disable: bool = False,
-          leave: bool = False) -> Iterator[T]:
+          leave: bool = True) -> Iterator[T]:
     """Wrap ``iterable`` in a progress bar.
 
     Parameters
@@ -35,7 +35,8 @@ def track(iterable: Iterable[T], description: str = "Working", *,
     disable:
         Silence the bar (e.g. inside library calls / tests).
     leave:
-        Keep the finished bar on screen (default: clear it).
+        Keep the finished bar on screen so its final elapsed time / rate stays
+        visible (default). Set ``False`` to clear it on completion.
     """
     from tqdm.auto import tqdm
 
