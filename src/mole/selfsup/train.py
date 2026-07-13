@@ -173,11 +173,14 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     it = start_step
     print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
 
-    for epoch in range(start_epoch, epochs):
+    epoch_bar = track(range(start_epoch, epochs), "epochs", unit="epoch", total=epochs,
+                      initial=start_epoch, position=0)
+    for epoch in epoch_bar:
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
                                pin_memory=(device.type == "cuda"))
-        bar = track(loader, f"epoch {epoch + 1}/{epochs}", total=steps_per_epoch, unit="step")
+        bar = track(loader, f"epoch {epoch + 1}/{epochs}", total=steps_per_epoch, unit="step",
+                    position=1, leave=False)
         for i, (images, _) in enumerate(bar):
             if epoch == start_epoch and i < skip:
                 continue
@@ -250,6 +253,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                         ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg,
                         epoch_snapshot=snap)
+        epoch_bar.set_postfix(loss=f"{float(loss.item()):.3f}")
         with (run_dir / "log.txt").open("a") as f:
             f.write(json.dumps({"epoch": epoch, "step": it, "loss": float(loss.item())}) + "\n")
 
