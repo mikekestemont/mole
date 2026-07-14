@@ -100,8 +100,29 @@ sanity-check the source model before a long run.
 > the GPU server, not a laptop. Use `configs/smoke.yaml` (vit_tiny, batch 16) locally.
 
 Artifacts in the run dir: `checkpoint.pth` (rolling), `checkpoint_epochNNNN.pth`,
-`manifest.json`, `config.json`, `log.txt`. `--mode continual` (replay) lands in
-Phase 7; today it trains like scratch.
+`manifest.json`, `config.json`, `log.txt`, and TensorBoard `events.out.tfevents.*`.
+`--mode continual` (replay) lands in Phase 7; today it trains like scratch.
+
+### Monitoring with TensorBoard
+
+Training writes scalars into the run dir automatically: `loss/total`, `loss/cls`,
+`loss/patch`, and the `sched/*` schedules (lr, weight_decay, momentum_teacher). Watch
+them live — on the training machine, or locally after copying a run dir down:
+
+```bash
+tensorboard --logdir runs           # then open http://localhost:6006
+```
+
+Point `--logdir` at the parent (`runs`), not one run, so multiple runs overlay for
+comparison. On the remote GPU box, tunnel the port over your VPN/SSH session:
+
+```bash
+ssh -L 6006:localhost:6006 you@gpu-server   # then run tensorboard on the server
+```
+
+Cadence is `train.tb_every_steps` (default 10); disable entirely with
+`--set train.tensorboard=false`. There is **no early stopping** (per Raven's advice —
+the model keeps improving); just watch `loss/total` trend down over a long run.
 
 ## 6. `embed` — extract embeddings ✅ (Phase 5)
 

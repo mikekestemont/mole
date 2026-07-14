@@ -37,6 +37,24 @@ from mole.selfsup.wrapper import MultiCropWrapper, get_params_groups
 ATTMASK_MODES = ("attmask_high", "attmask_hint", "attmask_low")
 
 
+def _make_tb_writer(run_dir, enabled: bool):
+    """A TensorBoard SummaryWriter into the run dir, or None (never fatal).
+
+    Event files land directly in the run dir, so `tensorboard --logdir runs` lists
+    each run by its directory name. Missing tensorboard degrades to no-op logging.
+    """
+    if not enabled:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as e:  # tensorboard not installed / import error — keep training
+        print(f"[mole] TensorBoard logging off ({e}); `pip install tensorboard` to enable.")
+        return None
+    print(f"[mole] TensorBoard: writing scalars to {run_dir} "
+          f"(view with `tensorboard --logdir {Path(run_dir).parent}`)")
+    return SummaryWriter(log_dir=str(run_dir))
+
+
 def _pick_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -235,6 +253,9 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         return run_dir
     print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
 
+    tb = _make_tb_writer(run_dir, bool(cfg["train"].get("tensorboard", True)))
+    tb_every = max(1, int(cfg["train"].get("tb_every_steps", 10)))
+
     # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
     # steps within the current epoch (position 1, reset() each epoch). Both created
     # ONCE — recreating the inner bar each epoch is what breaks nested rendering.
@@ -315,6 +336,14 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
             step_bar.update(1)
             step_bar.set_postfix(loss=f"{loss.item():.3f}", lr=f"{lr_sched[it - 1]:.2e}")
 
+            if tb is not None and it % tb_every == 0:
+                tb.add_scalar("loss/total", loss.item(), it)
+                tb.add_scalar("loss/cls", float(all_loss["cls"]), it)
+                tb.add_scalar("loss/patch", float(all_loss["patch"]), it)
+                tb.add_scalar("sched/lr", lr_sched[it - 1], it)
+                tb.add_scalar("sched/weight_decay", wd_sched[it - 1], it)
+                tb.add_scalar("sched/momentum_teacher", mom_sched[it - 1], it)
+
             if it % int(cfg["train"]["save_every_steps"]) == 0:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
@@ -323,6 +352,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
                 step_bar.close()
                 epoch_bar.close()
+                if tb is not None:
+                    tb.close()
                 print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
                 return
 
@@ -338,6 +369,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
 
     step_bar.close()
     epoch_bar.close()
+    if tb is not None:
+        tb.close()
     print(f"[mole] done — {it} steps → {run_dir}/checkpoint.pth")
     return run_dir
 

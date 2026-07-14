@@ -84,6 +84,8 @@ DEFAULTS: dict[str, Any] = {
         "output_dir": "runs/base",
         "save_every_steps": 500,      # periodic checkpoint (seamless resume)
         "saveckp_epoch_freq": 10,     # keep a numbered checkpoint every N epochs
+        "tensorboard": True,          # write TensorBoard scalars into the run dir
+        "tb_every_steps": 10,         # scalar logging cadence (steps)
     },
 }
 
