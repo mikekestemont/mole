@@ -320,13 +320,15 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     if dist.is_distributed:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
-        # find_unused_parameters=False: validated on 2 GPUs that every parameter
-        # participates each step (the reducer reported no unused params), so we skip
-        # the extra per-iteration autograd-graph traversal. The masked global + local
-        # forwards both exercise the full backbone+head, so there is no param-skipping
-        # flow control that would need it.
+        # static_graph=True is REQUIRED here: each step runs TWO student forwards
+        # (masked globals, then unmasked locals) feeding ONE backward. DDP's default
+        # reducer assumes one-forward-per-backward and errors with "marked a variable
+        # ready only once" (backbone.masked_embed, used in the global forward). Our
+        # graph structure is identical every iteration, so static_graph is valid: DDP
+        # records the graph on iteration 1 and all-reduces once at backward's end.
+        # It also implies find_unused_parameters handling, so we don't set that.
         student_fwd = DDP(student, device_ids=[dist.local_rank], output_device=dist.local_rank,
-                          find_unused_parameters=False)
+                          static_graph=True)
     else:
         student_fwd = student
 
