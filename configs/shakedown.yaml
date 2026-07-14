@@ -1,0 +1,36 @@
+# Full-pipeline SHAKEDOWN on the GPU server — NOT real training.
+#
+# A few epochs on a SMALL sample of your real (already-cropped) corpus, to validate
+# the whole setup end to end before committing to the long run: warm-start from
+# Raven's checkpoint, data loading, TensorBoard scalars, the embedding projector,
+# checkpoint + seamless resume, and `mole embed` on the produced checkpoint.
+#
+#   mole train configs/shakedown.yaml \
+#       --init-from checkpoints/raven_checkpoint.pth \
+#       --set data.path=/data/mole/corpus_sample     # ~30-50 images is plenty
+#
+# Point data.path at a SMALL folder (a copy of a few dozen pages) so startup and
+# each epoch take seconds, not minutes — the dataset indexes every image at start.
+
+data:
+  path: data/samples          # OVERRIDE to a small sample of your corpus
+  window_size: 512
+  model_size: 224
+  overlap: 0.5
+  use_zones: true             # auto-uses zones.json if present; fine without one
+  num_workers: 4
+
+model:
+  arch: vit_small             # matches Raven; --init-from adopts the source arch anyway
+
+optim:
+  batch_size: 32              # small + fast; raise if VRAM allows
+  warmup_epochs: 1
+
+train:
+  epochs: 3
+  fp16: true                  # real (used) on CUDA
+  output_dir: runs/shakedown
+  save_every_steps: 25        # frequent checkpoints so resume is quick to test
+  tb_every_steps: 5
+  projector_every_epochs: 1   # log the projector every epoch to watch it move
