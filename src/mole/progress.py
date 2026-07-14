@@ -49,6 +49,18 @@ def track(iterable: Iterable[T], description: str = "Working", *,
                 leave=leave, dynamic_ncols=True, position=position, initial=initial)
 
 
+def write(message: str) -> None:
+    """Print a line without corrupting an active progress bar.
+
+    tqdm bars live on stderr and are redrawn continuously; a bare ``print`` in the
+    middle of a loop tears the bar. Route any in-loop status line through here
+    (tqdm's own ``write``) so it lands cleanly above the running bar.
+    """
+    from tqdm.auto import tqdm
+
+    tqdm.write(message)
+
+
 def progress_bar(total: int | None = None, description: str = "Working", *, unit: str = "it",
                  position: int | None = None, leave: bool = True, initial: int = 0,
                  disable: bool = False, bar_format: str | None = None):

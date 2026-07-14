@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from mole.config import config_hash, load_config
-from mole.progress import progress_bar
+from mole.progress import progress_bar, write as _progress_write
 from mole.selfsup._train_utils import (cancel_gradients_last_layer, clip_gradients,
                                        cosine_scheduler)
 from mole.selfsup.attmask import AttMask
@@ -62,14 +62,13 @@ def _maybe_log_projector(tb, teacher, dataset, device, cfg, step: int) -> None:
     try:
         from mole.selfsup.viz import log_document_projector
 
-        n = log_document_projector(tb, teacher, dataset, device, step,
-                                   max_images=int(cfg["train"].get("projector_max_images", 300)),
-                                   model_size=int(cfg["data"]["model_size"]))
-        if n:
-            print(f"[mole] projector: logged {n} document embeddings at step {step} "
-                  f"(TensorBoard → PROJECTOR tab)")
+        # Snapshots are visible in TensorBoard's PROJECTOR tab; no per-snapshot
+        # stdout line (it tore the live epoch/step tqdm bar mid-training).
+        log_document_projector(tb, teacher, dataset, device, step,
+                               max_images=int(cfg["train"].get("projector_max_images", 300)),
+                               model_size=int(cfg["data"]["model_size"]))
     except Exception as e:  # visualization must never interrupt training
-        print(f"[mole] projector logging skipped ({type(e).__name__}: {e})")
+        _progress_write(f"[mole] projector logging skipped ({type(e).__name__}: {e})")
 
 
 def _pick_device() -> torch.device:
