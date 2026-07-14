@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader
 
 from mole.config import config_hash, load_config
 from mole.progress import progress_bar, write as _progress_write
+from mole.selfsup import distributed as ddp
 from mole.selfsup._train_utils import (cancel_gradients_last_layer, clip_gradients,
                                        cosine_scheduler)
 from mole.selfsup.attmask import AttMask
@@ -99,7 +100,20 @@ def _rand_masks(batch: int, n_tokens: int, ratio: float, device) -> torch.Tensor
     return m
 
 
-def _build_loader(dataset, batch_size, num_workers, epoch, seed, pin_memory=False):
+def _build_loader(dataset, batch_size, num_workers, epoch, seed, pin_memory=False,
+                  world_size=1, rank=0):
+    """Per-epoch DataLoader. Single-proc: seeded shuffle (as before). Distributed:
+    a ``DistributedSampler`` partitions the data across ranks (``set_epoch`` for a
+    fresh shuffle each epoch); ``drop_last`` keeps the per-rank step count identical.
+    """
+    if world_size > 1:
+        from torch.utils.data.distributed import DistributedSampler
+
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank,
+                                     shuffle=True, seed=seed, drop_last=True)
+        sampler.set_epoch(epoch)
+        return DataLoader(dataset, batch_size=batch_size, sampler=sampler,
+                          num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
     g = torch.Generator()
     g.manual_seed(seed * 100003 + epoch)  # deterministic per-epoch order for resume
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=g,
@@ -177,15 +191,23 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     run_dir = Path(cfg["train"]["output_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    seed = int(cfg["train"]["seed"])
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    import random as _random
-    _random.seed(seed)
+    # Distributed setup: no-op / rank-0 world-size-1 unless launched under torchrun.
+    dist = ddp.setup()
+    device = dist.device
+    is_main = dist.is_main
 
-    device = _pick_device()
+    seed = int(cfg["train"]["seed"])
+    # Offset the seed by rank so each GPU sees different augmentation draws (the
+    # DistributedSampler already partitions *which* windows each rank gets).
+    torch.manual_seed(seed + dist.rank)
+    np.random.seed(seed + dist.rank)
+    import random as _random
+    _random.seed(seed + dist.rank)
+
     use_fp16 = bool(cfg["train"]["fp16"]) and device.type == "cuda"
-    print(f"[mole] device={device} fp16={use_fp16} mode={mode}")
+    if is_main:
+        world = f" world_size={dist.world_size}" if dist.is_distributed else ""
+        print(f"[mole] device={device} fp16={use_fp16} mode={mode}{world}")
 
     # ---- warm-start peek (adopt source architecture before building the model) ----
     resume_ckpt = Path(resume) if (resume and Path(resume).is_file()) else find_resume(run_dir)
@@ -262,10 +284,16 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     fp16_scaler = torch.amp.GradScaler("cuda") if use_fp16 else None
 
     epochs = int(cfg["train"]["epochs"])
-    steps_per_epoch = len(dataset) // o["batch_size"]
+    # Effective batch spans all ranks (each does one local batch per optimizer step);
+    # both the step count and the linear LR scaling use it, so a run's dynamics are
+    # defined by world_size*batch_size, not the per-GPU batch alone.
+    eff_batch = o["batch_size"] * dist.world_size
+    steps_per_epoch = len(dataset) // eff_batch
     if steps_per_epoch == 0:
-        raise ValueError(f"batch_size {o['batch_size']} > windows {len(dataset)}; lower optim.batch_size.")
-    lr_peak = o["lr"] * o["batch_size"] / 256.0
+        raise ValueError(f"effective batch {eff_batch} (batch_size {o['batch_size']} × "
+                         f"world_size {dist.world_size}) > windows {len(dataset)}; "
+                         f"lower optim.batch_size or use fewer GPUs.")
+    lr_peak = o["lr"] * eff_batch / 256.0
     lr_sched = cosine_scheduler(lr_peak, o["min_lr"], epochs, steps_per_epoch, o["warmup_epochs"])
     wd_sched = cosine_scheduler(o["weight_decay"], o["weight_decay_end"], epochs, steps_per_epoch)
     mom_sched = cosine_scheduler(m["momentum_teacher"], 1, epochs, steps_per_epoch)
@@ -276,10 +304,26 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     if resume_path and Path(resume_path).is_file():
         start_step = load_checkpoint(resume_path, student=student, teacher=teacher, optimizer=optimizer,
                                      ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, map_location=device)
-        print(f"[mole] resumed from {resume_path} at step {start_step}")
+        if is_main:
+            print(f"[mole] resumed from {resume_path} at step {start_step}")
     elif warm is not None:
         _apply_warmstart(student, teacher, warm)
-        print(f"[mole] init-from: starting a fresh run at step 0 from {init_from}")
+        if is_main:
+            print(f"[mole] init-from: starting a fresh run at step 0 from {init_from}")
+
+    # ---- wrap student for distributed forward (teacher stays unwrapped: EMA-only) ----
+    # Only the two forward CALLS below go through this wrapper (gradient all-reduce
+    # fires on backward). EMA, gradient clipping, and checkpoint save/load keep
+    # using the unwrapped `student`, so checkpoint format is world-size independent
+    # and 1-GPU / N-GPU checkpoints interchange. Wrapped AFTER load so rank-0's
+    # weights broadcast to all ranks at construction.
+    if dist.is_distributed:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+
+        student_fwd = DDP(student, device_ids=[dist.local_rank], output_device=dist.local_rank,
+                          find_unused_parameters=True)
+    else:
+        student_fwd = student
 
     # Provenance recorded in the manifest must reflect what ACTUALLY happened: the
     # source only when a fresh warm-start was applied, otherwise the value carried
@@ -291,7 +335,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         manifest_init = _prior_init_from(run_dir)
     else:
         manifest_init = None
-    _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=manifest_init)
+    if is_main:
+        _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=manifest_init)
 
     # ---- Ctrl-C: checkpoint then exit cleanly ----
     state = {"stop": False}
@@ -304,18 +349,26 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     it = start_step
     total_steps = epochs * steps_per_epoch
     if start_step >= total_steps:
-        print(f"[mole] run already complete: {start_step}/{total_steps} steps "
-              f"({epochs} epochs). Nothing to do — raise train.epochs "
-              f"(e.g. --set train.epochs={epochs * 2}) or use a fresh --output-dir.")
+        if is_main:
+            print(f"[mole] run already complete: {start_step}/{total_steps} steps "
+                  f"({epochs} epochs). Nothing to do — raise train.epochs "
+                  f"(e.g. --set train.epochs={epochs * 2}) or use a fresh --output-dir.")
+        ddp.cleanup()
         return run_dir
-    print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps (start epoch {start_epoch}, step {it})")
+    if is_main:
+        print(f"[mole] training {epochs} epochs × {steps_per_epoch} steps "
+              f"(start epoch {start_epoch}, step {it})")
 
-    tb = _make_tb_writer(run_dir, bool(cfg["train"].get("tensorboard", True)))
+    # TensorBoard, the projector, and both progress bars live on rank 0 only; on
+    # other ranks tb is None and the bars are disabled (their close()/add_scalar
+    # call sites already guard on that), so no extra rank checks are needed below.
+    tb = _make_tb_writer(run_dir, bool(cfg["train"].get("tensorboard", True))) if is_main else None
     tb_every = max(1, int(cfg["train"].get("tb_every_steps", 10)))
     proj_every = max(1, int(cfg["train"].get("projector_every_epochs", 5)))
     # Initial snapshot: the starting structure (e.g. straight from a warm-started
     # backbone) so you can watch it evolve from step 0.
-    _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
+    if is_main:
+        _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
 
     # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
     # steps within the current epoch (position 1, reset() each epoch). Both created
@@ -327,13 +380,14 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     bar_fmt = ("{desc} {percentage:3.0f}%|{bar:72}| {n_fmt}/{total_fmt} "
                "[{elapsed}<{remaining}, {rate_fmt}{postfix}]")
     epoch_bar = progress_bar(epochs, "epochs".rjust(label_w), unit="epoch", position=0,
-                             initial=start_epoch, bar_format=bar_fmt)
+                             initial=start_epoch, bar_format=bar_fmt, disable=not is_main)
     step_bar = progress_bar(steps_per_epoch, "steps".rjust(label_w), unit="step", position=1,
-                            bar_format=bar_fmt)
+                            bar_format=bar_fmt, disable=not is_main)
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
-                               pin_memory=(device.type == "cuda"))
+                               pin_memory=(device.type == "cuda"),
+                               world_size=dist.world_size, rank=dist.rank)
         step_bar.reset(total=steps_per_epoch)
         step_bar.set_description_str(f"epoch {epoch + 1}/{epochs}".rjust(label_w))
         if epoch == start_epoch and skip:
@@ -363,9 +417,9 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                 else:
                     raise NotImplementedError(f"pred_shape={pred_shape!r} not supported (use attmask_*/rand)")
 
-                student_output = student(globals_, mask=masks)
+                student_output = student_fwd(globals_, mask=masks)
                 student.backbone.masked_im_modeling = False
-                student_local_cls = student(locals_)[0] if locals_ else None
+                student_local_cls = student_fwd(locals_)[0] if locals_ else None
                 student.backbone.masked_im_modeling = m["use_masked_im_modeling"]
 
                 all_loss = ibot_loss(student_output, teacher_output, student_local_cls, masks, epoch)
@@ -376,13 +430,14 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                 epoch_bar.close()
                 if tb is not None:
                     tb.close()
-                print(f"\n[mole] ERROR: loss became {loss.item()} at step {it} — training "
-                      f"diverged; nothing saved.\n"
-                      f"        likely causes:\n"
-                      f"        • Apple MPS numerical instability — train on a CUDA GPU, not MPS\n"
-                      f"        • learning rate too high — lower it (e.g. --set optim.lr=1e-4)\n"
-                      f"        • resuming an already-diverged checkpoint — start fresh with a "
-                      f"new --output-dir (delete the old run dir)")
+                if is_main:
+                    print(f"\n[mole] ERROR: loss became {loss.item()} at step {it} — training "
+                          f"diverged; nothing saved.\n"
+                          f"        likely causes:\n"
+                          f"        • Apple MPS numerical instability — train on a CUDA GPU, not MPS\n"
+                          f"        • learning rate too high — lower it (e.g. --set optim.lr=1e-4)\n"
+                          f"        • resuming an already-diverged checkpoint — start fresh with a "
+                          f"new --output-dir (delete the old run dir)")
                 raise SystemExit(1)
 
             optimizer.zero_grad()
@@ -416,36 +471,42 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                 tb.add_scalar("sched/weight_decay", wd_sched[it - 1], it)
                 tb.add_scalar("sched/momentum_teacher", mom_sched[it - 1], it)
 
-            if it % int(cfg["train"]["save_every_steps"]) == 0:
+            if is_main and it % int(cfg["train"]["save_every_steps"]) == 0:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
             if state["stop"]:
-                save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
-                                ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
-                step_bar.close()
-                epoch_bar.close()
-                if tb is not None:
-                    tb.close()
-                print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
+                if is_main:
+                    save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
+                                    ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
+                    step_bar.close()
+                    epoch_bar.close()
+                    if tb is not None:
+                        tb.close()
+                    print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
+                ddp.barrier()   # all ranks stop together before tearing down the group
+                ddp.cleanup()
                 return
 
-        snap = epoch if (cfg["train"]["saveckp_epoch_freq"] and epoch
-                         and epoch % cfg["train"]["saveckp_epoch_freq"] == 0) else None
-        save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
-                        ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg,
-                        epoch_snapshot=snap)
-        epoch_bar.update(1)
-        epoch_bar.set_postfix(loss=f"{float(loss.item()):.3f}")
-        with (run_dir / "log.txt").open("a") as f:
-            f.write(json.dumps({"epoch": epoch, "step": it, "loss": float(loss.item())}) + "\n")
-        if (epoch + 1) % proj_every == 0:
-            _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
+        if is_main:
+            snap = epoch if (cfg["train"]["saveckp_epoch_freq"] and epoch
+                             and epoch % cfg["train"]["saveckp_epoch_freq"] == 0) else None
+            save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
+                            ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg,
+                            epoch_snapshot=snap)
+            epoch_bar.update(1)
+            epoch_bar.set_postfix(loss=f"{float(loss.item()):.3f}")
+            with (run_dir / "log.txt").open("a") as f:
+                f.write(json.dumps({"epoch": epoch, "step": it, "loss": float(loss.item())}) + "\n")
+            if (epoch + 1) % proj_every == 0:
+                _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
 
     step_bar.close()
     epoch_bar.close()
     if tb is not None:
         tb.close()
-    print(f"[mole] done — {it} steps → {run_dir}/checkpoint.pth")
+    if is_main:
+        print(f"[mole] done — {it} steps → {run_dir}/checkpoint.pth")
+    ddp.cleanup()
     return run_dir
 
 
