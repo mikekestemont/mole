@@ -20,7 +20,7 @@ data:
   model_size: 224
   overlap: 0.5              # ~16.8k windows over 470 pages; raise toward 0.7 if sample-starved
   use_zones: true           # auto-uses zones.json if present; harmless without one
-  num_workers: 8
+  num_workers: 6           # match the box's core count (avoids the >cores dataloader warning)
 
 aug:
   preset: mild              # locked training strength
