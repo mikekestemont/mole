@@ -82,12 +82,19 @@ def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0,
                       perplexity=perplexity).fit_transform(pre)
         return coords, f"tsne{tag}"
     if method == "umap":
+        import warnings
+
         try:
             import umap
         except ImportError as e:
             raise ImportError("method='umap' needs umap-learn: pip install 'mole[viz]' "
                               "(or use --method tsne / pca)") from e
-        return umap.UMAP(n_components=2, random_state=seed).fit_transform(pre), f"umap{tag}"
+        with warnings.catch_warnings():
+            # a fixed random_state makes UMAP single-threaded (for reproducibility);
+            # its "n_jobs overridden" notice is expected and harmless — silence it.
+            warnings.filterwarnings("ignore", message=r".*n_jobs value.*overridden.*")
+            coords = umap.UMAP(n_components=2, random_state=seed).fit_transform(pre)
+        return coords, f"umap{tag}"
     raise ValueError(f"unknown method {method!r} (pca|tsne|umap|auto)")
 
 
