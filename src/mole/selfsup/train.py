@@ -320,8 +320,13 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     if dist.is_distributed:
         from torch.nn.parallel import DistributedDataParallel as DDP
 
+        # find_unused_parameters=False: validated on 2 GPUs that every parameter
+        # participates each step (the reducer reported no unused params), so we skip
+        # the extra per-iteration autograd-graph traversal. The masked global + local
+        # forwards both exercise the full backbone+head, so there is no param-skipping
+        # flow control that would need it.
         student_fwd = DDP(student, device_ids=[dist.local_rank], output_device=dist.local_rank,
-                          find_unused_parameters=True)
+                          find_unused_parameters=False)
     else:
         student_fwd = student
 
