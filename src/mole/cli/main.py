@@ -163,10 +163,19 @@ def embed(
     input_dir: Path = typer.Argument(..., help="Folder of images to embed."),
     output: Path = typer.Argument(..., help="Output .npy/.parquet path."),
     pooling: Pooling = typer.Option(Pooling.MEAN, help="Pooling strategy."),
-    whiten: bool = typer.Option(False, help="Apply PCA-whitening."),
+    whiten: bool = typer.Option(False, help="Apply PCA-whitening (fixed-vector poolings)."),
+    batch_size: int = typer.Option(32, help="Windows per forward pass."),
+    vlad_clusters: int = typer.Option(64, help="VLAD codebook size (pooling=vlad)."),
+    seed: int = typer.Option(0, help="VLAD k-means seed (reproducible codebook)."),
+    device: Optional[str] = typer.Option(None, help="Force device (cuda/mps/cpu); default auto."),
+    set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping."""
-    _todo("embed", phase=5)
+    from mole.embed import embed as _embed
+
+    _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
+           overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
+           seed=seed, device=device)
 
 
 # --------------------------------------------------------------------------- eval

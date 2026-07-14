@@ -92,10 +92,23 @@ Artifacts in the run dir: `checkpoint.pth` (rolling), `checkpoint_epochNNNN.pth`
 `manifest.json`, `config.json`, `log.txt`. `--mode continual` (replay) lands in
 Phase 7; today it trains like scratch.
 
-## 6. `embed` — extract embeddings 🚧 (Phase 5)
+## 6. `embed` — extract embeddings ✅ (Phase 5)
+
+Loads the checkpoint's teacher ViT, samples zone-aware windows, resizes them
+deterministically to `model_size`, pools, and writes `.npy` (or `.parquet`) plus a
+lineage-stamped `<out>.mapping.json` sidecar. CPU/MPS/CUDA (auto).
 
 ```bash
+# mean over patch tokens (default), L2-normalised page vectors
 mole embed runs/base_v1/checkpoint.pth data/samples outputs/emb.npy --pooling mean
+
+# other poolings; vlad saves a reproducible <out>.codebook.npy bound to the model id
+mole embed <ckpt> data/samples outputs/emb.npy --pooling cls
+mole embed <ckpt> data/samples outputs/vlad.npy --pooling vlad --vlad-clusters 64 --seed 0
+mole embed <ckpt> data/samples outputs/patches.npy --pooling patches   # raw per-patch rows
+
+# optional PCA-whitening; force device; override embed geometry
+mole embed <ckpt> data/samples outputs/emb.npy --whiten --device cpu --set window_size=384
 ```
 
 ## 7. `eval` / `models` 🚧 (Phase 6)

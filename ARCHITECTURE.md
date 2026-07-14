@@ -37,7 +37,7 @@ data/        loaders, dataset manifests + partial labels, patch-windows, augment
 prep/        (PARKED) main-text-zone isolation + QC contact sheet
 selfsup/     AttMask pretraining (vit/head/attmask/wrapper/loss/dataset/train/checkpoint) [Phase 4 DONE]
 supervised/  triplet/metric + probes (SCAFFOLD ONLY, interfaces fixed early)
-embed/       pooling (mean/cls/vlad/patches), reproducible VLAD, extraction  [stubs → Phase 5]
+embed/       pooling (mean/cls/vlad/patches), reproducible VLAD, extraction  [Phase 5 DONE]
 lineage/     model registry, versioning, provenance  [stubs → Phase 6]
 eval/        retrieval benchmark from partial labels  [stubs → Phase 6]
 cli/         typer entry points (one per command)
@@ -94,8 +94,8 @@ across presets for fair comparison.
 | 2 Data + augmentations + `mole augview` | ✅ done (preset + window_size locked visually) |
 | 3 `mole prep` (text-zone detector) | ✅ done — heuristic + YOLO backends, QC contact sheet |
 | 4 `mole train` (port + resume + RNG state) | ✅ done — single-GPU-first, step-level resume, Ctrl-C ckpt |
-| 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ⬜ **← NEXT** |
-| 6 Lineage registry + `mole models` + eval | ⬜ |
+| 5 `mole embed` (mean/cls/patches; VLAD w/ fixed seed) | ✅ done — teacher-ViT load, deterministic resize, 4 poolings, reproducible VLAD, lineage-stamped sidecar |
+| 6 Lineage registry + `mole models` + eval | ⬜ **← NEXT** |
 | 7 Continual + finetune (replay shards, LoRA vs full = open) | ⬜ |
 | 8 Supervised scaffold → implementation | ⬜ |
 | 9 README + config docs | ⬜ |
@@ -103,27 +103,40 @@ across presets for fair comparison.
 **Data is already text-cropped**, so Phase 3 is optional for current material and
 Phase 4 (training) can proceed without it.
 
-### Resume here (next session) — Phase 5 `mole embed`
+### Phase 5 `mole embed` — BUILT (how it works)
 
-Stubs live in `src/mole/embed/` (`extract.py`, `pooling.py` (`Pooling` enum:
-mean/cls/vlad/patches), `vlad.py`). Plan:
-- Load a checkpoint's **teacher** weights into the canonical `mole.selfsup.vit`
-  (do NOT reimplement a ViT — the original `extract_embeddings.py` did, delete that
-  pattern). Strip the `backbone.` prefix; drop `masked_embed`.
-- Sample zone-aware windows (reuse `PatchWindowDataset` / `sample_windows` + zones),
-  resize window→`model_size` (224) **deterministically** (Phase-2 decision: no raw
-  256 + pos-embed interpolation at inference).
-- Pooling: `mean` (default) over patch tokens, `cls`, `patches` (raw), `vlad`.
-- **VLAD fix (from Phase 0):** k-means with a **fixed configurable seed**; save the
-  fitted codebook with the run; bind it to the producing model id. The original had
-  no seed → non-reproducible.
-- Output `.npy`/parquet + sidecar mapping (image path → row) stamped with model id +
-  embed dim; warn if the output dir already holds a different model version. Optional
-  PCA-whitening flag.
-- Wire the `mole embed` CLI (currently prints the Phase-5 stub notice).
+`src/mole/embed/`: `extract.py` (driver), `pooling.py` (`Pooling` enum +
+`pool_window`/`patch_descriptors`), `vlad.py` (reproducible codebook + encode).
+- `load_backbone(ckpt)` loads the checkpoint's **teacher** into the canonical
+  `mole.selfsup.vit` (never a re-implemented ViT). `_teacher_backbone_state` strips
+  the MultiCropWrapper `backbone.` prefix and drops the iBOT `head.`/`fc.` Identities;
+  `masked_embed` is tolerated-if-absent. `strict=False` load, hard-errors on any real
+  missing weight. Returns `(model, meta)`; `meta.model_id = f"{arch}@{config_hash[:8]}+step{N}"`.
+- `_page_index` mirrors `PatchWindowDataset` (auto-discovers `zones.json`, windows
+  from image sizes only). `_build_transform` = deterministic `Resize((model_size),BICUBIC)`
+  + `ToTensor` (no ImageNet normalise — matches training's tensor contract; NO random
+  crop, NO raw-256 pos-embed interpolation — Phase-2 decision).
+- Pooling: `mean` (default, patch-token mean per window → mean over windows, L2'd),
+  `cls` (class token(s) flattened), `patches` (raw per-patch descriptors, one output
+  row per descriptor), `vlad`. VLAD fits ONE seeded k-means codebook over all page
+  descriptors (`sklearn` if present, else a seeded numpy k-means++ fallback — both
+  reproducible, verified bit-identical across runs), encodes per page, saves the
+  codebook as `<out>.codebook.npy`.
+- Output `.npy` (or `.parquet` via pandas) + sidecar `<out>.mapping.json` stamped with
+  `model_id`/`embed_dim`/rows. `_warn_on_version_mismatch` warns if the output dir
+  already holds a sidecar from a different model. Optional `--whiten` (PCA, transductive).
+- CLI wired: `mole embed <ckpt> <in> <out> --pooling mean|cls|patches|vlad [--whiten]
+  [--batch-size N] [--vlad-clusters K] [--seed S] [--device ...] [--set window_size=..]`.
+- **Verified** on CPU with `runs/smoke` (vit_tiny) + `runs/base_v1` (vit_small): all
+  four poolings produce correct shapes, VLAD reproducible, version warning fires.
 
-Everything routes long loops through `mole.progress.track`. Test with:
-`mole embed <ckpt> data/samples outputs/emb.npy --pooling mean` on CPU/MPS.
+### Resume here (next session) — Phase 6 lineage registry + `mole models` + eval
+
+Stubs: `src/mole/lineage/registry.py`, `src/mole/eval/retrieval.py`; CLI `mole models
+list/show` and `mole eval` currently print the Phase-6 stub notice. The embed sidecar
+already stamps `model_id`/`config_hash`/`global_step` — the registry should build on
+that. Eval consumes `labels.csv` (partial labels, `mole.data.datasets.load_labels`)
+against an embeddings `.npy` + its `.mapping.json`; metrics = mAP / top-k / cross-dataset.
 
 ---
 
@@ -180,12 +193,12 @@ Everything routes long loops through `mole.progress.track`. Test with:
   a 3-channel model → fixed by color-invariant augmentation on a 3-channel model.
 - Two inconsistent patch schemes (train 256→224 vs embed 256 raw) → unified on
   window→224.
-- VLAD k-means had **no seed** (not reproducible) → Phase 5 fixes with fixed seed +
-  saved, model-versioned codebook.
+- VLAD k-means had **no seed** (not reproducible) → Phase 5 FIXED: fixed seed +
+  saved, model-versioned codebook (`embed/vlad.py`; verified bit-identical reruns).
 - Resume was epoch-granular, **no RNG state**, no Ctrl-C handler, hard dist dependency,
   `.cuda()` hardcoded → Phase 4 adds seamless resume + single-GPU-first.
-- `extract_embeddings.py` reimplements its own ViT (divergence risk) → Phase 5 imports
-  the canonical model.
+- `extract_embeddings.py` reimplements its own ViT (divergence risk) → Phase 5 FIXED:
+  `embed/extract.py` loads teacher weights into the canonical `mole.selfsup.vit`.
 - Competition-specific to delete: `icdar2017patcher` naming, `subset_of_Imagenet_train_split`,
   `combine_ckpt.py`, hardcoded `/data/traven/...` paths, dead commented mask code in
   `loader.py`, the unused `ibot` aug (contains forbidden horizontal flip).
