@@ -481,7 +481,10 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
             if is_main and it % int(cfg["train"]["save_every_steps"]) == 0:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
-            if state["stop"]:
+            # Collective: if ANY rank caught SIGINT, all ranks break on THIS same
+            # iteration (the all-reduce is the rendezvous), so none is left waiting
+            # on a gradient all-reduce whose peer has already exited.
+            if ddp.any_rank_stopping(state["stop"], device):
                 if is_main:
                     save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                     ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
@@ -490,8 +493,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                     if tb is not None:
                         tb.close()
                     print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
-                ddp.barrier()   # all ranks stop together before tearing down the group
-                ddp.cleanup()
+                ddp.cleanup()   # no collective after the stop all-reduce, so no barrier needed
                 return
 
         if is_main:

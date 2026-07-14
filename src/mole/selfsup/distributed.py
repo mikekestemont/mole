@@ -88,9 +88,11 @@ def setup() -> DistInfo:
     import torch.distributed as dist
 
     torch.cuda.set_device(local_rank)
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
     device = torch.device(f"cuda:{local_rank}")
+    if not dist.is_initialized():
+        # Pass device_id so collectives infer the right device (mutes the
+        # "using the device under current context" warning on barrier/all_reduce).
+        dist.init_process_group(backend="nccl", device_id=device)
     return DistInfo(rank=rank, local_rank=local_rank, world_size=world_size, device=device)
 
 
@@ -100,6 +102,25 @@ def barrier() -> None:
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
+
+
+def any_rank_stopping(flag: bool, device) -> bool:
+    """Collective OR of ``flag`` across all ranks (passthrough if not distributed).
+
+    Used so a SIGINT caught by *any* rank makes *every* rank stop on the SAME
+    training iteration. Without this, ranks can decide to stop on different
+    iterations and the one still looping deadlocks on the next gradient all-reduce
+    (its peer has already left). The all-reduce is itself the rendezvous, so every
+    rank leaves the loop together. One int scalar per step — negligible overhead.
+    """
+    import torch
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return flag
+    t = torch.tensor([1 if flag else 0], device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.MAX)
+    return bool(t.item())
 
 
 def cleanup() -> None:
