@@ -90,6 +90,17 @@ def _build_loader(dataset, batch_size, num_workers, epoch, seed, pin_memory=Fals
                       num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
 
 
+def _prior_init_from(run_dir) -> str | None:
+    """The ``init_from`` recorded in a run dir's manifest, if any (for re-run detection)."""
+    mpath = Path(run_dir) / "manifest.json"
+    if not mpath.is_file():
+        return None
+    try:
+        return json.loads(mpath.read_text()).get("init_from")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _adopt_arch(cfg: dict, src_cfg: dict, *, source: str) -> None:
     """Adopt the source checkpoint's architecture into ``cfg`` so its weights load.
 
@@ -157,10 +168,26 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     print(f"[mole] device={device} fp16={use_fp16} mode={mode}")
 
     # ---- warm-start peek (adopt source architecture before building the model) ----
-    will_resume = bool((resume and Path(resume).is_file()) or find_resume(run_dir))
+    resume_ckpt = Path(resume) if (resume and Path(resume).is_file()) else find_resume(run_dir)
+    will_resume = resume_ckpt is not None
     warm = None
     if init_from and will_resume:
-        print("[mole] --init-from ignored: run is resuming an existing checkpoint.")
+        # A run dir with a checkpoint auto-resumes, which would ignore --init-from.
+        # Allow it only for an idempotent re-run (this dir was itself started from the
+        # SAME --init-from); otherwise the dir is stale/foreign — stop, don't silently
+        # resume the wrong model.
+        if _prior_init_from(run_dir) == str(init_from):
+            print(f"[mole] resuming a run previously warm-started from {init_from}")
+        else:
+            print(f"[mole] ERROR: --init-from was given, but {run_dir} already holds a "
+                  f"checkpoint ({resume_ckpt}) that was NOT started from {init_from}.\n"
+                  f"        --init-from only *starts* a fresh run — it will not overwrite an "
+                  f"existing one, and resuming the existing one would ignore your checkpoint.\n"
+                  f"        • to warm-start from {init_from}: use a new --output-dir "
+                  f"(or delete {resume_ckpt})\n"
+                  f"        • to continue the run already in {run_dir}: drop --init-from "
+                  f"(it auto-resumes)")
+            raise SystemExit(1)
     elif init_from:
         raw = torch.load(init_from, map_location="cpu", weights_only=False)
         warm = normalize_checkpoint(raw)
@@ -224,7 +251,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     mom_sched = cosine_scheduler(m["momentum_teacher"], 1, epochs, steps_per_epoch)
 
     # ---- resume / warm-start ----
-    resume_path = Path(resume) if resume else find_resume(run_dir)
+    resume_path = resume_ckpt
     start_step = 0
     if resume_path and Path(resume_path).is_file():
         start_step = load_checkpoint(resume_path, student=student, teacher=teacher, optimizer=optimizer,
