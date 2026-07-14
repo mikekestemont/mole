@@ -1,0 +1,45 @@
+# MOLE mature base run — Antwerp charters, warm-started from Raven's checkpoint.
+#
+# This is the first "real" (not shakedown) pretraining run. It inherits every
+# unset leaf from mole.config.DEFAULTS; only deliberate choices live here.
+#
+# Launch (single GPU, under tmux/screen) — see the block at the bottom.
+#
+# Decisions baked in (discussed 2026-07-14):
+#   * Warm-start ONLY from Raven's vit_small checkpoint (--init-from on the CLI).
+#     No image inversion, no binarization: the polarity/tonality mismatch lives in
+#     the patch-embed (layer 1) and re-adapts during training; the transformer
+#     blocks transfer intact. Do NOT use raven's ckpt as a direct embedder.
+#   * grayscale_prob raised 0.2 -> 0.4 (aug.overrides) to widen color-invariance,
+#     so the model can't lean on the Antwerp parchment's specific coloring.
+#     Remove that one line to fall back to stock `mild`.
+
+data:
+  path: /home/USER/SSL_ViT_WR/SSL_ViT_WR/assets/img-antw   # OVERRIDE to your real path (~470 PNGs)
+  window_size: 512          # locked in Phase 2
+  model_size: 224
+  overlap: 0.5              # ~16.8k windows over 470 pages; raise toward 0.7 if sample-starved
+  use_zones: true           # auto-uses zones.json if present; harmless without one
+  num_workers: 8
+
+aug:
+  preset: mild              # locked training strength
+  overrides:
+    grayscale_prob: 0.4     # widen color-invariance (see header); delete to revert to mild's 0.2
+
+model:
+  arch: vit_small           # matches Raven; --init-from adopts source arch regardless
+  patch_size: 16
+
+optim:
+  lr: 5.0e-4                # peak LR at reference batch 256; auto-scaled to batch (48/256 -> ~9.4e-5)
+  warmup_epochs: 10         # gentle start so warm-started features aren't wiped early
+  batch_size: 48            # fits a single 11GB 2080 Ti with fp16 + multicrop; push to 64 if VRAM allows
+
+train:
+  epochs: 150               # ~350 steps/epoch -> ~52k steps; enough given the warm start + small corpus
+  fp16: true
+  output_dir: runs/antw_base_v1
+  save_every_steps: 500     # periodic checkpoint for seamless resume
+  saveckp_epoch_freq: 10    # keep a numbered checkpoint every 10 epochs
+  projector_every_epochs: 5 # log the TensorBoard embedding projector every 5 epochs
