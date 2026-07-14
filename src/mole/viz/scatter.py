@@ -143,10 +143,10 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
 
     dots = []
     for x, y, c, r in zip(nx, ny, cats, rows):
-        name = escape(Path(r["image"]).name)
+        name = escape(Path(r["image"]).name, quote=True)
         dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{cmap[c]}" '
-                    f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5">'
-                    f'<title>{name}\n[{escape(str(c))}]</title></circle>')
+                    f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
+                    f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"/>')
 
     show = uniq[:60]
     legend = "".join(
@@ -181,6 +181,11 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
   .lg b {{ opacity: .55; font-weight: 500; }}
   .more {{ opacity: .6; font-style: italic; }}
   code {{ font-size: 12px; opacity: .8; }}
+  circle {{ cursor: crosshair; }}
+  #tt {{ position: fixed; z-index: 10; display: none; pointer-events: none;
+         background: #111d; color: #fff; padding: 5px 8px; border-radius: 6px;
+         font-size: 12px; max-width: 340px; box-shadow: 0 2px 8px #0006; }}
+  #tt b {{ font-weight: 600; }} #tt span {{ opacity: .7; }}
 </style></head><body>
 <h1>Document embedding scatter</h1>
 <div class="sub">{subtitle}</div>
@@ -188,8 +193,30 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
   <svg viewBox="0 0 {W} {H}" width="{W}" height="{H}">{''.join(dots)}</svg>
   <div class="legend">{legend}</div>
 </div>
+<div id="tt"></div>
 <p class="sub">Hover a point for its filename. Same-hand / same-scribe documents
 should form neighbourhoods as the model learns.</p>
+<script>
+(function() {{
+  var svg = document.querySelector('svg'), tt = document.getElementById('tt');
+  svg.addEventListener('mouseover', function(e) {{
+    var t = e.target;
+    if (t.tagName === 'circle') {{
+      tt.innerHTML = '<b></b><br><span></span>';
+      tt.querySelector('b').textContent = t.getAttribute('data-name');
+      tt.querySelector('span').textContent = '[' + t.getAttribute('data-cat') + ']';
+      tt.style.display = 'block';
+    }}
+  }});
+  svg.addEventListener('mousemove', function(e) {{
+    tt.style.left = (e.clientX + 14) + 'px';
+    tt.style.top = (e.clientY + 14) + 'px';
+  }});
+  svg.addEventListener('mouseout', function(e) {{
+    if (e.target.tagName === 'circle') tt.style.display = 'none';
+  }});
+}})();
+</script>
 </body></html>"""
 
 
