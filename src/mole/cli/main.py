@@ -136,12 +136,17 @@ def train(
     output_dir: Optional[Path] = typer.Option(None, help="Run directory (overrides config)."),
     mode: str = typer.Option("scratch", help="'scratch' or 'continual' (replay: Phase 7)."),
     resume: Optional[Path] = typer.Option(None, help="Resume from a checkpoint (auto if run dir has one)."),
+    init_from: Optional[Path] = typer.Option(
+        None, "--init-from",
+        help="Warm-start weights from a foreign (original AttMask/iBOT) or mole checkpoint "
+             "(fresh run at step 0; ignored when resuming)."),
     set_: list[str] = typer.Option([], "--set", help="Override a config leaf, e.g. optim.lr=1e-4."),
 ) -> None:
     """Pretrain (or continually update) the base model with AttMask."""
     from mole.selfsup.train import train as _train
 
-    _train(config, output_dir=output_dir, mode=mode, resume=resume, overrides=list(set_))
+    _train(config, output_dir=output_dir, mode=mode, resume=resume, overrides=list(set_),
+           init_from=init_from)
 
 
 # ----------------------------------------------------------------------- finetune

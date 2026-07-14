@@ -130,6 +130,29 @@ Phase 4 (training) can proceed without it.
 - **Verified** on CPU with `runs/smoke` (vit_tiny) + `runs/base_v1` (vit_small): all
   four poolings produce correct shapes, VLAD reproducible, version warning fires.
 
+### Foreign-checkpoint warm-start (interop with Raven's original checkpoints)
+
+`mole.selfsup.checkpoint` normalises both mole and original AttMask/iBOT checkpoints:
+`normalize_checkpoint` detects a foreign file (`args` Namespace + `module.`-prefixed
+DDP student, vs mole's `config` + `global_step`), strips the `module.` prefix, and
+synthesizes a mole `config` — architecture (`ARCH_FIELDS`) recovered from `args`, the
+rest left at mole defaults (deliberately NOT the original's rejected 256 px window).
+`filtered_load` does a strict-safe load (only matching-shape keys; reports missing /
+shape-mismatch / unexpected so a warm-start never crashes on a partial fit).
+- `mole train <config> --init-from raven.pth`: fresh run at **step 0**, weights only
+  (no optimizer/RNG), adopts the source arch (overrides conflicting config leaves with
+  a warning), loads student+teacher (student seeded from teacher if the file is
+  teacher-only). Ignored when resuming. This is a warm-start, NOT Phase-7 finetune
+  (no no-mutate branch / replay / LoRA).
+- `mole embed raven.pth ...`: `load_backbone` runs the same normaliser, so an original
+  checkpoint embeds directly; sidecar `source: foreign-import`. ViT is a faithful port
+  (identical param names, `img_size=[224]` both sides → `pos_embed` shapes match), so
+  weights load cleanly when arch/patch_size/num_class_tokens agree.
+- **Verified** on CPU/MPS with a synthesized Raven-format checkpoint (DDP `module.`
+  student, `args` not `config`): warm-start loaded all params, embed produced
+  `foreign-import` output, resume-precedence + shape-mismatch + teacher-only paths all
+  exercised.
+
 ### Resume here (next session) — Phase 6 lineage registry + `mole models` + eval
 
 Stubs: `src/mole/lineage/registry.py`, `src/mole/eval/retrieval.py`; CLI `mole models

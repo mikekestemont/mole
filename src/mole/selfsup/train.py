@@ -26,7 +26,8 @@ from mole.progress import progress_bar
 from mole.selfsup._train_utils import (cancel_gradients_last_layer, clip_gradients,
                                        cosine_scheduler)
 from mole.selfsup.attmask import AttMask
-from mole.selfsup.checkpoint import find_resume, load_checkpoint, save_checkpoint
+from mole.selfsup.checkpoint import (ARCH_FIELDS, filtered_load, find_resume,
+                                     load_checkpoint, normalize_checkpoint, save_checkpoint)
 from mole.selfsup.dataset import PatchWindowDataset
 from mole.selfsup.head import iBOTHead
 from mole.selfsup.loss import iBOTLoss
@@ -71,10 +72,50 @@ def _build_loader(dataset, batch_size, num_workers, epoch, seed, pin_memory=Fals
                       num_workers=num_workers, pin_memory=pin_memory, drop_last=True)
 
 
+def _adopt_arch(cfg: dict, src_cfg: dict, *, source: str) -> None:
+    """Adopt the source checkpoint's architecture into ``cfg`` so its weights load.
+
+    The weights only fit a matching model, so the checkpoint is authoritative on
+    architecture; a conflicting user setting is overridden with a warning. Training
+    hyperparameters (lr, epochs, data, aug, mask) stay from the user's config.
+    """
+    adopted = {}
+    for f in ARCH_FIELDS:
+        new = src_cfg.get("model", {}).get(f)
+        if new is None:
+            continue
+        old = cfg["model"].get(f)
+        if old != new:
+            print(f"[mole] init-from: model.{f} {old!r} -> {new!r} (to match {source})")
+        cfg["model"][f] = new
+        adopted[f] = new
+    print(f"[mole] init-from: adopted architecture {adopted}")
+
+
+def _apply_warmstart(student, teacher, warm: dict) -> None:
+    """Load foreign/mole weights into a fresh student & teacher (weights only, step 0)."""
+    student_sd = warm["student"] if warm["student"] is not None else warm["teacher"]
+    for module, sd, label in ((student, student_sd, "student"), (teacher, warm["teacher"], "teacher")):
+        r = filtered_load(module, sd, label=label)
+        note = ""
+        if r["shape_mismatch"]:
+            note += f", {len(r['shape_mismatch'])} shape-mismatch (re-init)"
+        if r["missing"]:
+            note += f", {len(r['missing'])} missing (re-init)"
+        print(f"[mole] init-from: {label} loaded {r['loaded']}/{r['total']} params{note}")
+
+
 def train(config_path: str | Path, output_dir: str | Path | None = None,
           mode: Literal["scratch", "continual"] = "scratch",
-          resume: str | Path | None = None, overrides: list[str] | None = None):
-    """Run (or resume) AttMask pretraining. Auto-resumes if the run dir has a checkpoint."""
+          resume: str | Path | None = None, overrides: list[str] | None = None,
+          init_from: str | Path | None = None):
+    """Run (or resume) AttMask pretraining. Auto-resumes if the run dir has a checkpoint.
+
+    ``init_from`` warm-starts a fresh run from a foreign (original AttMask/iBOT) or
+    mole checkpoint: it loads the weights only (not optimizer/RNG), adopts the
+    source's architecture, and starts at step 0 with this config. Ignored if the
+    run is resuming (a run dir with a checkpoint, or an explicit ``resume``).
+    """
     import warnings
 
     # Cosmetic: we deliberately keep the classic weight_norm (checkpoint-format
@@ -96,6 +137,18 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     device = _pick_device()
     use_fp16 = bool(cfg["train"]["fp16"]) and device.type == "cuda"
     print(f"[mole] device={device} fp16={use_fp16} mode={mode}")
+
+    # ---- warm-start peek (adopt source architecture before building the model) ----
+    will_resume = bool((resume and Path(resume).is_file()) or find_resume(run_dir))
+    warm = None
+    if init_from and will_resume:
+        print("[mole] --init-from ignored: run is resuming an existing checkpoint.")
+    elif init_from:
+        raw = torch.load(init_from, map_location="cpu", weights_only=False)
+        warm = normalize_checkpoint(raw)
+        kind = "foreign" if warm["foreign"] else "mole"
+        print(f"[mole] init-from ({kind}): warm-starting weights from {init_from}")
+        _adopt_arch(cfg, warm["config"], source=str(init_from))
 
     # ---- data ----
     d = cfg["data"]
@@ -152,15 +205,18 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     wd_sched = cosine_scheduler(o["weight_decay"], o["weight_decay_end"], epochs, steps_per_epoch)
     mom_sched = cosine_scheduler(m["momentum_teacher"], 1, epochs, steps_per_epoch)
 
-    # ---- resume ----
+    # ---- resume / warm-start ----
     resume_path = Path(resume) if resume else find_resume(run_dir)
     start_step = 0
     if resume_path and Path(resume_path).is_file():
         start_step = load_checkpoint(resume_path, student=student, teacher=teacher, optimizer=optimizer,
                                      ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, map_location=device)
         print(f"[mole] resumed from {resume_path} at step {start_step}")
+    elif warm is not None:
+        _apply_warmstart(student, teacher, warm)
+        print(f"[mole] init-from: starting a fresh run at step 0 from {init_from}")
 
-    _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step)
+    _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=init_from)
 
     # ---- Ctrl-C: checkpoint then exit cleanly ----
     state = {"stop": False}
@@ -286,12 +342,13 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     return run_dir
 
 
-def _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step):
+def _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=None):
     manifest = {
         "created": _dt.datetime.now().isoformat(timespec="seconds"),
         "mode": mode,
         "config_hash": config_hash(cfg),
         "parent_checkpoint": str(resume_path) if resume_path else None,
+        "init_from": str(init_from) if init_from else None,
         "resumed_at_step": start_step,
         "seed": cfg["train"]["seed"],
         "arch": cfg["model"]["arch"],

@@ -83,7 +83,18 @@ mole train configs/pretrain.yaml --set optim.lr=1e-4 --set train.epochs=50
 
 # Laptop (CPU/MPS) — fast pipeline/resume sanity check only (~seconds):
 mole train configs/smoke.yaml --output-dir runs/smoke
+
+# Warm-start from an ORIGINAL AttMask/iBOT checkpoint (e.g. Raven's) or a mole one:
+# loads weights only, adopts the source's architecture, starts a fresh run at step 0.
+mole train configs/pretrain.yaml --output-dir runs/base_v1 --init-from /path/to/raven_checkpoint.pth
 ```
+
+`--init-from` reads the source's `args` to rebuild a matching model (so the weights
+load), strips the DDP `module.` prefix, and reports what loaded vs. re-initialised. It
+is weight-only (not optimizer/RNG) and is ignored when the run is resuming. You can
+also embed a foreign checkpoint directly: `mole embed /path/to/raven_checkpoint.pth
+data/samples outputs/raven.npy` (sidecar stamps `source: foreign-import`) — handy to
+sanity-check the source model before a long run.
 
 > The production config is heavy (vit_small on ~768 image-forwards/step) — run it on
 > the GPU server, not a laptop. Use `configs/smoke.yaml` (vit_tiny, batch 16) locally.

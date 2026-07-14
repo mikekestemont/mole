@@ -52,17 +52,19 @@ def load_backbone(checkpoint: str | Path, map_location: str = "cpu"):
     """
     import torch
 
+    from mole.selfsup.checkpoint import normalize_checkpoint
     from mole.selfsup.vit import build_vit
 
-    ckpt = torch.load(checkpoint, map_location=map_location, weights_only=False)
-    cfg = ckpt["config"]
+    raw = torch.load(checkpoint, map_location=map_location, weights_only=False)
+    norm = normalize_checkpoint(raw)  # accepts mole or foreign (original AttMask/iBOT)
+    cfg = norm["config"]
     m, d = cfg["model"], cfg["data"]
-    step = int(ckpt.get("global_step", 0))
+    step = norm["global_step"]
     chash = config_hash(cfg)
 
     model = build_vit(m["arch"], patch_size=m["patch_size"], return_all_tokens=True,
                       num_class_tokens=m["num_class_tokens"])
-    state = _teacher_backbone_state(ckpt["teacher"])
+    state = _teacher_backbone_state(norm["teacher"])
     missing, unexpected = model.load_state_dict(state, strict=False)
     # The only tolerated gaps are inference-irrelevant (e.g. a stray masked_embed
     # if a future teacher carries one); real missing weights are a hard error.
@@ -88,6 +90,7 @@ def load_backbone(checkpoint: str | Path, map_location: str = "cpu"):
         "overlap": float(d["overlap"]),
         "use_zones": bool(d["use_zones"]),
         "checkpoint": str(checkpoint),
+        "source": "foreign-import" if norm["foreign"] else "mole",
     }
     return model, meta
 

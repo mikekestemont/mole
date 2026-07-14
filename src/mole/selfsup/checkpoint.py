@@ -109,3 +109,93 @@ def find_resume(run_dir: str | Path) -> Path | None:
     """Return the rolling checkpoint path if the run dir has one (auto-resume)."""
     p = Path(run_dir) / CHECKPOINT_NAME
     return p if p.is_file() else None
+
+
+# --------------------------------------------------------------------------- interop
+# Warm-starting from a foreign (original AttMask/iBOT) checkpoint: those files
+# store `args` (an argparse Namespace) + `epoch` instead of mole's `config` +
+# `global_step`, and their DDP-wrapped student carries a `module.` prefix. We
+# normalise both formats to a common shape so `train --init-from` and `embed` can
+# consume either. Model architecture is authoritative in the checkpoint (the
+# weights only load into a matching model), so we recover it from `args`.
+
+# model.* fields that determine parameter shapes — recovered from a foreign
+# checkpoint's args and adopted by the warm-started run so weights load.
+ARCH_FIELDS = ("arch", "patch_size", "num_class_tokens", "out_dim", "patch_out_dim",
+               "shared_head", "shared_head_teacher", "norm_last_layer", "norm_in_head",
+               "act_in_head", "use_masked_im_modeling")
+
+
+def is_mole_checkpoint(ckpt: dict) -> bool:
+    """A mole checkpoint carries a `config` dict; a foreign one carries `args`."""
+    return isinstance(ckpt, dict) and "config" in ckpt
+
+
+def _strip_module_prefix(sd: dict) -> dict:
+    """Drop the DDP ``module.`` prefix (original student is DDP-wrapped)."""
+    return {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+
+
+def _foreign_to_config(args) -> dict:
+    """Synthesize a mole config from a foreign checkpoint's argparse args.
+
+    Only the architecture (model.*) is taken from the checkpoint — it must match
+    the weights. Everything else (data geometry, aug, optim, ...) stays at mole
+    defaults, deliberately NOT adopting the original's rejected choices (e.g. its
+    256 px window; see the Phase-2 resolution decision).
+    """
+    import copy
+
+    from mole.config import DEFAULTS
+
+    a = vars(args) if hasattr(args, "__dict__") else dict(args or {})
+    cfg = copy.deepcopy(DEFAULTS)
+    for f in ARCH_FIELDS:
+        if f in a and a[f] is not None:
+            cfg["model"][f] = a[f]
+    return cfg
+
+
+def normalize_checkpoint(ckpt: dict) -> dict:
+    """Normalise a mole or foreign checkpoint to ``{student, teacher, config, global_step, foreign}``.
+
+    ``student`` may be ``None`` if the source ships only a teacher. State dicts are
+    ``module.``-stripped; ``config`` is the real one (mole) or synthesized from
+    ``args`` (foreign).
+    """
+    if is_mole_checkpoint(ckpt):
+        return {"student": ckpt.get("student"), "teacher": ckpt["teacher"],
+                "config": ckpt["config"], "global_step": int(ckpt.get("global_step", 0)),
+                "foreign": False}
+    if "teacher" not in ckpt:
+        raise KeyError("checkpoint has neither a mole `config` nor a `teacher` state dict "
+                       "— not a recognised AttMask/iBOT/mole checkpoint")
+    return {"student": _strip_module_prefix(ckpt["student"]) if "student" in ckpt else None,
+            "teacher": _strip_module_prefix(ckpt["teacher"]),
+            "config": _foreign_to_config(ckpt.get("args")), "global_step": 0, "foreign": True}
+
+
+def filtered_load(module, state_dict: dict, *, label: str = "") -> dict:
+    """Load only the keys that exist in ``module`` with a matching shape (strict-safe).
+
+    ``load_state_dict(strict=False)`` still raises on a shape mismatch of a shared
+    key, so we pre-filter. Returns a report of what loaded / was skipped, letting
+    a warm-start proceed while clearly flagging any re-initialised parameters.
+    """
+    own = module.state_dict()
+    keep, shape_mismatch = {}, []
+    for k, v in state_dict.items():
+        if k in own:
+            if own[k].shape == v.shape:
+                keep[k] = v
+            else:
+                shape_mismatch.append(k)
+    module.load_state_dict(keep, strict=False)
+    return {
+        "label": label,
+        "loaded": len(keep),
+        "total": len(own),
+        "missing": [k for k in own if k not in keep],       # left at init
+        "unexpected": [k for k in state_dict if k not in own],
+        "shape_mismatch": shape_mismatch,                   # left at init
+    }
