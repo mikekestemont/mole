@@ -131,6 +131,15 @@ Cadence is `train.tb_every_steps` (default 10); disable entirely with
 `--set train.tensorboard=false`. There is **no early stopping** (per Raven's advice —
 the model keeps improving); just watch `loss/total` trend down over a long run.
 
+**Embedding projector.** Every `train.projector_every_epochs` (default 5) a snapshot of
+document embeddings is logged to TensorBoard's **PROJECTOR** tab (interactive PCA / t-SNE
+/ UMAP). Each snapshot is a step in the dropdown, so you can flip through them and watch
+structure emerge as training proceeds; hovering shows the page thumbnail. Points carry a
+`hand` / `dataset` / `file` metadata column — colour by `hand` once a `labels.csv` exists
+(same-hand pages should cluster), or by `dataset` meanwhile. Tuning:
+`--set train.projector_max_images=500`, `--set train.projector_every_epochs=2`, or
+`--set train.projector=false` to turn it off. Works with or without labels.
+
 ## 6. `embed` — extract embeddings ✅ (Phase 5)
 
 Loads the checkpoint's teacher ViT, samples zone-aware windows, resizes them

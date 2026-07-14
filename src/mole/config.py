@@ -86,6 +86,9 @@ DEFAULTS: dict[str, Any] = {
         "saveckp_epoch_freq": 10,     # keep a numbered checkpoint every N epochs
         "tensorboard": True,          # write TensorBoard scalars into the run dir
         "tb_every_steps": 10,         # scalar logging cadence (steps)
+        "projector": True,            # log document embeddings to the TB projector tab
+        "projector_every_epochs": 5,  # projector logging cadence (epochs)
+        "projector_max_images": 300,  # cap documents embedded per projector snapshot
     },
 }
 
@@ -110,6 +113,27 @@ def apply_override(config: dict[str, Any], dotted_key: str, value: Any) -> None:
     node[keys[-1]] = value
 
 
+def _parse_override_value(raw: str) -> Any:
+    """Parse a ``--set`` value as a YAML scalar, coercing numeric strings.
+
+    PyYAML's 1.1 resolver does NOT treat dot-less scientific notation (``1e-5``,
+    ``2e+3``) as a number, leaving it a string — which then breaks arithmetic on
+    e.g. ``optim.lr``. We recover those by trying int then float before giving up.
+    """
+    import yaml
+
+    value = yaml.safe_load(raw)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return float(value)
+            except ValueError:
+                return value
+    return value
+
+
 def load_config(path: str | Path | None = None, overrides: list[str] | None = None) -> dict[str, Any]:
     """Load a YAML config over :data:`DEFAULTS` and apply ``key.path=value`` overrides."""
     import yaml
@@ -122,7 +146,7 @@ def load_config(path: str | Path | None = None, overrides: list[str] | None = No
         if "=" not in ov:
             raise ValueError(f"--set expects key.path=value, got {ov!r}")
         key, raw = ov.split("=", 1)
-        apply_override(config, key.strip(), yaml.safe_load(raw))
+        apply_override(config, key.strip(), _parse_override_value(raw))
     return config
 
 

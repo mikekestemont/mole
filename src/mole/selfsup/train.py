@@ -55,6 +55,23 @@ def _make_tb_writer(run_dir, enabled: bool):
     return SummaryWriter(log_dir=str(run_dir))
 
 
+def _maybe_log_projector(tb, teacher, dataset, device, cfg, step: int) -> None:
+    """Log a document-embedding snapshot to the TB projector (never fatal)."""
+    if tb is None or not cfg["train"].get("projector", True):
+        return
+    try:
+        from mole.selfsup.viz import log_document_projector
+
+        n = log_document_projector(tb, teacher, dataset, device, step,
+                                   max_images=int(cfg["train"].get("projector_max_images", 300)),
+                                   model_size=int(cfg["data"]["model_size"]))
+        if n:
+            print(f"[mole] projector: logged {n} document embeddings at step {step} "
+                  f"(TensorBoard → PROJECTOR tab)")
+    except Exception as e:  # visualization must never interrupt training
+        print(f"[mole] projector logging skipped ({type(e).__name__}: {e})")
+
+
 def _pick_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -296,6 +313,10 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
 
     tb = _make_tb_writer(run_dir, bool(cfg["train"].get("tensorboard", True)))
     tb_every = max(1, int(cfg["train"].get("tb_every_steps", 10)))
+    proj_every = max(1, int(cfg["train"].get("projector_every_epochs", 5)))
+    # Initial snapshot: the starting structure (e.g. straight from a warm-started
+    # backbone) so you can watch it evolve from step 0.
+    _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
 
     # Two persistent bars on fixed lines: outer = epochs (position 0), inner =
     # steps within the current epoch (position 1, reset() each epoch). Both created
@@ -418,6 +439,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         epoch_bar.set_postfix(loss=f"{float(loss.item()):.3f}")
         with (run_dir / "log.txt").open("a") as f:
             f.write(json.dumps({"epoch": epoch, "step": it, "loss": float(loss.item())}) + "\n")
+        if (epoch + 1) % proj_every == 0:
+            _maybe_log_projector(tb, teacher, dataset, device, cfg, it)
 
     step_bar.close()
     epoch_bar.close()
