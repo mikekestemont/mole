@@ -261,7 +261,17 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         _apply_warmstart(student, teacher, warm)
         print(f"[mole] init-from: starting a fresh run at step 0 from {init_from}")
 
-    _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=init_from)
+    # Provenance recorded in the manifest must reflect what ACTUALLY happened: the
+    # source only when a fresh warm-start was applied, otherwise the value carried
+    # by a real resume (preserved across resumes). Recording a merely-passed but
+    # ignored --init-from is what previously let a stale dir masquerade as warm-started.
+    if warm is not None:
+        manifest_init = str(init_from)
+    elif will_resume:
+        manifest_init = _prior_init_from(run_dir)
+    else:
+        manifest_init = None
+    _write_manifest(run_dir, cfg, dataset, mode, resume_path, start_step, init_from=manifest_init)
 
     # ---- Ctrl-C: checkpoint then exit cleanly ----
     state = {"stop": False}
@@ -338,7 +348,18 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                 loss = all_loss.pop("loss")
 
             if not torch.isfinite(loss):
-                raise FloatingPointError(f"Loss is {loss.item()} at step {it}; stopping.")
+                step_bar.close()
+                epoch_bar.close()
+                if tb is not None:
+                    tb.close()
+                print(f"\n[mole] ERROR: loss became {loss.item()} at step {it} — training "
+                      f"diverged; nothing saved.\n"
+                      f"        likely causes:\n"
+                      f"        • Apple MPS numerical instability — train on a CUDA GPU, not MPS\n"
+                      f"        • learning rate too high — lower it (e.g. --set optim.lr=1e-4)\n"
+                      f"        • resuming an already-diverged checkpoint — start fresh with a "
+                      f"new --output-dir (delete the old run dir)")
+                raise SystemExit(1)
 
             optimizer.zero_grad()
             if fp16_scaler is None:
