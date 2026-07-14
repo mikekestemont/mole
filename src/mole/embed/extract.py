@@ -254,9 +254,16 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
     if pooling is Pooling.PATCHES:
         return np.vstack(page_descriptors), None
     # VLAD: fit one codebook across all descriptors, then encode each page.
+    import time
+
     all_desc = np.vstack(page_descriptors)
+    print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
+          f"patch descriptors (seed {seed})…", flush=True)
+    t0 = time.perf_counter()
     codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed)
-    mat = np.vstack([_vlad.vlad_encode(d, codebook) for d in page_descriptors])
+    print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
+    mat = np.vstack([_vlad.vlad_encode(d, codebook)
+                     for d in track(page_descriptors, "VLAD encoding", unit="page")])
     rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
     return mat, codebook
 

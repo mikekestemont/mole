@@ -16,23 +16,28 @@ import numpy as np
 
 
 def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
-                 max_iter: int = 100):
+                 max_iter: int = 100, max_descriptors: int = 200_000):
     """Fit a reproducible k-means codebook on patch descriptors.
 
     ``descriptors`` is a ``[N, dim]`` float array. Returns the ``[K, dim]``
     cluster centres (float32). Reproducible for a fixed ``seed``.
+
+    For tractability the fit runs on at most ``max_descriptors`` (seeded random
+    subsample — standard for VLAD codebook training, and what keeps this from
+    stalling on millions of descriptors), via MiniBatchKMeans (fast, streaming).
     """
     x = np.asarray(descriptors, dtype=np.float32)
     if x.ndim != 2:
         raise ValueError(f"descriptors must be 2-D [N, dim], got shape {x.shape}")
+    if len(x) > max_descriptors:                      # seeded subsample for the fit
+        rng = np.random.default_rng(seed)
+        x = x[rng.choice(len(x), max_descriptors, replace=False)]
     k = int(min(n_clusters, len(x)))
-    if k < n_clusters:
-        # Fewer descriptors than requested clusters (tiny corpora / smoke tests).
-        pass
     try:
-        from sklearn.cluster import KMeans
+        from sklearn.cluster import MiniBatchKMeans
 
-        km = KMeans(n_clusters=k, random_state=seed, n_init=10, max_iter=max_iter)
+        km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=10_000,
+                             n_init=3, max_iter=max_iter)
         km.fit(x)
         return km.cluster_centers_.astype(np.float32)
     except ModuleNotFoundError:
@@ -81,7 +86,9 @@ def vlad_encode(descriptors, codebook, powernorm: bool = True) -> np.ndarray:
     k, dim = c.shape
     if len(x) == 0:
         return np.zeros(k * dim, dtype=np.float32)
-    d = ((x[:, None, :] - c[None, :, :]) ** 2).sum(2)
+    # Nearest centre via ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x.c^T, giving an [P,K]
+    # matrix directly — avoids materialising the [P,K,dim] broadcast (GBs per page).
+    d = (x * x).sum(1)[:, None] + (c * c).sum(1)[None, :] - 2.0 * (x @ c.T)
     assign = d.argmin(1)
     vlad = np.zeros((k, dim), dtype=np.float32)
     for i in range(k):
