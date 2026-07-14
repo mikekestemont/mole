@@ -122,16 +122,20 @@ def _adopt_arch(cfg: dict, src_cfg: dict, *, source: str) -> None:
 
 
 def _apply_warmstart(student, teacher, warm: dict) -> None:
-    """Load foreign/mole weights into a fresh student & teacher (weights only, step 0)."""
-    student_sd = warm["student"] if warm["student"] is not None else warm["teacher"]
-    for module, sd, label in ((student, student_sd, "student"), (teacher, warm["teacher"], "teacher")):
-        r = filtered_load(module, sd, label=label)
+    """Load the source's bare ViT backbone into a fresh student & teacher.
+
+    Only the backbone transfers (weights only, step 0); the iBOT projection heads
+    are run-specific and stay freshly initialised. Both towers get the same weights.
+    """
+    for module, label in ((student, "student"), (teacher, "teacher")):
+        r = filtered_load(module.backbone, warm["backbone"], label=label)
         note = ""
         if r["shape_mismatch"]:
             note += f", {len(r['shape_mismatch'])} shape-mismatch (re-init)"
         if r["missing"]:
             note += f", {len(r['missing'])} missing (re-init)"
-        print(f"[mole] init-from: {label} loaded {r['loaded']}/{r['total']} params{note}")
+        print(f"[mole] init-from: {label} backbone loaded {r['loaded']}/{r['total']} "
+              f"params{note} (projection head initialised fresh)")
 
 
 def train(config_path: str | Path, output_dir: str | Path | None = None,

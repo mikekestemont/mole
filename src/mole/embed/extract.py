@@ -62,16 +62,17 @@ def load_backbone(checkpoint: str | Path, map_location: str = "cpu"):
     step = norm["global_step"]
     chash = config_hash(cfg)
 
+    from mole.selfsup.checkpoint import filtered_load
+
     model = build_vit(m["arch"], patch_size=m["patch_size"], return_all_tokens=True,
                       num_class_tokens=m["num_class_tokens"])
-    state = _teacher_backbone_state(norm["teacher"])
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    # The only tolerated gaps are inference-irrelevant (e.g. a stray masked_embed
-    # if a future teacher carries one); real missing weights are a hard error.
-    real_missing = [k for k in missing if not k.startswith("masked_embed")]
-    if real_missing:
-        raise RuntimeError(f"checkpoint is missing teacher weights: {real_missing[:6]}"
-                           + (" ..." if len(real_missing) > 6 else ""))
+    r = filtered_load(model, norm["backbone"])
+    # Only inference-irrelevant gaps are tolerated (a stray masked_embed the eval
+    # model doesn't build); a real missing/mismatched weight is a hard error.
+    bad = [k for k in r["missing"] + r["shape_mismatch"] if not k.startswith("masked_embed")]
+    if bad:
+        raise RuntimeError(f"checkpoint does not fit a {m['arch']} backbone — "
+                           f"missing/mismatched: {bad[:6]}" + (" ..." if len(bad) > 6 else ""))
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -93,25 +94,6 @@ def load_backbone(checkpoint: str | Path, map_location: str = "cpu"):
         "source": "foreign-import" if norm["foreign"] else "mole",
     }
     return model, meta
-
-
-def _teacher_backbone_state(teacher_sd: dict) -> dict:
-    """Strip the MultiCropWrapper's ``backbone.`` prefix and drop the iBOT head.
-
-    The saved teacher is a ``MultiCropWrapper(backbone, head)``; only the
-    ``backbone.*`` ViT weights are wanted for embedding. ``backbone.fc`` /
-    ``backbone.head`` are Identities (no params) and are skipped along with the
-    projection head.
-    """
-    out = {}
-    for k, v in teacher_sd.items():
-        if not k.startswith("backbone."):
-            continue  # skips the iBOT head.*
-        sub = k[len("backbone."):]
-        if sub.startswith(("fc.", "head.")):
-            continue  # Identities left by MultiCropWrapper
-        out[sub] = v
-    return out
 
 
 # ------------------------------------------------------------------ page index

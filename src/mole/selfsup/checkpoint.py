@@ -112,12 +112,16 @@ def find_resume(run_dir: str | Path) -> Path | None:
 
 
 # --------------------------------------------------------------------------- interop
-# Warm-starting from a foreign (original AttMask/iBOT) checkpoint: those files
-# store `args` (an argparse Namespace) + `epoch` instead of mole's `config` +
-# `global_step`, and their DDP-wrapped student carries a `module.` prefix. We
-# normalise both formats to a common shape so `train --init-from` and `embed` can
-# consume either. Model architecture is authoritative in the checkpoint (the
-# weights only load into a matching model), so we recover it from `args`.
+# Warm-starting from a foreign checkpoint. Three formats are recognised and reduced
+# to a canonical BARE ViT backbone state dict (the transferable part; projection
+# heads are run-specific and re-initialised):
+#   1. mole            -- `config` dict + `student`/`teacher` MultiCropWrapper sds
+#   2. AttMask/iBOT run -- `args` Namespace + DDP-`module.`-prefixed `student` + `teacher`
+#   3. extracted backbone -- `{"state_dict": {...}}` (or a raw sd) of bare ViT weights,
+#                            e.g. the original `extract_backbone_weights.py` output
+# Architecture comes from `config`/`args` when present, else it is INFERRED from the
+# backbone weights (embed_dim, depth, patch, num_class_tokens) — a bare checkpoint
+# carries no metadata but the weights fully determine the ViT shape.
 
 # model.* fields that determine parameter shapes — recovered from a foreign
 # checkpoint's args and adopted by the warm-started run so weights load.
@@ -125,15 +129,39 @@ ARCH_FIELDS = ("arch", "patch_size", "num_class_tokens", "out_dim", "patch_out_d
                "shared_head", "shared_head_teacher", "norm_last_layer", "norm_in_head",
                "act_in_head", "use_masked_im_modeling")
 
+# (embed_dim, depth) -> canonical ViT name (heads/mlp are fixed by the factory).
+_ARCH_BY_SHAPE = {(192, 12): "vit_tiny", (384, 12): "vit_small",
+                  (768, 12): "vit_base", (1024, 24): "vit_large"}
+
 
 def is_mole_checkpoint(ckpt: dict) -> bool:
-    """A mole checkpoint carries a `config` dict; a foreign one carries `args`."""
+    """A mole checkpoint carries a `config` dict; a foreign one does not."""
     return isinstance(ckpt, dict) and "config" in ckpt
 
 
-def _strip_module_prefix(sd: dict) -> dict:
-    """Drop the DDP ``module.`` prefix (original student is DDP-wrapped)."""
-    return {(k[len("module."):] if k.startswith("module.") else k): v for k, v in sd.items()}
+def _bare_backbone(sd: dict) -> dict:
+    """Reduce any wrapper/DDP state dict to bare ViT backbone keys.
+
+    Strips the DDP ``module.`` prefix and the MultiCropWrapper ``backbone.`` prefix,
+    and drops the projection head (``head.*``) / ``fc.*``. Already-bare weights
+    (an extracted backbone) pass through unchanged.
+    """
+    out = {}
+    for k, v in sd.items():
+        kk = k[len("module."):] if k.startswith("module.") else k
+        if kk.startswith("backbone."):
+            kk = kk[len("backbone."):]
+        elif kk.startswith(("head.", "fc.")):
+            continue  # projection head / classifier — run-specific, not transferred
+        out[kk] = v
+    return out
+
+
+def _base_config() -> dict:
+    import copy
+
+    from mole.config import DEFAULTS
+    return copy.deepcopy(DEFAULTS)
 
 
 def _foreign_to_config(args) -> dict:
@@ -144,35 +172,60 @@ def _foreign_to_config(args) -> dict:
     defaults, deliberately NOT adopting the original's rejected choices (e.g. its
     256 px window; see the Phase-2 resolution decision).
     """
-    import copy
-
-    from mole.config import DEFAULTS
-
     a = vars(args) if hasattr(args, "__dict__") else dict(args or {})
-    cfg = copy.deepcopy(DEFAULTS)
+    cfg = _base_config()
     for f in ARCH_FIELDS:
         if f in a and a[f] is not None:
             cfg["model"][f] = a[f]
     return cfg
 
 
-def normalize_checkpoint(ckpt: dict) -> dict:
-    """Normalise a mole or foreign checkpoint to ``{student, teacher, config, global_step, foreign}``.
+def _infer_config(backbone: dict) -> dict:
+    """Infer a mole config's architecture from bare ViT backbone weights.
 
-    ``student`` may be ``None`` if the source ships only a teacher. State dicts are
-    ``module.``-stripped; ``config`` is the real one (mole) or synthesized from
-    ``args`` (foreign).
+    A metadata-less checkpoint (extracted backbone) is fully described by its
+    weights: embed_dim, depth, patch size and class-token count. Head dims stay at
+    mole defaults (the head is re-initialised on warm-start).
     """
+    if "cls_token" not in backbone or "patch_embed.proj.weight" not in backbone:
+        raise KeyError("unrecognised checkpoint: no ViT backbone found (expected "
+                       "`cls_token` / `patch_embed.proj.weight`). Not a mole/AttMask/"
+                       "iBOT or extracted-backbone checkpoint.")
+    embed_dim = backbone["cls_token"].shape[-1]
+    nct = backbone["cls_token"].shape[1]
+    patch = backbone["patch_embed.proj.weight"].shape[-1]
+    depth = 1 + max(int(k.split(".")[1]) for k in backbone if k.startswith("blocks."))
+    arch = _ARCH_BY_SHAPE.get((embed_dim, depth))
+    if arch is None:
+        raise ValueError(f"cannot map embed_dim={embed_dim}, depth={depth} to a known ViT "
+                         f"(tiny/small/base/large). Non-standard architecture — extend "
+                         f"_ARCH_BY_SHAPE or supply a matching config.")
+    cfg = _base_config()
+    cfg["model"].update(arch=arch, patch_size=int(patch), num_class_tokens=int(nct))
+    return cfg
+
+
+def normalize_checkpoint(ckpt: dict) -> dict:
+    """Normalise a mole or foreign checkpoint to ``{backbone, config, global_step, foreign}``.
+
+    ``backbone`` is a bare ViT state dict (heads dropped). ``config`` is the real
+    one (mole), synthesized from ``args`` (AttMask run), or inferred from the weights
+    (extracted backbone).
+    """
+    if not isinstance(ckpt, dict):
+        raise TypeError(f"checkpoint is a {type(ckpt).__name__}, expected a dict")
     if is_mole_checkpoint(ckpt):
-        return {"student": ckpt.get("student"), "teacher": ckpt["teacher"],
-                "config": ckpt["config"], "global_step": int(ckpt.get("global_step", 0)),
-                "foreign": False}
-    if "teacher" not in ckpt:
-        raise KeyError("checkpoint has neither a mole `config` nor a `teacher` state dict "
-                       "— not a recognised AttMask/iBOT/mole checkpoint")
-    return {"student": _strip_module_prefix(ckpt["student"]) if "student" in ckpt else None,
-            "teacher": _strip_module_prefix(ckpt["teacher"]),
-            "config": _foreign_to_config(ckpt.get("args")), "global_step": 0, "foreign": True}
+        src = ckpt.get("teacher") or ckpt.get("student")
+        return {"backbone": _bare_backbone(src), "config": ckpt["config"],
+                "global_step": int(ckpt.get("global_step", 0)), "foreign": False}
+    if "teacher" in ckpt or "student" in ckpt:                 # AttMask/iBOT full run
+        src = ckpt.get("teacher") or ckpt.get("student")
+        backbone = _bare_backbone(src)
+        config = _foreign_to_config(ckpt["args"]) if "args" in ckpt else _infer_config(backbone)
+    else:                                                       # extracted backbone
+        backbone = _bare_backbone(ckpt.get("state_dict", ckpt))
+        config = _infer_config(backbone)
+    return {"backbone": backbone, "config": config, "global_step": 0, "foreign": True}
 
 
 def filtered_load(module, state_dict: dict, *, label: str = "") -> dict:
