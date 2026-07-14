@@ -390,6 +390,25 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
                              initial=start_epoch, bar_format=bar_fmt, disable=not is_main)
     step_bar = progress_bar(steps_per_epoch, "steps".rjust(label_w), unit="step", position=1,
                             bar_format=bar_fmt, disable=not is_main)
+
+    def _stop_if_signalled() -> bool:
+        """Collective SIGINT check. Called EXACTLY ONCE per loop iteration on every
+        rank (including resume-skipped ones) so the counts match and all ranks stop
+        together. On stop, rank 0 checkpoints; every rank tears the group down. Returns
+        True when the caller should return from train()."""
+        if not ddp.any_rank_stopping(state["stop"], device):
+            return False
+        if is_main:
+            save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
+                            ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
+            step_bar.close()
+            epoch_bar.close()
+            if tb is not None:
+                tb.close()
+            print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
+        ddp.cleanup()   # no collective after the stop all-reduce, so no barrier needed
+        return True
+
     for epoch in range(start_epoch, epochs):
         dataset.set_epoch(epoch)
         loader = _build_loader(dataset, o["batch_size"], d["num_workers"], epoch, seed,
@@ -401,6 +420,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
             step_bar.update(skip)  # already-done steps of a resumed epoch
         for i, (images, _) in enumerate(loader):
             if epoch == start_epoch and i < skip:
+                if _stop_if_signalled():   # keep the resume-skip interruptible + in sync
+                    return
                 continue
             for j, pg in enumerate(optimizer.param_groups):
                 pg["lr"] = lr_sched[it]
@@ -481,19 +502,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
             if is_main and it % int(cfg["train"]["save_every_steps"]) == 0:
                 save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
                                 ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
-            # Collective: if ANY rank caught SIGINT, all ranks break on THIS same
-            # iteration (the all-reduce is the rendezvous), so none is left waiting
-            # on a gradient all-reduce whose peer has already exited.
-            if ddp.any_rank_stopping(state["stop"], device):
-                if is_main:
-                    save_checkpoint(run_dir, student=student, teacher=teacher, optimizer=optimizer,
-                                    ibot_loss=ibot_loss, fp16_scaler=fp16_scaler, global_step=it, config=cfg)
-                    step_bar.close()
-                    epoch_bar.close()
-                    if tb is not None:
-                        tb.close()
-                    print(f"\n[mole] interrupted — checkpointed at step {it} → {run_dir}/checkpoint.pth")
-                ddp.cleanup()   # no collective after the stop all-reduce, so no barrier needed
+            if _stop_if_signalled():
                 return
 
         if is_main:
