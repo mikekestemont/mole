@@ -38,6 +38,8 @@ dependencies = [
 detect = ["ultralytics>=8.3", "huggingface-hub>=0.24"]
 # Parquet embedding output (optional; .npy always works without it).
 parquet = ["pyarrow>=15.0"]
+# UMAP projection for `mole viz` (optional; pca/tsne work without it).
+viz = ["umap-learn>=0.5"]
 dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
 
 [project.scripts]

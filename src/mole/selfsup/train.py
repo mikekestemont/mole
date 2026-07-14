@@ -411,8 +411,8 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
 
             if tb is not None and it % tb_every == 0:
                 tb.add_scalar("loss/total", loss.item(), it)
-                tb.add_scalar("loss/cls", float(all_loss["cls"]), it)
-                tb.add_scalar("loss/patch", float(all_loss["patch"]), it)
+                tb.add_scalar("loss/cls", all_loss["cls"].detach().item(), it)
+                tb.add_scalar("loss/patch", all_loss["patch"].detach().item(), it)
                 tb.add_scalar("sched/lr", lr_sched[it - 1], it)
                 tb.add_scalar("sched/weight_decay", wd_sched[it - 1], it)
                 tb.add_scalar("sched/momentum_teacher", mom_sched[it - 1], it)

@@ -183,6 +183,24 @@ def embed(
            seed=seed, device=device)
 
 
+# ---------------------------------------------------------------------------- viz
+@app.command()
+def viz(
+    embeddings: Path = typer.Argument(..., help="Embeddings .npy (its .mapping.json sidecar is read too)."),
+    out: Optional[Path] = typer.Option(None, help="Output HTML (default: <embeddings>.viz.html)."),
+    method: str = typer.Option("auto", help="2D projection: auto|pca|tsne|umap."),
+    color: str = typer.Option("dataset", help="Colour points by: dataset|hand|none."),
+    color_regex: Optional[str] = typer.Option(None, help=r"Colour by a filename capture group, e.g. '_(\d{4})-' for year."),
+    seed: int = typer.Option(0, help="Projection seed (reproducible)."),
+) -> None:
+    """Project an embeddings file to 2D and write an interactive HTML scatter."""
+    from mole.viz import plot_embeddings
+
+    out_path, used = plot_embeddings(embeddings, out=out, method=method, color=color,
+                                     color_regex=color_regex, seed=seed)
+    console.print(f"[green]✓ {used} scatter → {out_path}[/green]")
+
+
 # --------------------------------------------------------------------------- eval
 @app.command()
 def eval(  # noqa: A001 - deliberately mirrors the subcommand name
