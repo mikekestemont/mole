@@ -50,8 +50,14 @@ def _pca(X: np.ndarray, k: int) -> np.ndarray:
     return (Xc @ vt[:k].T).astype(np.float32)
 
 
-def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0) -> tuple[np.ndarray, str]:
-    """Project ``[N, D]`` to ``[N, 2]``; returns (coords, method_used)."""
+def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0,
+              pca_dim: int = 150) -> tuple[np.ndarray, str]:
+    """Project ``[N, D]`` to ``[N, 2]``; returns (coords, method_used).
+
+    For the nonlinear backends the input is first PCA-reduced to ``pca_dim`` dims
+    (the standard denoise-then-embed recipe) — the default pipeline is
+    **PCA(150) → UMAP**. ``pca`` alone goes straight to 2 components.
+    """
     X = np.asarray(X, dtype=np.float32)
     method = method.lower()
     if method == "auto":
@@ -63,21 +69,25 @@ def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0) -> tuple[np.nd
     if method == "pca":
         return _pca(X, 2), "pca"
 
-    # denoise to <=50 dims before the nonlinear embedding
-    pre = _pca(X, min(50, X.shape[1], max(2, X.shape[0] - 1))) if X.shape[1] > 50 else X
+    # linear denoise to pca_dim before the nonlinear embedding
+    k = min(pca_dim, X.shape[1], max(2, X.shape[0] - 1))
+    reduced = X.shape[1] > k
+    pre = _pca(X, k) if reduced else X
+    tag = f" (pca-{k})" if reduced else ""
     if method == "tsne":
         from sklearn.manifold import TSNE
 
         perplexity = min(30, max(5, (len(pre) - 1) // 3))
-        return TSNE(n_components=2, random_state=seed, init="pca",
-                    perplexity=perplexity).fit_transform(pre), "tsne"
+        coords = TSNE(n_components=2, random_state=seed, init="pca",
+                      perplexity=perplexity).fit_transform(pre)
+        return coords, f"tsne{tag}"
     if method == "umap":
         try:
             import umap
         except ImportError as e:
             raise ImportError("method='umap' needs umap-learn: pip install 'mole[viz]' "
                               "(or use --method tsne / pca)") from e
-        return umap.UMAP(n_components=2, random_state=seed).fit_transform(pre), "umap"
+        return umap.UMAP(n_components=2, random_state=seed).fit_transform(pre), f"umap{tag}"
     raise ValueError(f"unknown method {method!r} (pca|tsne|umap|auto)")
 
 
@@ -186,16 +196,18 @@ should form neighbourhoods as the model learns.</p>
 # -------------------------------------------------------------------------- api
 def plot_embeddings(embeddings: str | Path, out: str | Path | None = None,
                     method: str = "auto", color: str = "dataset",
-                    color_regex: str | None = None, seed: int = 0) -> tuple[Path, str]:
+                    color_regex: str | None = None, seed: int = 0,
+                    pca_dim: int = 150) -> tuple[Path, str]:
     """Project an embeddings file to 2D and write an interactive HTML scatter.
 
-    Returns ``(output_path, method_used)``. ``color`` is ``dataset`` | ``hand`` |
-    ``none``; ``color_regex`` overrides it, colouring by a capture group extracted
-    from each filename (e.g. ``r'_(\\d{4})-'`` to colour by year).
+    Returns ``(output_path, method_used)``. Default projection is PCA(``pca_dim``)
+    → UMAP. ``color`` is ``dataset`` | ``hand`` | ``none``; ``color_regex`` overrides
+    it, colouring by a capture group extracted from each filename (e.g. ``r'_(\\d{4})-'``
+    to colour by year).
     """
     embeddings = Path(embeddings)
     X, meta, rows = _load_embeddings(embeddings)
-    coords, used = reduce_2d(X, method, seed)
+    coords, used = reduce_2d(X, method, seed, pca_dim=pca_dim)
     cats = _categories(rows, color, color_regex)
     color_desc = f"regex {color_regex}" if color_regex else color
     html = _build_html(coords, cats, rows, meta, used, color_desc)

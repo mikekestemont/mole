@@ -188,7 +188,8 @@ def embed(
 def viz(
     embeddings: Path = typer.Argument(..., help="Embeddings .npy (its .mapping.json sidecar is read too)."),
     out: Optional[Path] = typer.Option(None, help="Output HTML (default: <embeddings>.viz.html)."),
-    method: str = typer.Option("auto", help="2D projection: auto|pca|tsne|umap."),
+    method: str = typer.Option("auto", help="2D projection: auto (PCA→UMAP) | pca | tsne | umap."),
+    pca_dim: int = typer.Option(150, help="PCA pre-reduction dims before UMAP/t-SNE."),
     color: str = typer.Option("dataset", help="Colour points by: dataset|hand|none."),
     color_regex: Optional[str] = typer.Option(None, help=r"Colour by a filename capture group, e.g. '_(\d{4})-' for year."),
     seed: int = typer.Option(0, help="Projection seed (reproducible)."),
@@ -197,7 +198,7 @@ def viz(
     from mole.viz import plot_embeddings
 
     out_path, used = plot_embeddings(embeddings, out=out, method=method, color=color,
-                                     color_regex=color_regex, seed=seed)
+                                     color_regex=color_regex, seed=seed, pca_dim=pca_dim)
     console.print(f"[green]✓ {used} scatter → {out_path}[/green]")
 
 
