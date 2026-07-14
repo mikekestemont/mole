@@ -89,12 +89,19 @@ mole train configs/smoke.yaml --output-dir runs/smoke
 mole train configs/pretrain.yaml --output-dir runs/base_v1 --init-from /path/to/raven_checkpoint.pth
 ```
 
-`--init-from` reads the source's `args` to rebuild a matching model (so the weights
-load), strips the DDP `module.` prefix, and reports what loaded vs. re-initialised. It
-is weight-only (not optimizer/RNG) and is ignored when the run is resuming. You can
-also embed a foreign checkpoint directly: `mole embed /path/to/raven_checkpoint.pth
-data/samples outputs/raven.npy` (sidecar stamps `source: foreign-import`) — handy to
-sanity-check the source model before a long run.
+`--init-from` accepts a mole checkpoint, an original AttMask/iBOT run, or a bare
+extracted-backbone checkpoint (`{"state_dict": …}`, what Raven ships). It rebuilds a
+matching model — architecture from the checkpoint's `config`/`args`, or **inferred from
+the weights** when there's no metadata — loads the backbone (heads re-initialise), and
+reports what loaded vs. re-initialised. It is weight-only (not optimizer/RNG) and starts
+a fresh run at step 0; re-running the same command resumes, but pointing it at a stale
+dir errors rather than silently ignoring. Embed a foreign checkpoint directly too:
+`mole embed /path/to/raven_checkpoint.pth data/samples outputs/raven.npy` (sidecar stamps
+`source: foreign-import`) — handy to sanity-check the source model before a long run.
+
+> If a run diverges (loss → NaN/Inf) it stops with a clear `[mole] ERROR` and guidance
+> (Apple **MPS** is numerically unreliable for this — train on **CUDA**; or lower the LR;
+> or start from a fresh `--output-dir`). Nothing is saved on divergence.
 
 > The production config is heavy (vit_small on ~768 image-forwards/step) — run it on
 > the GPU server, not a laptop. Use `configs/smoke.yaml` (vit_tiny, batch 16) locally.

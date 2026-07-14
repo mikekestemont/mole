@@ -132,26 +132,33 @@ Phase 4 (training) can proceed without it.
 
 ### Foreign-checkpoint warm-start (interop with Raven's original checkpoints)
 
-`mole.selfsup.checkpoint` normalises both mole and original AttMask/iBOT checkpoints:
-`normalize_checkpoint` detects a foreign file (`args` Namespace + `module.`-prefixed
-DDP student, vs mole's `config` + `global_step`), strips the `module.` prefix, and
-synthesizes a mole `config` — architecture (`ARCH_FIELDS`) recovered from `args`, the
-rest left at mole defaults (deliberately NOT the original's rejected 256 px window).
-`filtered_load` does a strict-safe load (only matching-shape keys; reports missing /
-shape-mismatch / unexpected so a warm-start never crashes on a partial fit).
-- `mole train <config> --init-from raven.pth`: fresh run at **step 0**, weights only
-  (no optimizer/RNG), adopts the source arch (overrides conflicting config leaves with
-  a warning), loads student+teacher (student seeded from teacher if the file is
-  teacher-only). Ignored when resuming. This is a warm-start, NOT Phase-7 finetune
-  (no no-mutate branch / replay / LoRA).
-- `mole embed raven.pth ...`: `load_backbone` runs the same normaliser, so an original
+`mole.selfsup.checkpoint.normalize_checkpoint` reduces **three** checkpoint formats to
+a canonical bare-ViT-backbone + config `{backbone, config, global_step, foreign}`:
+1. **mole** — `config` dict + `student`/`teacher` MultiCropWrapper state dicts.
+2. **AttMask/iBOT full run** — `args` Namespace + DDP-`module.`-prefixed `student` + `teacher`.
+3. **extracted backbone** — `{"state_dict": bare ViT}` (or a raw sd), e.g. the original
+   `extract_backbone_weights.py` output. **This is what Raven actually shipped.**
+
+`_bare_backbone` strips `module.`/`backbone.` and drops the projection `head.`/`fc.`
+(heads are run-specific, re-initialised on warm-start). Architecture comes from `config`
+(mole), `args` (`ARCH_FIELDS`, full run), or is **inferred from the weights** when there
+is no metadata (`_infer_config`: embed_dim + depth → `_ARCH_BY_SHAPE`, plus patch size
+and num_class_tokens). `filtered_load` is a strict-safe partial load (matching-shape keys
+only; reports missing / shape-mismatch / unexpected) so warm-start never crashes on a
+partial fit. Everything non-architectural stays at mole defaults (NOT the original's
+rejected 256 px window; Phase-2 decision).
+- `mole train <config> --init-from raven.pth`: fresh run at **step 0**, backbone weights
+  only (no optimizer/RNG, heads fresh), adopts the source arch (overrides conflicting
+  config leaves with a warning). Ignored only for an idempotent re-run (manifest records
+  the SAME `init_from`); a stale/foreign dir errors. NOT Phase-7 finetune (no no-mutate
+  branch / replay / LoRA).
+- `mole embed raven.pth ...`: `load_backbone` runs the same normaliser, so a backbone
   checkpoint embeds directly; sidecar `source: foreign-import`. ViT is a faithful port
-  (identical param names, `img_size=[224]` both sides → `pos_embed` shapes match), so
-  weights load cleanly when arch/patch_size/num_class_tokens agree.
-- **Verified** on CPU/MPS with a synthesized Raven-format checkpoint (DDP `module.`
-  student, `args` not `config`): warm-start loaded all params, embed produced
-  `foreign-import` output, resume-precedence + shape-mismatch + teacher-only paths all
-  exercised.
+  (identical param names, `img_size=[224]` both sides → `pos_embed` shapes match).
+- **Verified on the REAL Raven checkpoint** (backbone-only, inferred `vit_small`): embed →
+  `(6, 384)` foreign-import; warm-start loaded teacher 150/150, student 150/151 (the one
+  missing is `masked_embed`, correctly re-init). A NaN/Inf loss now exits with a clean
+  `[mole] ERROR` (MPS vs CUDA / lower LR / fresh dir) instead of a traceback.
 
 ### Resume here (next session) — Phase 6 lineage registry + `mole models` + eval
 
