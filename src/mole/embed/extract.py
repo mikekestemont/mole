@@ -165,28 +165,39 @@ def _page_tokens(model, crops, device, batch_size: int):
     return torch.cat(outs, dim=0)
 
 
-def _foreground_mask(crops, patch_size: int, threshold: float):
-    """Raven et al.'s inference-time foreground filter (``get_foreground_mask``).
+def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "intensity"):
+    """Per-patch foreground mask, aligned with :func:`patch_descriptors` order.
 
-    Average-pools each window's input intensity (channel 0, ``[0,1]``) over the
-    ``patch_size`` grid and keeps patches whose mean is below ``1 - threshold``
-    — i.e. patches containing ink — dropping near-white background parchment.
-    Returns a ``[W, num_patches]`` bool tensor in the ViT patch-token (row-major)
-    order, so it aligns one-to-one with :func:`patch_descriptors`.
+    ``intensity`` (Raven et al.'s ``get_foreground_mask``): keep patches whose
+    mean input intensity is below ``1 - threshold`` — drops near-white background.
+    Correct for binarized / white-background scans, but USELESS on parchment,
+    where the background sits well below white and nothing gets dropped.
+
+    ``contrast``: keep patches whose local std exceeds ``threshold`` — text is
+    dark strokes on a lighter ground (high variance), blank parchment is smooth
+    (low variance). Background-colour-agnostic, so it removes empty patches on
+    parchment / colour photos where ``intensity`` cannot.
     """
     import torch
 
     x = torch.stack(crops)                                     # [W, C, S, S] in [0,1]
-    pooled = torch.nn.functional.avg_pool2d(x[:, 0:1], patch_size)  # [W,1,S/ps,S/ps]
-    pooled = pooled.squeeze(1).reshape(x.shape[0], -1)         # [W, num_patches]
-    return pooled < (1.0 - threshold)
+    g = x[:, 0:1]
+    mean = torch.nn.functional.avg_pool2d(g, patch_size).squeeze(1).reshape(x.shape[0], -1)
+    if method == "contrast":
+        sq = torch.nn.functional.avg_pool2d(g * g, patch_size).squeeze(1).reshape(x.shape[0], -1)
+        std = (sq - mean * mean).clamp(min=0).sqrt()
+        return std > threshold                                 # keep inked (high-contrast) patches
+    if method != "intensity":
+        raise ValueError(f"foreground method must be 'intensity' or 'contrast', got {method!r}")
+    return mean < (1.0 - threshold)                            # keep non-white patches
 
 
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           pooling: Pooling | str = Pooling.VLAD, whiten: bool = False,
           overrides: list[str] | None = None, *, batch_size: int = 32,
           vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
-          foreground: bool = False, foreground_threshold: float = 0.02,
+          foreground: bool = False, foreground_threshold: float | None = None,
+          foreground_method: str = "intensity",
           vlad_intra_norm: bool = True, invert: bool | None = None,
           codebook_from: str | Path | None = None, whiten_dim: int | None = None):
     """Extract page embeddings for a folder of images.
@@ -203,6 +214,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     import torch
 
     pooling = Pooling(pooling)
+    if foreground_threshold is None:   # method-appropriate default
+        foreground_threshold = 0.05 if foreground_method == "contrast" else 0.02
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -236,7 +249,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         print("[mole] note: --foreground only affects patches/vlad pooling; ignored "
               f"for {pooling.value}")
 
-    fg_note = (f" foreground<{1 - foreground_threshold:.2f}" if foreground else "")
+    fg_note = (f" foreground[{foreground_method}>{foreground_threshold:g}]" if foreground else "")
     inv_note = " inverted" if settings["invert"] else ""
     print(f"[mole] embed model={meta['model_id']} dim={meta['embed_dim']} "
           f"pooling={pooling.value}{fg_note}{inv_note} device={dev} | {len(pages)} pages")
@@ -260,7 +273,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         else:  # patches / vlad both need the raw per-patch descriptors
             patches = patch_descriptors(tokens, nct)             # [W, num_patches, dim]
             if foreground:
-                keep = _foreground_mask(crops, meta["patch_size"], foreground_threshold)
+                keep = _foreground_mask(crops, meta["patch_size"], foreground_threshold,
+                                        method=foreground_method)
                 if keep.shape[1] != patches.shape[1]:
                     raise ValueError(
                         f"foreground mask has {keep.shape[1]} patches but the model "
@@ -288,7 +302,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 
     _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
                   vlad_clusters, seed, foreground=foreground,
-                  foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
+                  foreground_threshold=foreground_threshold, foreground_method=foreground_method,
+                  vlad_intra_norm=vlad_intra_norm,
                   codebook_source=str(codebook_from) if codebook_from else "fitted")
     return output
 
@@ -380,8 +395,8 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str) -> None:
 
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
                   vlad_clusters, seed, *, foreground: bool = False,
-                  foreground_threshold: float = 0.02, vlad_intra_norm: bool = True,
-                  codebook_source: str = "fitted") -> None:
+                  foreground_threshold: float = 0.02, foreground_method: str = "intensity",
+                  vlad_intra_norm: bool = True, codebook_source: str = "fitted") -> None:
     if output.suffix == ".parquet":
         _write_parquet(output, matrix, rows)
     else:
@@ -399,6 +414,7 @@ def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
     }
     if foreground:
         sidecar["foreground_threshold"] = float(foreground_threshold)
+        sidecar["foreground_method"] = foreground_method
     if pooling is Pooling.VLAD:
         cb_path = output.with_suffix(".codebook.npy")
         np.save(cb_path, codebook)

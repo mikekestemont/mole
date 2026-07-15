@@ -28,6 +28,26 @@ def _patch_means(img, model_size=32, ps=16):
     return torch.nn.functional.avg_pool2d(crop[0:1], ps).reshape(-1), crop
 
 
+def test_contrast_foreground_drops_blank_parchment(tmp_path):
+    """On parchment (background well below white), intensity keeps everything but
+    contrast drops the smooth/blank patches and keeps the high-variance ink ones."""
+    # 32x32, patch grid 2x2 (patch_size 16): one patch has "ink texture" (checker
+    # -> high local std), the other three are flat mid-grey "parchment" (low std).
+    arr = np.full((32, 32, 3), 150, dtype=np.uint8)     # flat parchment ~0.59
+    arr[0:16:2, 0:16] = 20                              # striped ink in the top-left patch
+    p = tmp_path / "parch.png"
+    Image.fromarray(arr).save(p)
+    crop = _build_transform(32)(load_rgb(p))
+
+    # intensity: parchment (~0.59) is < 0.98 -> nothing dropped (Raven fails here)
+    keep_int = _foreground_mask([crop], 16, 0.02, method="intensity")[0]
+    assert bool(keep_int.all())
+
+    # contrast: only the textured (ink) patch clears the std threshold
+    keep_con = _foreground_mask([crop], 16, 0.06, method="contrast")[0]
+    assert bool(keep_con[0]) and not bool(keep_con[1:].any())
+
+
 def test_invert_fixes_foreground_on_white_on_black(tmp_path):
     """White-on-black: without invert the filter keeps background & drops ink;
     with invert it correctly keeps ink and drops the (now white) background."""

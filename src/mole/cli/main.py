@@ -179,10 +179,13 @@ def embed(
     device: Optional[str] = typer.Option(None, help="Force device (cuda/mps/cpu); default auto."),
     foreground: bool = typer.Option(
         False, "--foreground/--no-foreground",
-        help="Drop background patch tokens before patches/vlad pooling "
-             "(Raven's inference-time foreground mask)."),
-    foreground_threshold: float = typer.Option(
-        0.02, help="Keep a patch if its mean input intensity < 1 - threshold (default 0.02)."),
+        help="Drop background patch tokens before patches/vlad pooling."),
+    foreground_method: str = typer.Option(
+        "intensity", help="Foreground test: 'intensity' (Raven, white-bg/binarized) or "
+                          "'contrast' (local std — works on parchment/colour)."),
+    foreground_threshold: Optional[float] = typer.Option(
+        None, help="Keep threshold; default 0.02 for intensity (mean<1-thr), 0.05 for "
+                   "contrast (std>thr)."),
     vlad_intra_norm: bool = typer.Option(
         True, "--vlad-intra-norm/--no-vlad-intra-norm",
         help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
@@ -206,7 +209,8 @@ def embed(
     _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            seed=seed, device=device, foreground=foreground,
-           foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
+           foreground_threshold=foreground_threshold, foreground_method=foreground_method,
+           vlad_intra_norm=vlad_intra_norm,
            invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim)
 
 
