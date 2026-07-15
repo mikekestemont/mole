@@ -40,7 +40,7 @@ class PatchWindowDataset(Dataset):
     def __init__(self, root: str | Path, window_size: int = 512, model_size: int = 224,
                  overlap: float = 0.5, use_zones: bool = True, preset="mild",
                  aug_overrides: dict | None = None, pred_ratio=0.3, pred_ratio_var=0.0,
-                 pred_start_epoch: int = 0):
+                 pred_start_epoch: int = 0, invert: bool = False):
         root = Path(root)
         overrides = {**(aug_overrides or {}), "model_size": model_size}
         # Resolved AugConfig is the source of truth for global/local crop counts
@@ -48,6 +48,7 @@ class PatchWindowDataset(Dataset):
         self.aug_config = resolve_config(preset, **overrides)
         self.transform = build_transform(preset, **overrides)
         self.window_size = window_size
+        self.invert = invert
 
         # Build the (image_path, window) index from sizes only — no pixel loads.
         folders = [root] + [p for p in sorted(root.iterdir()) if p.is_dir()] if root.is_dir() else []
@@ -108,6 +109,6 @@ class PatchWindowDataset(Dataset):
 
     def __getitem__(self, idx: int):
         path, win = self.index[idx]
-        img = load_rgb(path)
+        img = load_rgb(path, invert=self.invert)
         crop = img.crop((win.x, win.y, win.x + win.size, win.y + win.size))
         return self.transform(crop), 0

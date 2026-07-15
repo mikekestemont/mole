@@ -175,6 +175,9 @@ images are scored, matched by dataset folder + basename. Relevance = same
 `hand_id`. Historical-WI reproduction: arrange the test set as a dataset folder
 with `hand_id` = writer ID and embed with the Raven-parity VLAD flags
 (`--pooling vlad --vlad-clusters 100 --foreground --no-vlad-intra-norm`).
+The binarized HWI images are white-on-black, so train with `--set data.invert=true`
+(recorded in the checkpoint; `mole embed` inherits it — or force with `--invert`)
+to put them in the black-on-white regime the foreground filter assumes.
 
 ---
 

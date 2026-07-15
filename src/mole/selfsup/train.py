@@ -243,7 +243,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         d["path"], window_size=d["window_size"], model_size=d["model_size"],
         overlap=d["overlap"], use_zones=d["use_zones"], preset=cfg["aug"]["preset"],
         pred_ratio=cfg["mask"]["pred_ratio"], pred_ratio_var=cfg["mask"]["pred_ratio_var"],
-        pred_start_epoch=cfg["mask"]["pred_start_epoch"],
+        pred_start_epoch=cfg["mask"]["pred_start_epoch"], invert=d.get("invert", False),
     )
     ac = dataset.aug_config
     ngc, nlc = ac.global_crops_number, ac.local_crops_number

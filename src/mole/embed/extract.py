@@ -38,7 +38,7 @@ def _as_bool(v):
 # data.* keys that --set-style overrides may change at embed time (defaults come
 # from the checkpoint's training config so embed matches train unless asked).
 _OVERRIDABLE = {"window_size": int, "overlap": float, "use_zones": _as_bool,
-                "batch_size": int}
+                "invert": _as_bool, "batch_size": int}
 
 
 # --------------------------------------------------------------------- backbone
@@ -90,6 +90,7 @@ def load_backbone(checkpoint: str | Path, map_location: str = "cpu"):
         "window_size": int(d["window_size"]),
         "overlap": float(d["overlap"]),
         "use_zones": bool(d["use_zones"]),
+        "invert": bool(d.get("invert", False)),
         "checkpoint": str(checkpoint),
         "source": "foreign-import" if norm["foreign"] else "mole",
     }
@@ -186,7 +187,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           overrides: list[str] | None = None, *, batch_size: int = 32,
           vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
           foreground: bool = False, foreground_threshold: float = 0.02,
-          vlad_intra_norm: bool = True):
+          vlad_intra_norm: bool = True, invert: bool | None = None):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -208,7 +209,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     model, meta = load_backbone(checkpoint, map_location=str(dev))
 
     settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
-                "use_zones": meta["use_zones"], "batch_size": batch_size}
+                "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
+                "batch_size": batch_size}
+    if invert is not None:  # explicit --invert/--no-invert wins over the checkpoint's value
+        settings["invert"] = invert
     for ov in overrides or []:
         if "=" not in ov:
             raise ValueError(f"--set expects key=value, got {ov!r}")
@@ -232,16 +236,18 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
               f"for {pooling.value}")
 
     fg_note = (f" foreground<{1 - foreground_threshold:.2f}" if foreground else "")
+    inv_note = " inverted" if settings["invert"] else ""
     print(f"[mole] embed model={meta['model_id']} dim={meta['embed_dim']} "
-          f"pooling={pooling.value}{fg_note} device={dev} | {len(pages)} pages")
+          f"pooling={pooling.value}{fg_note}{inv_note} device={dev} | {len(pages)} pages")
 
     rows: list[dict] = []
     vectors: list[np.ndarray] = []           # fixed-vector poolings (mean/cls)
     page_descriptors: list[np.ndarray] = []  # patch descriptors per page (patches/vlad)
     desc_images: list[str] = []              # image aligned with page_descriptors
 
+    meta["invert"] = bool(settings["invert"])  # record the value actually applied
     for img, wins in track(pages, "Embedding pages", unit="page"):
-        page = load_rgb(img)
+        page = load_rgb(img, invert=settings["invert"])
         crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
         tokens = _page_tokens(model, crops, dev, settings["batch_size"])
 

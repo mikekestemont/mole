@@ -182,6 +182,10 @@ def embed(
     vlad_intra_norm: bool = typer.Option(
         True, "--vlad-intra-norm/--no-vlad-intra-norm",
         help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
+    invert: Optional[bool] = typer.Option(
+        None, "--invert/--no-invert",
+        help="Negate intensity at load (white-on-black -> black-on-white). Default: inherit "
+             "the training value from the checkpoint."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -194,7 +198,8 @@ def embed(
     _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            seed=seed, device=device, foreground=foreground,
-           foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm)
+           foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
+           invert=invert)
 
 
 # ---------------------------------------------------------------------------- viz

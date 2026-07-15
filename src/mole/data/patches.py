@@ -40,16 +40,19 @@ class Window(NamedTuple):
     size: int
 
 
-def load_rgb(image_path: str | Path):
+def load_rgb(image_path: str | Path, invert: bool = False):
     """Open an image and normalize to a 3-channel RGB PIL image.
 
     Grayscale/bitonal inputs are replicated to 3 channels transparently. Truncated
-    files are tolerated (common with mass-digitized material).
+    files are tolerated (common with mass-digitized material). ``invert`` negates
+    intensity (e.g. white-on-black binarizations -> conventional black-on-white),
+    which is what the foreground filter and light-background augs assume.
     """
-    from PIL import Image, ImageFile
+    from PIL import Image, ImageFile, ImageOps
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
-    return Image.open(image_path).convert("RGB")
+    img = Image.open(image_path).convert("RGB")
+    return ImageOps.invert(img) if invert else img
 
 
 def _foreground_fraction(crop) -> float:

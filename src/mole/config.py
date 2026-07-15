@@ -28,6 +28,7 @@ DEFAULTS: dict[str, Any] = {
         "model_size": 224,            # ViT input size
         "overlap": 0.5,               # window grid overlap
         "use_zones": True,            # restrict windows to prep text zones (zones.json)
+        "invert": False,              # negate intensity at load (white-on-black -> black-on-white)
         "num_workers": 8,
     },
     "aug": {
