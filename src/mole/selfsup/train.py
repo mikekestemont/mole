@@ -242,6 +242,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
     dataset = PatchWindowDataset(
         d["path"], window_size=d["window_size"], model_size=d["model_size"],
         overlap=d["overlap"], use_zones=d["use_zones"], preset=cfg["aug"]["preset"],
+        aug_overrides=cfg["aug"].get("overrides") or None,
         pred_ratio=cfg["mask"]["pred_ratio"], pred_ratio_var=cfg["mask"]["pred_ratio_var"],
         pred_start_epoch=cfg["mask"]["pred_start_epoch"], invert=d.get("invert", False),
     )

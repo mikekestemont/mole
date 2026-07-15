@@ -188,7 +188,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
           foreground: bool = False, foreground_threshold: float = 0.02,
           vlad_intra_norm: bool = True, invert: bool | None = None,
-          codebook_from: str | Path | None = None):
+          codebook_from: str | Path | None = None, whiten_dim: int | None = None):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -279,13 +279,16 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                                  vlad_clusters, seed, intra_norm=vlad_intra_norm,
                                  codebook_from=codebook_from)
 
-    if whiten and pooling is not Pooling.PATCHES:
-        matrix = _pca_whiten(matrix)
+    did_whiten = (whiten or whiten_dim) and pooling is not Pooling.PATCHES
+    if did_whiten:
+        matrix = _pca_whiten(matrix, dim=whiten_dim)
         meta["whitened"] = True
+        if whiten_dim:
+            meta["whiten_dim"] = int(matrix.shape[1])
 
-    _write_output(output, matrix, rows, meta, pooling, whiten, codebook, vlad_clusters, seed,
-                  foreground=foreground, foreground_threshold=foreground_threshold,
-                  vlad_intra_norm=vlad_intra_norm,
+    _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
+                  vlad_clusters, seed, foreground=foreground,
+                  foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
                   codebook_source=str(codebook_from) if codebook_from else "fitted")
     return output
 
@@ -341,15 +344,21 @@ def _pick_device():
     return torch.device("cpu")
 
 
-def _pca_whiten(mat: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+def _pca_whiten(mat: np.ndarray, dim: int | None = None, eps: float = 1e-6) -> np.ndarray:
     """PCA-whiten rows of ``mat`` (classic retrieval post-processing), re-L2'd.
 
     Fit transductively on the same matrix (standard for a one-shot index build).
+    ``dim`` keeps only the top-``dim`` principal components (largest variance) —
+    the reduce-and-whiten step writer retrieval uses (e.g. VLAD 38400 -> 384).
     """
     n = len(mat)
     x = mat - mat.mean(0, keepdims=True)
     u, s, _ = np.linalg.svd(x, full_matrices=False)
     keep = s > eps * s.max() if s.size else np.array([], dtype=bool)
+    if dim is not None and keep.size:
+        top = np.zeros_like(keep)
+        top[:dim] = True                      # SVD returns singular values descending
+        keep = keep & top
     white = (u * np.sqrt(max(n - 1, 1)))[:, keep]
     norms = np.linalg.norm(white, axis=1, keepdims=True)
     return (white / np.maximum(norms, 1e-12)).astype(np.float32)

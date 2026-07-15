@@ -169,6 +169,10 @@ def embed(
     output: Path = typer.Argument(..., help="Output .npy/.parquet path."),
     pooling: Pooling = typer.Option(Pooling.VLAD, help="Pooling strategy (default: vlad)."),
     whiten: bool = typer.Option(False, help="Apply PCA-whitening (fixed-vector poolings)."),
+    whiten_dim: Optional[int] = typer.Option(
+        None, "--whiten-dim",
+        help="PCA-whiten AND reduce to this many dims (implies --whiten; e.g. 384 for the "
+             "writer-retrieval VLAD->384 recipe)."),
     batch_size: int = typer.Option(32, help="Windows per forward pass."),
     vlad_clusters: int = typer.Option(64, help="VLAD codebook size (pooling=vlad)."),
     seed: int = typer.Option(0, help="VLAD k-means seed (reproducible codebook)."),
@@ -203,7 +207,7 @@ def embed(
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
-           invert=invert, codebook_from=codebook_from)
+           invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim)
 
 
 # ---------------------------------------------------------------------------- viz

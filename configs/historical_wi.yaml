@@ -1,0 +1,64 @@
+# Historical-WI reproduction of Raven et al., "Self-Supervised Vision
+# Transformers for Writer Retrieval" (arXiv:2409.00751). Encodes the paper's
+# recipe as faithfully as mole allows; deviations are flagged inline.
+#
+# Run:
+#   mole train configs/historical_wi.yaml \
+#       --set data.path=data/hwi-train --set train.output_dir=runs/hwi_paper
+#
+# Then (fit codebook + PCA on train, apply to test):
+#   mole embed <ckpt> data/hwi-train outputs/hwi/train.npy \
+#       --vlad-clusters 100 --foreground --no-vlad-intra-norm
+#   mole embed <ckpt> data/hwi-test  outputs/hwi/test.npy \
+#       --foreground --no-vlad-intra-norm \
+#       --codebook-from outputs/hwi/train.codebook.npy --whiten-dim 384
+#   mole eval outputs/hwi/test.npy data/hwi-test --topk 1,5
+
+data:
+  path: data/hwi-train
+  window_size: 256          # PAPER: 256x256 patches (was mole's 512) -> finer descriptors
+  overlap: 0.875            # stride = 256*(1-0.875) = 32 (PAPER) -> ~1.75M training windows
+  model_size: 224           # ViT input (PAPER: 224); 256->224 is a mild resize, near-native
+  use_zones: false          # no zones.json; tile the whole (binarized) page densely
+  invert: true              # HWI binarized is white-on-black -> flip to black-on-white
+  num_workers: 6            # match the box's core count
+
+aug:
+  preset: mild
+  overrides:
+    # PAPER MultiCrop: 2 global (224, scale [0.4,1]) + 8 local (96, scale [0.05,0.4]).
+    global_crops_scale: [0.4, 1.0]
+    local_crops_number: 8
+    local_size: 96
+    local_crops_scale: [0.05, 0.4]
+    # PAPER: dilation/erosion with random kernels, 50% per crop.
+    erosion_dilation_prob: 0.5
+    # Binarized data: colour/JPEG/rotation augs are inapplicable -> disable
+    # (ASSUMPTION: paper does not list these for binary; blur kept as DINO base).
+    color_jitter_prob: 0.0
+    grayscale_prob: 0.0
+    jpeg_prob: 0.0
+    rotation_prob: 0.0
+
+model:
+  arch: vit_small           # PAPER: ViT-small/16
+  patch_size: 16
+
+mask:
+  pred_shape: attmask_high  # PAPER: AttMask (attention-guided MIM)
+  pred_ratio: 0.3
+  masking_prob: 0.5
+
+optim:
+  lr: 0.005                 # PAPER: peak LR 0.005. NOTE: mole scales LR by batch/256 —
+                            #   verify the effective LR vs the paper's batch (see below).
+  warmup_epochs: 2          # PAPER: linear warmup over the first 2 epochs
+  batch_size: 48            # per-GPU (11GB 2080Ti). PAPER used 4 GPUs; single-GPU here.
+  freeze_last_layer: 1      # PAPER: last layer frozen during the first epoch
+
+train:
+  epochs: 20                # PAPER: 20 epochs
+  fp16: true
+  output_dir: runs/hwi_paper
+  save_every_steps: 1000
+  seed: 0
