@@ -167,20 +167,34 @@ def embed(
     checkpoint: Path = typer.Argument(..., help="Model checkpoint to extract with."),
     input_dir: Path = typer.Argument(..., help="Folder of images to embed."),
     output: Path = typer.Argument(..., help="Output .npy/.parquet path."),
-    pooling: Pooling = typer.Option(Pooling.MEAN, help="Pooling strategy."),
+    pooling: Pooling = typer.Option(Pooling.VLAD, help="Pooling strategy (default: vlad)."),
     whiten: bool = typer.Option(False, help="Apply PCA-whitening (fixed-vector poolings)."),
     batch_size: int = typer.Option(32, help="Windows per forward pass."),
     vlad_clusters: int = typer.Option(64, help="VLAD codebook size (pooling=vlad)."),
     seed: int = typer.Option(0, help="VLAD k-means seed (reproducible codebook)."),
     device: Optional[str] = typer.Option(None, help="Force device (cuda/mps/cpu); default auto."),
+    foreground: bool = typer.Option(
+        False, "--foreground/--no-foreground",
+        help="Drop background patch tokens before patches/vlad pooling "
+             "(Raven's inference-time foreground mask)."),
+    foreground_threshold: float = typer.Option(
+        0.02, help="Keep a patch if its mean input intensity < 1 - threshold (default 0.02)."),
+    vlad_intra_norm: bool = typer.Option(
+        True, "--vlad-intra-norm/--no-vlad-intra-norm",
+        help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
-    """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping."""
+    """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
+
+    Raven-parity VLAD baseline: --pooling vlad --vlad-clusters 100 --foreground
+    --no-vlad-intra-norm.
+    """
     from mole.embed import embed as _embed
 
     _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
-           seed=seed, device=device)
+           seed=seed, device=device, foreground=foreground,
+           foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm)
 
 
 # ---------------------------------------------------------------------------- viz
@@ -205,11 +219,18 @@ def viz(
 # --------------------------------------------------------------------------- eval
 @app.command()
 def eval(  # noqa: A001 - deliberately mirrors the subcommand name
-    embeddings: Path = typer.Argument(..., help="Embeddings file to evaluate."),
-    datasets_root: Path = typer.Argument(..., help="Datasets root (for labels.csv)."),
+    embeddings: Path = typer.Argument(..., help="Embeddings .npy to evaluate (page-level)."),
+    datasets_root: Path = typer.Argument(..., help="Dataset dir or root holding labels.csv."),
+    metric: str = typer.Option("cosine", help="Ranking metric: cosine | euclidean."),
+    topk: str = typer.Option("1,5,10", help="Comma-separated Top-k cutoffs to report."),
+    out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
 ) -> None:
-    """Run the retrieval benchmark from partial labels (mAP, top-k, cross-dataset)."""
-    _todo("eval", phase=6)
+    """Retrieval benchmark from partial labels: mAP, Top-k, cross-dataset breakdown."""
+    from mole.eval import evaluate, format_report
+
+    ks = tuple(int(k) for k in topk.split(",") if k.strip())
+    result = evaluate(embeddings, datasets_root, metric=metric, topk=ks, out=out)
+    console.print(format_report(result))
 
 
 # ------------------------------------------------------------------- models list/show

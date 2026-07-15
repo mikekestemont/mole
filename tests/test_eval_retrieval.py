@@ -1,0 +1,127 @@
+"""Tests for the retrieval benchmark (mole.eval.retrieval)."""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+
+from mole.eval.retrieval import (
+    _rank_metrics,
+    _similarity,
+    evaluate,
+)
+
+
+def test_rank_metrics_hand_computed():
+    """mAP/Top-1/macro against a fully hand-worked 4-doc, 2-hand example."""
+    labels = np.array(["A", "A", "B", "B"], dtype=object)
+    # sim rows chosen so each query's ranking of the *others* is known:
+    #  q0(A): 1(A),2,3   -> relevant first        -> AP 1.000, top1 hit
+    #  q1(A): 0(A),2,3   -> relevant first        -> AP 1.000, top1 hit
+    #  q2(B): 0,1,3(B)   -> relevant at rank 3    -> AP 0.333, top1 miss
+    #  q3(B): 2(B),0,1   -> relevant first        -> AP 1.000, top1 hit
+    sim = np.array([
+        [0.00, 0.90, 0.50, 0.10],
+        [0.90, 0.00, 0.40, 0.20],
+        [0.80, 0.30, 0.00, 0.20],
+        [0.20, 0.10, 0.95, 0.00],
+    ])
+    off_diag = ~np.eye(4, dtype=bool)
+    s = _rank_metrics(sim, labels, off_diag, (1, 5))
+    assert s is not None
+    assert s.n_queries == 4
+    assert s.mean_ap == np.float64(np.mean([1.0, 1.0, 1 / 3, 1.0])).item()
+    assert abs(s.mean_ap - 0.83333) < 1e-4
+    assert abs(s.top1 - 0.75) < 1e-9
+    # macro = mean(hand A mean-AP=1.0, hand B mean-AP=(1/3+1)/2=0.6667)
+    assert abs(s.macro_map - ((1.0 + (1 / 3 + 1.0) / 2) / 2)) < 1e-9
+    assert abs(s.topk[5] - 1.0) < 1e-9  # every query has a relevant within top-(n-1)
+
+
+def test_singleton_hand_query_is_skipped():
+    """A hand with only one labeled doc yields no relevant gallery item -> skipped."""
+    labels = np.array(["A", "A", "Z"], dtype=object)  # Z is a singleton
+    sim = np.array([[0, 0.9, 0.8], [0.9, 0, 0.7], [0.8, 0.7, 0]])
+    s = _rank_metrics(sim, labels, ~np.eye(3, dtype=bool), (1,))
+    assert s.n_queries == 2  # only the two A-docs are valid queries
+
+
+def test_cosine_euclidean_agree_when_normalized():
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((6, 5))
+    X /= np.linalg.norm(X, axis=1, keepdims=True)
+    # For unit vectors, cosine and (negative) euclidean induce identical rankings.
+    cos = _similarity(X, "cosine")
+    euc = _similarity(X, "euclidean")
+    for i in range(6):
+        assert np.array_equal(np.argsort(-cos[i]), np.argsort(-euc[i]))
+
+
+def _write_dataset(root, names, hands, vectors):
+    root.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (root / name).write_bytes(b"")  # dummy image file (suffix is all that matters)
+    lines = ["filename,hand_id"]
+    lines += [f"{n},{h}" for n, h in zip(names, hands) if h]
+    (root / "labels.csv").write_text("\n".join(lines) + "\n")
+    return np.asarray(vectors, dtype=np.float32)
+
+
+def test_evaluate_end_to_end_perfect(tmp_path):
+    """Perfectly separable embeddings -> mAP == Top-1 == 1.0, sidecar written."""
+    ds = tmp_path / "wi"
+    names = ["a1.png", "a2.png", "b1.png", "b2.png"]
+    hands = ["A", "A", "B", "B"]
+    vecs = [[1, 0], [1, 0.01], [0, 1], [0.01, 1]]  # same-hand vectors near-identical
+    mat = _write_dataset(ds, names, hands, vecs)
+
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({
+        "model_id": "test@abc+step0",
+        "rows": [{"row": i, "image": f"{ds}/{n}"} for i, n in enumerate(names)],
+    }))
+
+    r = evaluate(npy, ds, topk=(1, 2))
+    assert r.n_labeled == 4 and r.n_hands == 2
+    assert abs(r.overall.mean_ap - 1.0) < 1e-9
+    assert abs(r.overall.top1 - 1.0) < 1e-9
+    assert (tmp_path / "emb.eval.json").is_file()
+    saved = json.loads((tmp_path / "emb.eval.json").read_text())
+    assert saved["overall"]["topk"]["1"] == 1.0  # json keys are strings
+
+
+def test_evaluate_cross_dataset_breakdown(tmp_path):
+    """Two datasets sharing a hand -> both within- and cross-dataset are scored.
+
+    Note the two scans share the basename ``a*.png`` deliberately: attribution
+    must key on the dataset folder, not just the basename.
+    """
+    root = tmp_path / "root"
+    # hand A appears in BOTH scans (twice in scan1 so within-dataset is defined)
+    _write_dataset(root / "scan1", ["a1.png", "a2.png", "b.png"],
+                   ["A", "A", "B"], [[1, 0], [1, 0.02], [0, 1]])
+    _write_dataset(root / "scan2", ["a3.png", "c.png"],
+                   ["A", "C"], [[0.99, 0.01], [-1, 0]])
+
+    mat = np.array([[1, 0], [1, 0.02], [0, 1], [0.99, 0.01], [-1, 0]], dtype=np.float32)
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    rows = [
+        {"row": 0, "image": f"{root}/scan1/a1.png"},
+        {"row": 1, "image": f"{root}/scan1/a2.png"},
+        {"row": 2, "image": f"{root}/scan1/b.png"},
+        {"row": 3, "image": f"{root}/scan2/a3.png"},
+        {"row": 4, "image": f"{root}/scan2/c.png"},
+    ]
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({"model_id": "t@0", "rows": rows}))
+
+    r = evaluate(npy, root, topk=(1,))
+    assert set(r.datasets) == {"scan1", "scan2"}
+    assert r.within_dataset is not None and r.cross_dataset is not None
+    # within-dataset: only the two scan1 A-docs have a same-scan relative
+    assert r.within_dataset.n_queries == 2
+    # cross-dataset: the three A-docs each have a same-hand doc in the other scan
+    assert r.cross_dataset.n_queries == 3
+    assert abs(r.cross_dataset.top1 - 1.0) < 1e-9  # A-scans are nearest across sets

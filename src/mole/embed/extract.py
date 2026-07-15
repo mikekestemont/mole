@@ -164,10 +164,29 @@ def _page_tokens(model, crops, device, batch_size: int):
     return torch.cat(outs, dim=0)
 
 
+def _foreground_mask(crops, patch_size: int, threshold: float):
+    """Raven et al.'s inference-time foreground filter (``get_foreground_mask``).
+
+    Average-pools each window's input intensity (channel 0, ``[0,1]``) over the
+    ``patch_size`` grid and keeps patches whose mean is below ``1 - threshold``
+    — i.e. patches containing ink — dropping near-white background parchment.
+    Returns a ``[W, num_patches]`` bool tensor in the ViT patch-token (row-major)
+    order, so it aligns one-to-one with :func:`patch_descriptors`.
+    """
+    import torch
+
+    x = torch.stack(crops)                                     # [W, C, S, S] in [0,1]
+    pooled = torch.nn.functional.avg_pool2d(x[:, 0:1], patch_size)  # [W,1,S/ps,S/ps]
+    pooled = pooled.squeeze(1).reshape(x.shape[0], -1)         # [W, num_patches]
+    return pooled < (1.0 - threshold)
+
+
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
-          pooling: Pooling | str = Pooling.MEAN, whiten: bool = False,
+          pooling: Pooling | str = Pooling.VLAD, whiten: bool = False,
           overrides: list[str] | None = None, *, batch_size: int = 32,
-          vlad_clusters: int = 64, seed: int = 0, device: str | None = None):
+          vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
+          foreground: bool = False, foreground_threshold: float = 0.02,
+          vlad_intra_norm: bool = True):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -206,8 +225,15 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     transform = _build_transform(meta["model_size"])
     nct = meta["num_class_tokens"]
 
+    if foreground and pooling in (Pooling.MEAN, Pooling.CLS):
+        # Foreground filtering selects *patch* tokens; mean/cls pool differently
+        # (mean over all patches / the class token) so it has no effect there.
+        print("[mole] note: --foreground only affects patches/vlad pooling; ignored "
+              f"for {pooling.value}")
+
+    fg_note = (f" foreground<{1 - foreground_threshold:.2f}" if foreground else "")
     print(f"[mole] embed model={meta['model_id']} dim={meta['embed_dim']} "
-          f"pooling={pooling.value} device={dev} | {len(pages)} pages")
+          f"pooling={pooling.value}{fg_note} device={dev} | {len(pages)} pages")
 
     rows: list[dict] = []
     vectors: list[np.ndarray] = []           # fixed-vector poolings (mean/cls)
@@ -225,7 +251,17 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             vectors.append(vec)
             rows.append({"row": len(rows), "image": str(img), "n_windows": len(wins)})
         else:  # patches / vlad both need the raw per-patch descriptors
-            desc = patch_descriptors(tokens, nct).reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
+            patches = patch_descriptors(tokens, nct)             # [W, num_patches, dim]
+            if foreground:
+                keep = _foreground_mask(crops, meta["patch_size"], foreground_threshold)
+                if keep.shape[1] != patches.shape[1]:
+                    raise ValueError(
+                        f"foreground mask has {keep.shape[1]} patches but the model "
+                        f"produced {patches.shape[1]} patch tokens per window "
+                        f"(check patch_size={meta['patch_size']} / model_size={meta['model_size']})")
+                desc = patches[keep].reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
+            else:
+                desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
             page_descriptors.append(desc)
             desc_images.append(str(img))
             if pooling is Pooling.PATCHES:
@@ -233,17 +269,20 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                 rows.extend({"row": start + j, "image": str(img)} for j in range(len(desc)))
 
     matrix, codebook = _assemble(pooling, vectors, page_descriptors, desc_images, rows,
-                                 vlad_clusters, seed)
+                                 vlad_clusters, seed, intra_norm=vlad_intra_norm)
 
     if whiten and pooling is not Pooling.PATCHES:
         matrix = _pca_whiten(matrix)
         meta["whitened"] = True
 
-    _write_output(output, matrix, rows, meta, pooling, whiten, codebook, vlad_clusters, seed)
+    _write_output(output, matrix, rows, meta, pooling, whiten, codebook, vlad_clusters, seed,
+                  foreground=foreground, foreground_threshold=foreground_threshold,
+                  vlad_intra_norm=vlad_intra_norm)
     return output
 
 
-def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed):
+def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed,
+              *, intra_norm: bool = True):
     """Turn per-page results into the final matrix (+ codebook for vlad).
 
     ``rows`` is already filled for mean/cls/patches; for vlad it is empty and
@@ -262,7 +301,7 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
     t0 = time.perf_counter()
     codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed)
     print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
-    mat = np.vstack([_vlad.vlad_encode(d, codebook)
+    mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm)
                      for d in track(page_descriptors, "VLAD encoding", unit="page")])
     rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
     return mat, codebook
@@ -307,7 +346,8 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str) -> None:
 
 
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
-                  vlad_clusters, seed) -> None:
+                  vlad_clusters, seed, *, foreground: bool = False,
+                  foreground_threshold: float = 0.02, vlad_intra_norm: bool = True) -> None:
     if output.suffix == ".parquet":
         _write_parquet(output, matrix, rows)
     else:
@@ -319,14 +359,18 @@ def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
         "whiten": bool(whiten),
         "embed_matrix_shape": list(matrix.shape),
         "n_rows": len(rows),
+        "foreground_filter": bool(foreground),
         "created": _dt.datetime.now().isoformat(timespec="seconds"),
         "rows": rows,
     }
+    if foreground:
+        sidecar["foreground_threshold"] = float(foreground_threshold)
     if pooling is Pooling.VLAD:
         cb_path = output.with_suffix(".codebook.npy")
         np.save(cb_path, codebook)
         sidecar["vlad_clusters"] = int(vlad_clusters)
         sidecar["vlad_seed"] = int(seed)
+        sidecar["vlad_intra_norm"] = bool(vlad_intra_norm)
         sidecar["codebook"] = str(cb_path.name)
     output.with_suffix(".mapping.json").write_text(json.dumps(sidecar, indent=2))
     print(f"[mole] ✓ wrote {tuple(matrix.shape)} embeddings → {output}")

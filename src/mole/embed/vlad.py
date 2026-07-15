@@ -74,12 +74,16 @@ def _numpy_kmeans(x: np.ndarray, k: int, seed: int, max_iter: int) -> np.ndarray
     return centers.astype(np.float32)
 
 
-def vlad_encode(descriptors, codebook, powernorm: bool = True) -> np.ndarray:
+def vlad_encode(descriptors, codebook, powernorm: bool = True,
+                intra_norm: bool = True) -> np.ndarray:
     """VLAD-encode a page's descriptors against a fitted codebook.
 
-    Aggregates residuals (descriptor - nearest centre) per cluster, intra-
-    normalises each cluster block, then optional signed power-norm and a final
-    global L2. Returns a flat ``[K * dim]`` float32 vector.
+    Aggregates residuals (descriptor - nearest centre) per cluster, optionally
+    intra-normalises each cluster block, then optional signed power-norm and a
+    final global L2. Returns a flat ``[K * dim]`` float32 vector.
+
+    ``intra_norm=False`` reproduces Raven et al.'s plain VLAD (residual sum →
+    power-norm → global L2, no per-cluster normalisation).
     """
     x = np.asarray(descriptors, dtype=np.float32)
     c = np.asarray(codebook, dtype=np.float32)
@@ -95,9 +99,10 @@ def vlad_encode(descriptors, codebook, powernorm: bool = True) -> np.ndarray:
         members = x[assign == i]
         if len(members):
             vlad[i] = (members - c[i]).sum(0)
-    # Intra-normalisation (per-cluster L2).
-    norms = np.linalg.norm(vlad, axis=1, keepdims=True)
-    vlad = vlad / np.maximum(norms, 1e-12)
+    # Intra-normalisation (per-cluster L2). Skipped for Raven-parity plain VLAD.
+    if intra_norm:
+        norms = np.linalg.norm(vlad, axis=1, keepdims=True)
+        vlad = vlad / np.maximum(norms, 1e-12)
     vlad = vlad.reshape(-1)
     if powernorm:
         vlad = np.sign(vlad) * np.sqrt(np.abs(vlad))

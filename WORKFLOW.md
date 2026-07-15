@@ -159,12 +159,22 @@ mole embed <ckpt> data/samples outputs/patches.npy --pooling patches   # raw per
 mole embed <ckpt> data/samples outputs/emb.npy --whiten --device cpu --set window_size=384
 ```
 
-## 7. `eval` / `models` 🚧 (Phase 6)
+## 7. `eval` ✅ / `models` 🚧 (Phase 6)
 
 ```bash
-mole eval outputs/emb.npy data/samples        # mAP / top-k from partial labels
-mole models list                              # lineage tree
+# Writer-retrieval benchmark (leave-one-out): mAP, macro-mAP, Top-k, and a
+# cross-dataset breakdown when labels span >1 dataset. Writes <emb>.eval.json.
+mole eval outputs/emb.npy data/<dataset>            # cosine ranking (default)
+mole eval outputs/emb.npy data/<dataset> --metric euclidean --topk 1,5,10
+
+mole models list                                    # lineage tree (still 🚧)
 ```
+
+Labels come from each dataset's `labels.csv` (`filename,hand_id`); only labeled
+images are scored, matched by dataset folder + basename. Relevance = same
+`hand_id`. Historical-WI reproduction: arrange the test set as a dataset folder
+with `hand_id` = writer ID and embed with the Raven-parity VLAD flags
+(`--pooling vlad --vlad-clusters 100 --foreground --no-vlad-intra-norm`).
 
 ---
 

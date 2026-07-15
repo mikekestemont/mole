@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from mole.eval.retrieval import EvalResult, RetrievalScores, evaluate, format_report
+
+__all__ = ["EvalResult", "RetrievalScores", "evaluate", "format_report"]
