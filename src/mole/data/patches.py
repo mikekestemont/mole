@@ -51,7 +51,16 @@ def load_rgb(image_path: str | Path, invert: bool = False):
     from PIL import Image, ImageFile, ImageOps
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
-    img = Image.open(image_path).convert("RGB")
+    img = Image.open(image_path)
+    if getattr(img, "n_frames", 1) > 1:      # multi-frame / pyramidal TIFF
+        best, area = 0, -1                   # keep the largest frame (the full image,
+        for i in range(img.n_frames):        # not a thumbnail); mismatched frames also
+            img.seek(i)                      # crash OpenCV's loader in the YOLO detector
+            a = img.size[0] * img.size[1]
+            if a > area:
+                area, best = a, i
+        img.seek(best)
+    img = img.convert("RGB")
     return ImageOps.invert(img) if invert else img
 
 

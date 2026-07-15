@@ -103,11 +103,11 @@ class HeuristicTextZoneDetector:
 
     def detect(self, image_path: str | Path) -> list[Detection]:
         import numpy as np
-        from PIL import Image, ImageFile
         from scipy import ndimage
 
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
-        gray = np.asarray(Image.open(image_path).convert("L"), dtype=np.float32)
+        from mole.data.patches import load_rgb
+
+        gray = np.asarray(load_rgb(image_path).convert("L"), dtype=np.float32)
         h, w = gray.shape
 
         # Adaptive threshold: ink is darker than a local mean by a margin.
@@ -171,7 +171,15 @@ class YoloTextZoneDetector:
         self.device = device
 
     def detect(self, image_path: str | Path) -> list[Detection]:
-        res = self.model.predict(str(image_path), conf=self.conf, verbose=False,
+        import numpy as np
+
+        from mole.data.patches import load_rgb
+
+        # Feed a PIL-decoded array (not the path): ultralytics' cv2 loader stacks
+        # mismatched multi-frame TIFF frames and crashes, and this keeps the
+        # detector's pixel space identical to mole's window sampling. cv2 wants BGR.
+        rgb = np.asarray(load_rgb(image_path))
+        res = self.model.predict(rgb[:, :, ::-1], conf=self.conf, verbose=False,
                                  device=self.device)
         if not res:
             return []
