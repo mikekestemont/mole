@@ -67,13 +67,34 @@ def prep(
     qc: Path = typer.Option(Path("outputs/prep_qc.html"), help="QC contact-sheet HTML path."),
     write_crops: Optional[Path] = typer.Option(None, help="Also materialise cropped images into this folder (opt-in)."),
     from_zones: bool = typer.Option(False, "--from-zones", help="Rebuild QC (+crops) from existing zones.json — no detector, no GPU."),
+    binarize: str = typer.Option("none", help="Binarize images first: 'none' or 'sauvola' (adaptive; for camera photos)."),
+    binarize_out: Optional[Path] = typer.Option(None, help="Output dir for binarized images (default: <input_dir>-bin)."),
+    sauvola_window: int = typer.Option(25, help="Sauvola local window in px (odd)."),
+    sauvola_k: float = typer.Option(0.2, help="Sauvola k — higher = more aggressive/thinner ink."),
 ) -> None:
     """Detect the main handwritten text zone of each page and store coordinates.
 
     Writes a zones.json manifest (reused by augview/train/embed) into the dataset
     folder; the detector runs once. Cropped images are opt-in via --write-crops.
     Use --from-zones to just re-view results from a stored manifest (fast, no GPU).
+
+    With --binarize sauvola, instead binarizes the images (black-on-white) into a
+    new folder + a QC sheet; combine with --sample N to preview before committing.
     """
+    if binarize != "none":
+        from mole.prep.binarize import binarize_folder
+
+        out_dir = binarize_out or input_dir.parent / f"{input_dir.name}-bin"
+        recs = binarize_folder(input_dir, out_dir, method=binarize, window=sauvola_window,
+                               k=sauvola_k, sample=sample, qc_html=qc)
+        if sample is not None:
+            console.print(f"[yellow]preview only ({len(recs)} images) — nothing written; "
+                          f"tune --sauvola-window/--sauvola-k, then re-run without --sample[/yellow]")
+        else:
+            console.print(f"[green]✓ binarized {len(recs)} images → {out_dir}[/green]")
+        console.print(f"[green]✓ QC sheet → {qc}[/green]")
+        return
+
     from mole.prep import prep_folder, qc_from_zones
 
     if from_zones:
