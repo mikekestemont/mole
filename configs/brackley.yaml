@@ -1,0 +1,51 @@
+# Brackley finetune — warm-start raven, adapt to COLOR charters.
+#
+# Combines the Historical-WI "breakthrough" geometry (finer 256px windows + 8
+# local crops → sharper writer descriptors; also matches raven's own 256px
+# training scale) with COLOR-charter settings and a GENTLE warm-start LR.
+#
+# What is deliberately NOT copied from historical_wi.yaml (that config is for
+# BINARIZED data): invert stays false, colour-invariance augs stay ON, and the
+# LR is the gentle warm-start value (0.005 there is a from-scratch LR that would
+# wipe raven's features).
+#
+# Launch (pick a free GPU; 0 = hwi_paper):
+#   CUDA_VISIBLE_DEVICES=4 mole train configs/brackley.yaml \
+#       --init-from checkpoints/raven_checkpoint.pth
+
+data:
+  path: data/brackley-set
+  window_size: 256          # finer descriptors than antwerp's 512 (the HWI lesson);
+                            #   also = raven's native training scale
+  model_size: 224
+  overlap: 0.5              # moderate density — a warm-started finetune on 300 imgs does
+                            #   NOT need stride-32's 80x windows (and this box is CPU-bound)
+  use_zones: true           # zones.json from `mole prep` → text-only windows
+  invert: false             # COLOR parchment, dark-on-light (NOT binarized HWI)
+  num_workers: 6
+
+aug:
+  preset: mild              # keeps colour jitter / grayscale / blur (color-invariance)
+  overrides:
+    local_crops_number: 8   # 2 global + 8 local (the HWI multi-crop)
+    global_crops_scale: [0.4, 1.0]
+    local_crops_scale: [0.05, 0.4]
+    grayscale_prob: 0.4     # widen colour-invariance (as in antwerp_base)
+
+model:
+  arch: vit_small           # matches raven; --init-from adopts it regardless
+  patch_size: 16
+
+optim:
+  lr: 5.0e-4                # peak @ ref batch 256 → ~9.4e-5 at batch 48: GENTLE, so raven's
+                            #   warm-started features adapt rather than get wiped
+  warmup_epochs: 10         # long warmup for the same reason
+  batch_size: 48
+
+train:
+  epochs: 80                # warm-started + small corpus; watch the projector, stop early if clean
+  fp16: true
+  output_dir: runs/brackley_ft
+  save_every_steps: 500
+  saveckp_epoch_freq: 10
+  projector_every_epochs: 5
