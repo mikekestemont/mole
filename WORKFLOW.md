@@ -179,6 +179,11 @@ The binarized HWI images are white-on-black, so train with `--set data.invert=tr
 (recorded in the checkpoint; `mole embed` inherits it — or force with `--invert`)
 to put them in the black-on-white regime the foreground filter assumes.
 
+VLAD codebook: by default it is fit on the set being embedded (transductive). To
+fit on the **training** split and apply to test (Raven's protocol), embed the
+train set first (that saves `<out>.codebook.npy`), then pass it to the test embed
+with `--codebook-from <train>.codebook.npy`.
+
 ---
 
 ## Artifact locations (all git-ignored)

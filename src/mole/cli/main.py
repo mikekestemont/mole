@@ -186,6 +186,10 @@ def embed(
         None, "--invert/--no-invert",
         help="Negate intensity at load (white-on-black -> black-on-white). Default: inherit "
              "the training value from the checkpoint."),
+    codebook_from: Optional[Path] = typer.Option(
+        None, "--codebook-from",
+        help="Reuse a saved .codebook.npy (pooling=vlad) instead of fitting one on this set — "
+             "e.g. a codebook fit on the training split (fit-on-train / apply-on-test)."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -199,7 +203,7 @@ def embed(
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, vlad_intra_norm=vlad_intra_norm,
-           invert=invert)
+           invert=invert, codebook_from=codebook_from)
 
 
 # ---------------------------------------------------------------------------- viz

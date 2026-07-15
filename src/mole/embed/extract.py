@@ -187,7 +187,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           overrides: list[str] | None = None, *, batch_size: int = 32,
           vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
           foreground: bool = False, foreground_threshold: float = 0.02,
-          vlad_intra_norm: bool = True, invert: bool | None = None):
+          vlad_intra_norm: bool = True, invert: bool | None = None,
+          codebook_from: str | Path | None = None):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -275,7 +276,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                 rows.extend({"row": start + j, "image": str(img)} for j in range(len(desc)))
 
     matrix, codebook = _assemble(pooling, vectors, page_descriptors, desc_images, rows,
-                                 vlad_clusters, seed, intra_norm=vlad_intra_norm)
+                                 vlad_clusters, seed, intra_norm=vlad_intra_norm,
+                                 codebook_from=codebook_from)
 
     if whiten and pooling is not Pooling.PATCHES:
         matrix = _pca_whiten(matrix)
@@ -283,30 +285,46 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 
     _write_output(output, matrix, rows, meta, pooling, whiten, codebook, vlad_clusters, seed,
                   foreground=foreground, foreground_threshold=foreground_threshold,
-                  vlad_intra_norm=vlad_intra_norm)
+                  vlad_intra_norm=vlad_intra_norm,
+                  codebook_source=str(codebook_from) if codebook_from else "fitted")
     return output
 
 
 def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed,
-              *, intra_norm: bool = True):
+              *, intra_norm: bool = True, codebook_from: str | Path | None = None):
     """Turn per-page results into the final matrix (+ codebook for vlad).
 
     ``rows`` is already filled for mean/cls/patches; for vlad it is empty and
     gets one row per page here (rows and the matrix stay aligned).
+
+    VLAD fits one codebook across the embedded set's descriptors, unless
+    ``codebook_from`` points at a saved ``.codebook.npy`` (e.g. one fitted on a
+    training split), which is then loaded and applied — the Raven-style
+    fit-on-train / apply-on-test protocol.
     """
     if pooling in (Pooling.MEAN, Pooling.CLS):
         return np.vstack(vectors), None
     if pooling is Pooling.PATCHES:
         return np.vstack(page_descriptors), None
-    # VLAD: fit one codebook across all descriptors, then encode each page.
+    # VLAD: obtain a codebook (fit here, or load an external one), then encode.
     import time
 
-    all_desc = np.vstack(page_descriptors)
-    print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
-          f"patch descriptors (seed {seed})…", flush=True)
-    t0 = time.perf_counter()
-    codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed)
-    print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
+    dim = page_descriptors[0].shape[1]
+    if codebook_from is not None:
+        codebook = np.load(codebook_from).astype(np.float32)
+        if codebook.ndim != 2 or codebook.shape[1] != dim:
+            raise ValueError(
+                f"codebook {codebook_from} has shape {codebook.shape}; expected "
+                f"(K, {dim}) to match the {dim}-dim descriptors of this model")
+        print(f"[mole] VLAD: using external {codebook.shape[0]}-cluster codebook "
+              f"from {codebook_from}", flush=True)
+    else:
+        all_desc = np.vstack(page_descriptors)
+        print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
+              f"patch descriptors (seed {seed})…", flush=True)
+        t0 = time.perf_counter()
+        codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed)
+        print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
     mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm)
                      for d in track(page_descriptors, "VLAD encoding", unit="page")])
     rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
@@ -353,7 +371,8 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str) -> None:
 
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
                   vlad_clusters, seed, *, foreground: bool = False,
-                  foreground_threshold: float = 0.02, vlad_intra_norm: bool = True) -> None:
+                  foreground_threshold: float = 0.02, vlad_intra_norm: bool = True,
+                  codebook_source: str = "fitted") -> None:
     if output.suffix == ".parquet":
         _write_parquet(output, matrix, rows)
     else:
@@ -374,9 +393,10 @@ def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
     if pooling is Pooling.VLAD:
         cb_path = output.with_suffix(".codebook.npy")
         np.save(cb_path, codebook)
-        sidecar["vlad_clusters"] = int(vlad_clusters)
+        sidecar["vlad_clusters"] = int(codebook.shape[0])
         sidecar["vlad_seed"] = int(seed)
         sidecar["vlad_intra_norm"] = bool(vlad_intra_norm)
+        sidecar["vlad_codebook_source"] = codebook_source
         sidecar["codebook"] = str(cb_path.name)
     output.with_suffix(".mapping.json").write_text(json.dumps(sidecar, indent=2))
     print(f"[mole] ✓ wrote {tuple(matrix.shape)} embeddings → {output}")
