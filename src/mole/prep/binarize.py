@@ -39,13 +39,40 @@ def sauvola_threshold(gray, window: int = 25, k: float = 0.2, r: float = 128.0):
     return mean * (1.0 + k * (std / r - 1.0))
 
 
-def binarize_image(pil_img, method: str = "sauvola", window: int = 25, k: float = 0.2):
-    """Return a black-ink-on-white PIL ``L`` image for ``pil_img``."""
+def downscale_max_side(pil_img, max_side: int | None):
+    """Downscale ``pil_img`` so its longest side is ``<= max_side`` (never upsample).
+
+    Camera photos routinely carry far more resolution than writer retrieval needs
+    (e.g. 45 MP), which only slows the CPU-bound aug pipeline. Capping here, once,
+    into the cached binarized copy removes that waste for every downstream pass.
+    Uses LANCZOS (high-quality) and is a no-op when the image is already smaller.
+    """
+    if not max_side:
+        return pil_img
+    from PIL import Image
+
+    w, h = pil_img.size
+    longest = max(w, h)
+    if longest <= max_side:
+        return pil_img
+    scale = max_side / longest
+    new = (max(1, round(w * scale)), max(1, round(h * scale)))
+    return pil_img.resize(new, Image.LANCZOS)
+
+
+def binarize_image(pil_img, method: str = "sauvola", window: int = 25, k: float = 0.2,
+                   max_side: int | None = None):
+    """Return a black-ink-on-white PIL ``L`` image for ``pil_img``.
+
+    If ``max_side`` is set, the image is downscaled (longest side, never upsampled)
+    *before* thresholding, so the Sauvola window operates at the final resolution.
+    """
     import numpy as np
     from PIL import Image
 
     if method != "sauvola":
         raise ValueError(f"unknown binarization method {method!r} (only 'sauvola')")
+    pil_img = downscale_max_side(pil_img, max_side)
     gray = np.asarray(pil_img.convert("L"), dtype=np.float32)
     thresh = sauvola_threshold(gray, window=window, k=k)
     binary = np.where(gray > thresh, 255, 0).astype(np.uint8)  # bg white, ink black
@@ -60,13 +87,39 @@ def _thumb_b64(pil_img, box: int = 200) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _ink_detail_crop(binary, box: int = 480):
+    """A native-resolution square crop centred on the ink.
+
+    Whole-page thumbnails hide broken/merged strokes; this 1:1 window is what the
+    ``--max-side`` cap and Sauvola params should actually be judged on.
+    """
+    import numpy as np
+
+    arr = np.asarray(binary)  # 'L': 0 = ink (black), 255 = background (white)
+    h, w = arr.shape
+    ys, xs = np.nonzero(arr < 128)
+    cy, cx = (int(ys.mean()), int(xs.mean())) if len(xs) else (h // 2, w // 2)
+    x0 = 0 if w <= box else max(0, min(cx - box // 2, w - box))
+    y0 = 0 if h <= box else max(0, min(cy - box // 2, h - box))
+    return binary.crop((x0, y0, min(w, x0 + box), min(h, y0 + box)))
+
+
+def _detail_b64(pil_img) -> str:
+    """PNG-encode a bitonal crop at native pixels (PNG keeps sharp edges; JPEG mushes them)."""
+    buf = io.BytesIO()
+    pil_img.convert("L").save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str = "sauvola",
-                    window: int = 25, k: float = 0.2, sample: int | None = None,
-                    qc_html: str | Path | None = None):
+                    window: int = 25, k: float = 0.2, max_side: int | None = None,
+                    sample: int | None = None, qc_html: str | Path | None = None):
     """Binarize every image in ``input_dir`` into ``out_dir`` (same filenames as PNG).
 
-    ``sample`` limits to N random images (a quick QC preview, writes nothing to
-    ``out_dir`` unless you run the full pass). Returns the per-image records.
+    ``max_side`` optionally caps the longest side (downscale-before-threshold, never
+    upsample) to strip wasteful resolution. ``sample`` limits to N random images (a
+    quick QC preview, writes nothing to ``out_dir`` unless you run the full pass).
+    Returns the per-image records.
     """
     from mole.data.patches import load_rgb  # robust loader (multi-frame TIFF etc.)
     from mole.progress import track
@@ -86,14 +139,15 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
     records = []
     for p in track(files, "Binarizing", unit="img"):
         orig = load_rgb(p)
-        binary = binarize_image(orig, method=method, window=window, k=k)
+        binary = binarize_image(orig, method=method, window=window, k=k, max_side=max_side)
         dst = out_dir / f"{p.stem}.png"
         if not preview:
             binary.save(dst)
-        records.append({"src": p, "dst": dst, "orig": orig, "binary": binary})
+        records.append({"src": p, "dst": dst, "orig": orig, "binary": binary,
+                        "orig_size": orig.size, "final_size": binary.size})
 
     if qc_html:
-        _write_qc(records, Path(qc_html), method, window, k, preview)
+        _write_qc(records, Path(qc_html), method, window, k, max_side, preview)
     # free the images we only kept for QC
     for r in records:
         r.pop("orig", None)
@@ -101,23 +155,32 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
     return records
 
 
-def _write_qc(records, out: Path, method: str, window: int, k: float, preview: bool):
+def _write_qc(records, out: Path, method: str, window: int, k: float,
+              max_side: int | None, preview: bool):
     rows = []
     for r in records:
+        ow, oh = r["orig_size"]
+        fw, fh = r["final_size"]
+        capped = " capped" if (ow, oh) != (fw, fh) else ""
+        dims = f'{ow}×{oh} → {fw}×{fh}{capped}' if capped else f'{ow}×{oh}'
         rows.append(
-            f'<tr><td class="n">{r["src"].name}</td>'
+            f'<tr><td class="n">{r["src"].name}<br><span class=d>{dims}</span></td>'
             f'<td><img src="data:image/jpeg;base64,{_thumb_b64(r["orig"])}"></td>'
-            f'<td><img src="data:image/jpeg;base64,{_thumb_b64(r["binary"])}"></td></tr>')
+            f'<td><img src="data:image/jpeg;base64,{_thumb_b64(r["binary"])}"></td>'
+            f'<td><img class=detail src="data:image/png;base64,{_detail_b64(_ink_detail_crop(r["binary"]))}"></td></tr>')
     tag = "PREVIEW (nothing written)" if preview else "full run"
+    cap = f"max_side={max_side}px" if max_side else "max_side=off (native resolution)"
     html = f"""<!doctype html><html><head><meta charset=utf-8><title>binarize QC</title><style>
  body{{font-family:system-ui;margin:20px;background:#111;color:#eee}}
  .meta{{color:#9ab;font-family:ui-monospace,monospace;margin-bottom:12px}}
  table{{border-collapse:collapse}} th{{color:#8bd;font-size:13px;padding:6px}}
  td{{padding:4px;text-align:center;vertical-align:top}} td.n{{font-size:10px;color:#9ab;max-width:120px;word-break:break-all}}
- td img{{width:240px;height:240px;object-fit:contain;background:#222;border-radius:4px}}</style></head><body>
+ td.n span.d{{color:#c96;font-family:ui-monospace,monospace}}
+ td img{{width:240px;height:240px;object-fit:contain;background:#222;border-radius:4px}}
+ td img.detail{{width:auto;height:auto;max-width:480px;max-height:480px;image-rendering:pixelated}}</style></head><body>
 <h1>Binarization QC — {method}</h1>
-<div class=meta>{tag} · window={window}px · k={k} · {len(records)} images · check for broken strokes / speckle, then tune window & k</div>
-<table><tr><th>file</th><th>original</th><th>binarized (black-on-white)</th></tr>{"".join(rows)}</table>
+<div class=meta>{tag} · window={window}px · k={k} · {cap} · {len(records)} images · judge stroke crispness in the 1:1 detail column, then tune max_side / window / k</div>
+<table><tr><th>file</th><th>original</th><th>binarized (black-on-white)</th><th>detail (1:1, ink-centred)</th></tr>{"".join(rows)}</table>
 </body></html>"""
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")

@@ -71,6 +71,7 @@ def prep(
     binarize_out: Optional[Path] = typer.Option(None, help="Output dir for binarized images (default: <input_dir>-bin)."),
     sauvola_window: int = typer.Option(25, help="Sauvola local window in px (odd)."),
     sauvola_k: float = typer.Option(0.2, help="Sauvola k — higher = more aggressive/thinner ink."),
+    max_side: int = typer.Option(0, help="Downscale longest side to <= N px before binarizing (0 = off, never upsamples)."),
 ) -> None:
     """Detect the main handwritten text zone of each page and store coordinates.
 
@@ -86,7 +87,7 @@ def prep(
 
         out_dir = binarize_out or input_dir.parent / f"{input_dir.name}-bin"
         recs = binarize_folder(input_dir, out_dir, method=binarize, window=sauvola_window,
-                               k=sauvola_k, sample=sample, qc_html=qc)
+                               k=sauvola_k, max_side=max_side or None, sample=sample, qc_html=qc)
         if sample is not None:
             console.print(f"[yellow]preview only ({len(recs)} images) — nothing written; "
                           f"tune --sauvola-window/--sauvola-k, then re-run without --sample[/yellow]")
