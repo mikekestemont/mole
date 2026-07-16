@@ -235,6 +235,9 @@ def embed(
         help="Apply a saved .whiten.npz PCA-whitening transform (fit on another split) instead "
              "of fitting it transductively — Raven's fit-on-train / apply-on-test protocol. A "
              "transductive --whiten-dim run saves its transform as <out>.whiten.npz for reuse."),
+    vlad_max_descriptors: int = typer.Option(
+        200_000, help="Cap descriptors used to FIT the VLAD codebook (0 = use all, as in "
+                      "Raven: 'gather all foreground tokens from the entire training set')."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -246,6 +249,7 @@ def embed(
 
     _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
+           vlad_max_descriptors=vlad_max_descriptors,
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, foreground_method=foreground_method,
            window_foreground=window_foreground,

@@ -23,13 +23,14 @@ def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
     cluster centres (float32). Reproducible for a fixed ``seed``.
 
     For tractability the fit runs on at most ``max_descriptors`` (seeded random
-    subsample — standard for VLAD codebook training, and what keeps this from
-    stalling on millions of descriptors), via MiniBatchKMeans (fast, streaming).
+    subsample), via MiniBatchKMeans (fast, streaming). Set ``max_descriptors`` to
+    ``0``/``None`` to fit on ALL descriptors — Raven et al. "gather all foreground
+    tokens from the entire training set", so parity runs want the full pool.
     """
     x = np.asarray(descriptors, dtype=np.float32)
     if x.ndim != 2:
         raise ValueError(f"descriptors must be 2-D [N, dim], got shape {x.shape}")
-    if len(x) > max_descriptors:                      # seeded subsample for the fit
+    if max_descriptors and len(x) > max_descriptors:  # seeded subsample for the fit
         rng = np.random.default_rng(seed)
         x = x[rng.choice(len(x), max_descriptors, replace=False)]
     k = int(min(n_clusters, len(x)))
