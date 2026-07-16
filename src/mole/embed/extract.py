@@ -168,14 +168,19 @@ def _page_tokens(model, crops, device, batch_size: int):
 def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "intensity"):
     """Per-patch foreground mask, aligned with :func:`patch_descriptors` order.
 
-    ``raven`` — Raven et al.'s ACTUAL rule (arXiv:2409.00751): keep patches whose
-    FOREGROUND-PIXEL FRACTION is at least ``threshold`` (the paper's 2.5%). On
-    binarized input (pixels are ~0/1) the per-patch mean *is* that fraction once the
-    ink tone is known, so this is exact parity rather than an approximation. Ink
-    polarity is detected per page as the minority tone (a page is never mostly ink),
-    which makes it correct on white-on-black (raven/HWI native) and black-on-white
-    alike. Binarized data only — on greyscale/parchment there is no clean ink/
-    background split to count, so use ``contrast`` there.
+    ``raven`` — Raven et al.'s rule (arXiv:2409.00751): keep patch tokens whose
+    FOREGROUND-PIXEL FRACTION is at least ``threshold``. The paper sets ``t_fg = 10``
+    foreground *pixels* per patch token, i.e. 10/256 = 3.9% for ViT/16 (do not confuse
+    this with the paper's separate 2.5% *window* rule — see
+    :func:`_window_foreground_mask`). On binarized input the per-patch mean is that
+    fraction once the ink tone is known. Ink polarity is detected per page as the
+    minority tone (a page is never mostly ink), so it is correct on white-on-black
+    (raven/HWI native) and black-on-white alike. Binarized data only — on greyscale/
+    parchment there is no clean ink/background split to count, so use ``contrast``.
+    NB windows are bicubic-resized to ``model_size`` before this runs, so pixels are
+    not strictly 0/1 and the mean is an area-averaged fraction rather than a discrete
+    count — the mean is well preserved by the resize, so this is very close but not a
+    literal pixel tally.
 
     ``contrast``: keep patches whose local std exceeds ``threshold`` — text is
     high-variance strokes, blank ground is smooth. Polarity-invariant
@@ -202,8 +207,37 @@ def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "in
     if method == "raven":
         ink_is_bright = g.mean().item() < 0.5                  # ink = the minority tone
         frac = mean if ink_is_bright else (1.0 - mean)         # fraction of foreground pixels
-        return frac >= threshold                               # PAPER: >= 2.5% foreground
+        return frac >= threshold                               # PAPER: t_fg = 10 px (10/256)
     return mean < (1.0 - threshold)                            # keep non-white patches
+
+
+def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
+    """Raven's inference-time WINDOW pre-filter (paper: keep windows with >2.5%
+    foreground pixels, "to save computation").
+
+    Applied to the crops *before* the ViT, so discarded windows cost no forward pass.
+    This is a different threshold from the patch-token rule (``t_fg = 10`` px): the
+    paper states 2.5% for windows. Polarity is detected once per page (the minority
+    tone is ink), then each window's foreground fraction is its own mean.
+
+    Returns a bool tensor ``[n_windows]``. ``contrast`` uses per-window std instead,
+    for non-binarized input where pixel counting is meaningless.
+    """
+    import torch
+
+    x = torch.stack(crops)                                     # [W, C, S, S] in [0,1]
+    g = x[:, 0:1]
+    if method == "contrast":
+        return g.reshape(g.shape[0], -1).std(dim=1) > threshold
+    frac = g.reshape(g.shape[0], -1).mean(dim=1)
+    if method == "raven":
+        if g.mean().item() >= 0.5:                             # dark ink on light ground
+            frac = 1.0 - frac
+        return frac > threshold                                # PAPER: > 2.5% foreground
+    if method != "intensity":
+        raise ValueError(
+            f"foreground method must be 'raven', 'contrast' or 'intensity', got {method!r}")
+    return frac < (1.0 - threshold)                            # legacy: keep non-white windows
 
 
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
@@ -212,6 +246,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           vlad_clusters: int = 64, seed: int = 0, device: str | None = None,
           foreground: bool = False, foreground_threshold: float | None = None,
           foreground_method: str = "intensity",
+          window_foreground: bool = False, window_foreground_threshold: float = 0.025,
           vlad_intra_norm: bool = True, invert: bool | None = None,
           codebook_from: str | Path | None = None, whiten_dim: int | None = None,
           whiten_from: str | Path | None = None):
@@ -229,15 +264,18 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     import torch
 
     pooling = Pooling(pooling)
-    if foreground_threshold is None:   # method-appropriate default
-        foreground_threshold = {"contrast": 0.05,   # local std
-                                "raven": 0.025,     # PAPER: >= 2.5% foreground pixels
-                                "intensity": 0.02}.get(foreground_method, 0.02)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     dev = torch.device(device) if device else _pick_device()
     model, meta = load_backbone(checkpoint, map_location=str(dev))
+
+    if foreground_threshold is None:   # method-appropriate default (needs patch_size)
+        if foreground_method == "raven":
+            # PAPER: t_fg = 10 foreground PIXELS per patch token (16x16 -> 10/256 = 3.9%).
+            foreground_threshold = 10.0 / float(meta["patch_size"] ** 2)
+        else:
+            foreground_threshold = 0.05 if foreground_method == "contrast" else 0.02
 
     settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
                 "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
@@ -267,9 +305,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
               f"for {pooling.value}")
 
     fg_note = (f" foreground[{foreground_method}>{foreground_threshold:g}]" if foreground else "")
+    wfg_note = (f" window-fg[>{window_foreground_threshold:g}]" if window_foreground else "")
     inv_note = " inverted" if settings["invert"] else ""
     print(f"[mole] embed model={meta['model_id']} dim={meta['embed_dim']} "
-          f"pooling={pooling.value}{fg_note}{inv_note} device={dev} | {len(pages)} pages")
+          f"pooling={pooling.value}{fg_note}{wfg_note}{inv_note} device={dev} | {len(pages)} pages")
+    n_win_total = n_win_kept = 0             # window pre-filter accounting
 
     rows: list[dict] = []
     vectors: list[np.ndarray] = []           # fixed-vector poolings (mean/cls)
@@ -296,6 +336,23 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     for img, wins in track(pages, "Embedding pages", unit="page"):
         page = load_rgb(img, invert=settings["invert"])
         crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
+        n_win_total += len(crops)
+        if window_foreground and crops:      # Raven's pre-ViT window filter (saves compute)
+            keep_win = _window_foreground_mask(crops, window_foreground_threshold,
+                                               method=foreground_method)
+            crops = [c for c, k in zip(crops, keep_win.tolist()) if k]
+        n_win_kept += len(crops)
+        if not crops:                        # every window was blank -> no descriptors
+            if pooling in (Pooling.MEAN, Pooling.CLS):
+                vectors.append(np.zeros(meta["embed_dim"], dtype=np.float32))
+                rows.append({"row": len(rows), "image": str(img), "n_windows": 0})
+            elif stream_codebook is not None:
+                vlad_vecs.append(np.zeros(stream_codebook.shape[0] * meta["embed_dim"], np.float32))
+                desc_images.append(str(img))
+            else:
+                page_descriptors.append(np.zeros((0, meta["embed_dim"]), np.float32))
+                desc_images.append(str(img))
+            continue
         tokens = _page_tokens(model, crops, dev, settings["batch_size"])
 
         if pooling in (Pooling.MEAN, Pooling.CLS):
@@ -326,6 +383,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                     start = len(rows)
                     rows.extend({"row": start + j, "image": str(img)} for j in range(len(desc)))
 
+    if window_foreground and n_win_total:
+        dropped = n_win_total - n_win_kept
+        print(f"[mole] window-fg: kept {n_win_kept:,}/{n_win_total:,} windows "
+              f"({dropped / n_win_total:.1%} skipped before the ViT)", flush=True)
+
     if stream_codebook is not None:
         matrix = (np.vstack(vlad_vecs) if vlad_vecs
                   else np.zeros((0, stream_codebook.shape[0] * meta["embed_dim"]), np.float32))
@@ -352,6 +414,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         meta["whitened"] = True
         meta["whiten_dim"] = int(matrix.shape[1])
 
+    if window_foreground:
+        meta["window_foreground"] = True
+        meta["window_foreground_threshold"] = float(window_foreground_threshold)
+        meta["window_kept_fraction"] = (n_win_kept / n_win_total) if n_win_total else 0.0
     _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
                   vlad_clusters, seed, foreground=foreground,
                   foreground_threshold=foreground_threshold, foreground_method=foreground_method,

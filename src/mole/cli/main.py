@@ -210,8 +210,15 @@ def embed(
                           "works on parchment/colour), or 'intensity' (mole's legacy black-on-white "
                           "heuristic; NOT Raven's rule)."),
     foreground_threshold: Optional[float] = typer.Option(
-        None, help="Keep threshold; defaults: 0.025 for raven (>=2.5% foreground pixels, the "
-                   "paper's rule), 0.05 for contrast (std>thr), 0.02 for intensity (mean<1-thr)."),
+        None, help="Per-PATCH keep threshold; defaults: raven = t_fg 10px (10/256 = 3.9% of a "
+                   "16x16 patch, the paper's value), contrast = 0.05 (std>thr), intensity = 0.02."),
+    window_foreground: bool = typer.Option(
+        False, "--window-foreground/--no-window-foreground",
+        help="Raven's inference WINDOW pre-filter: skip windows below "
+             "--window-foreground-threshold foreground BEFORE the ViT (parity + saves compute)."),
+    window_foreground_threshold: float = typer.Option(
+        0.025, help="Per-WINDOW keep threshold (paper: >2.5% foreground pixels). Distinct from "
+                    "the per-patch t_fg above."),
     vlad_intra_norm: bool = typer.Option(
         True, "--vlad-intra-norm/--no-vlad-intra-norm",
         help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
@@ -241,6 +248,8 @@ def embed(
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, foreground_method=foreground_method,
+           window_foreground=window_foreground,
+           window_foreground_threshold=window_foreground_threshold,
            vlad_intra_norm=vlad_intra_norm,
            invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim,
            whiten_from=whiten_from)
