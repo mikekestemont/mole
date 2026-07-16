@@ -26,11 +26,11 @@ data:
   use_zones: false          # zones.json lives on the COLOUR set; the intensity
                             #   foreground filter works on black-on-white, so skip
                             #   zones (re-run `mole prep` on -bin to add them back)
-  invert: false             # KEY: Sauvola already writes black-ink-on-white, so NO
-                            #   flip (unlike historical_wi.yaml, whose HWI zip ships
-                            #   white-on-black and must be inverted to this convention).
-                            #   NB: revisit once the polarity A/B lands — if raven wants
-                            #   white-on-black we flip to invert:true (or flip binarize).
+  invert: true              # feed raven its NATIVE polarity. Sauvola writes black-on-white
+                            #   to disk (human-readable), so the loader must invert to
+                            #   white-on-black — the regime raven was trained on (per Tim).
+                            #   The A/B quantifies the gain; direction is Tim-authoritative.
+                            #   (Foreground filtering below is polarity-invariant, unaffected.)
   foreground_min: 0.05      # drop near-blank windows (polarity-invariant contrast test):
                             #   focuses training on inked windows + cleans the projector
                             #   at the source. 0.05 = window must be >=5% inked; tune on data.
