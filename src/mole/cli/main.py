@@ -205,10 +205,12 @@ def embed(
         False, "--foreground/--no-foreground",
         help="Drop background patch tokens before patches/vlad pooling."),
     foreground_method: str = typer.Option(
-        "intensity", help="Foreground test: 'raven' (>=2.5% foreground pixels — the paper's exact "
-                          "rule, binarized data, polarity auto-detected), 'contrast' (local std — "
-                          "works on parchment/colour), or 'intensity' (mole's legacy black-on-white "
-                          "heuristic; NOT Raven's rule)."),
+        "intensity", help="Foreground test. 'intensity' = Raven's get_foreground_mask verbatim as "
+                          "RELEASED (mean < 1-thr; assumes black-ink-on-white). 'raven' = the rule "
+                          "as stated in his PAPER (>= t_fg 10px of foreground; polarity "
+                          "auto-detected) — his code does NOT implement this; paper and code "
+                          "disagree. 'contrast' = local std (polarity-invariant; the one that works "
+                          "on parchment/colour). Empirically the choice barely matters."),
     foreground_threshold: Optional[float] = typer.Option(
         None, help="Per-PATCH keep threshold; defaults: raven = t_fg 10px (10/256 = 3.9% of a "
                    "16x16 patch, the paper's value), contrast = 0.05 (std>thr), intensity = 0.02."),

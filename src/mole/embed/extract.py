@@ -168,29 +168,42 @@ def _page_tokens(model, crops, device, batch_size: int):
 def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "intensity"):
     """Per-patch foreground mask, aligned with :func:`patch_descriptors` order.
 
-    ``raven`` — Raven et al.'s rule (arXiv:2409.00751): keep patch tokens whose
-    FOREGROUND-PIXEL FRACTION is at least ``threshold``. The paper sets ``t_fg = 10``
-    foreground *pixels* per patch token, i.e. 10/256 = 3.9% for ViT/16 (do not confuse
-    this with the paper's separate 2.5% *window* rule — see
-    :func:`_window_foreground_mask`). On binarized input the per-patch mean is that
-    fraction once the ink tone is known. Ink polarity is detected per page as the
-    minority tone (a page is never mostly ink), so it is correct on white-on-black
-    (raven/HWI native) and black-on-white alike. Binarized data only — on greyscale/
-    parchment there is no clean ink/background split to count, so use ``contrast``.
-    NB windows are bicubic-resized to ``model_size`` before this runs, so pixels are
-    not strictly 0/1 and the mean is an area-averaged fraction rather than a discrete
-    count — the mean is well preserved by the resize, so this is very close but not a
-    literal pixel tally.
+    CAUTION — Raven's PAPER and his RELEASED CODE specify different rules here, so
+    "Raven-parity" is ambiguous and the two are offered separately. Which one produced
+    the published 82.6% mAP is an open question for the author.
 
-    ``contrast``: keep patches whose local std exceeds ``threshold`` — text is
-    high-variance strokes, blank ground is smooth. Polarity-invariant
+    ``intensity`` — Raven's ``get_foreground_mask`` **verbatim**, as released in
+    ``attmask/extract_embeddings.py``::
+
+        pooled = avg_pool2d(patches_tensor[:, 0:1], patch_size)
+        foreground_mask = pooled < (1.0 - threshold)          # his default threshold=0.02
+
+    i.e. keep patches whose mean intensity is below ``1 - threshold``. His code counts
+    DARK pixels as foreground throughout (``np.sum(patch < 255)`` at window level), so
+    it assumes black-ink-on-white. Consequently it is useless on parchment (background
+    sits well below white, so nothing is dropped) and backwards on white-on-black
+    (it would keep the background and drop the ink).
+
+    ``raven`` — the rule as stated in the PAPER (arXiv:2409.00751), which his code does
+    NOT implement: keep patch tokens whose FOREGROUND-PIXEL FRACTION is at least
+    ``threshold``, with ``t_fg = 10`` foreground *pixels* per patch token (10/256 = 3.9%
+    for ViT/16 — not to be confused with the paper's separate 2.5% *window* rule, see
+    :func:`_window_foreground_mask`). On binarized input the per-patch mean is that
+    fraction once the ink tone is known. Ink polarity is auto-detected per page as the
+    minority tone (a page is never mostly ink), so unlike ``intensity`` this works on
+    white-on-black and black-on-white alike. NB windows are bicubic-resized to
+    ``model_size`` before this runs, so pixels are not strictly 0/1 and the mean is an
+    area-averaged fraction rather than a discrete count — well preserved by the resize,
+    but not a literal pixel tally.
+
+    ``contrast`` — mole's own: keep patches whose local std exceeds ``threshold``. Text
+    is high-variance strokes, blank ground is smooth. Polarity-invariant
     (``std(x) == std(1-x)``) and background-colour-agnostic, so it is the tool for
     parchment / colour photos, where pixel counting cannot work.
 
-    ``intensity``: mole's own heuristic (NOT Raven's, despite an earlier docstring
-    here claiming so): keep patches with mean below ``1 - threshold``. Assumes
-    black-ink-on-white; useless on parchment and backwards on white-on-black. Kept
-    for backwards compatibility — prefer ``raven`` (binarized) or ``contrast``.
+    EMPIRICAL NOTE (HWI, raven checkpoint): the choice barely matters. ``contrast`` and
+    ``raven`` gave train mAP 0.8883 vs 0.8896 — a 0.0013 spread. Foreground selection is
+    not the lever for the residual gap to the paper's numbers.
     """
     import torch
 
@@ -212,13 +225,21 @@ def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "in
 
 
 def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
-    """Raven's inference-time WINDOW pre-filter (paper: keep windows with >2.5%
-    foreground pixels, "to save computation").
+    """Raven's inference-time WINDOW pre-filter, applied to the crops *before* the ViT,
+    so discarded windows cost no forward pass ("to save computation", per the paper).
 
-    Applied to the crops *before* the ViT, so discarded windows cost no forward pass.
-    This is a different threshold from the patch-token rule (``t_fg = 10`` px): the
-    paper states 2.5% for windows. Polarity is detected once per page (the minority
-    tone is ink), then each window's foreground fraction is its own mean.
+    Both the paper and his released code filter windows, at slightly different values:
+    the paper says keep windows with **>2.5%** foreground pixels; his
+    ``attmask/extract_embeddings.py`` uses **>=2%**::
+
+        foreground_ratio = np.sum(patch < 255) / (patch_size * patch_size)
+        if foreground_ratio >= foreground_threshold:   # his default 0.02
+
+    Note his ``patch < 255`` counts DARK pixels as foreground, i.e. black-ink-on-white.
+    Here polarity is instead auto-detected once per page (the minority tone is ink), so
+    either convention works; each window's foreground fraction is then its own mean.
+    This threshold is separate from the per-patch rule (the paper's ``t_fg = 10`` px) —
+    they are not interchangeable.
 
     Returns a bool tensor ``[n_windows]``. ``contrast`` uses per-window std instead,
     for non-binarized input where pixel counting is meaningless.
