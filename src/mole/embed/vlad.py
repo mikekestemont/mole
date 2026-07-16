@@ -16,16 +16,18 @@ import numpy as np
 
 
 def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
-                 max_iter: int = 100, max_descriptors: int = 200_000):
+                 max_iter: int = 100, max_descriptors: int = 0):
     """Fit a reproducible k-means codebook on patch descriptors.
 
     ``descriptors`` is a ``[N, dim]`` float array. Returns the ``[K, dim]``
     cluster centres (float32). Reproducible for a fixed ``seed``.
 
-    For tractability the fit runs on at most ``max_descriptors`` (seeded random
-    subsample), via MiniBatchKMeans (fast, streaming). Set ``max_descriptors`` to
-    ``0``/``None`` to fit on ALL descriptors — Raven et al. "gather all foreground
-    tokens from the entire training set", so parity runs want the full pool.
+    By default the fit uses ALL descriptors, matching Raven et al., who "gather all
+    foreground tokens from the entire training set" and cluster them with minibatch
+    k-means. MiniBatchKMeans streams minibatches from the pool, so a large pool costs
+    little beyond the memory already holding it. Set ``max_descriptors`` to a positive
+    N to cap the pool at a seeded random subsample of N (a tractability escape hatch —
+    note it *is* a deviation from the paper).
     """
     x = np.asarray(descriptors, dtype=np.float32)
     if x.ndim != 2:

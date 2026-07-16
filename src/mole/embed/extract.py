@@ -243,7 +243,7 @@ def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           pooling: Pooling | str = Pooling.VLAD, whiten: bool = False,
           overrides: list[str] | None = None, *, batch_size: int = 32,
-          vlad_clusters: int = 64, vlad_max_descriptors: int = 200_000,
+          vlad_clusters: int = 64, vlad_max_descriptors: int = 0,
           seed: int = 0, device: str | None = None,
           foreground: bool = False, foreground_threshold: float | None = None,
           foreground_method: str = "intensity",
@@ -431,7 +431,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 
 def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed,
               *, intra_norm: bool = True, codebook_from: str | Path | None = None,
-              max_descriptors: int = 200_000):
+              max_descriptors: int = 0):
     """Turn per-page results into the final matrix (+ codebook for vlad).
 
     ``rows`` is already filled for mean/cls/patches; for vlad it is empty and

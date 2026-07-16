@@ -236,8 +236,9 @@ def embed(
              "of fitting it transductively — Raven's fit-on-train / apply-on-test protocol. A "
              "transductive --whiten-dim run saves its transform as <out>.whiten.npz for reuse."),
     vlad_max_descriptors: int = typer.Option(
-        200_000, help="Cap descriptors used to FIT the VLAD codebook (0 = use all, as in "
-                      "Raven: 'gather all foreground tokens from the entire training set')."),
+        0, help="Cap descriptors used to FIT the VLAD codebook. Default 0 = use ALL, as in Raven "
+                "('gather all foreground tokens from the entire training set'). Set a positive N "
+                "to subsample for tractability — a deviation from the paper."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
