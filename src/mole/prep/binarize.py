@@ -111,6 +111,39 @@ def _detail_b64(pil_img) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _carry_labels(input_dir: Path, out_dir: Path) -> int:
+    """Copy ``labels.csv`` into the binarized dataset, rewriting each image's
+    extension to ``.png`` so basenames match the binarized files.
+
+    Binarization writes ``<stem>.png`` for every image, but eval/viz/train match
+    labels on the EXACT basename (extension included) — so a copied-verbatim
+    ``labels.csv`` (still ``.jpg``/``.tif``) would match nothing. Only the
+    extension is rewritten; every other column is preserved. Zones.json is
+    deliberately NOT carried: its coordinates are in the original resolution and
+    would be wrong after ``--max-side`` rescaling. Returns the row count (0 if no
+    labels.csv).
+    """
+    import csv
+
+    src = input_dir / "labels.csv"
+    if not src.is_file():
+        return 0
+    with src.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        fields = reader.fieldnames or []
+        rows = list(reader)
+    if "filename" in fields:
+        for r in rows:
+            fn = (r.get("filename") or "").strip()
+            if fn:
+                r["filename"] = Path(fn).stem + ".png"
+    with (out_dir / "labels.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
 def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str = "sauvola",
                     window: int = 25, k: float = 0.2, max_side: int | None = None,
                     sample: int | None = None, qc_html: str | Path | None = None):
@@ -146,6 +179,8 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
         records.append({"src": p, "dst": dst, "orig": orig, "binary": binary,
                         "orig_size": orig.size, "final_size": binary.size})
 
+    if not preview:
+        _carry_labels(input_dir, out_dir)
     if qc_html:
         _write_qc(records, Path(qc_html), method, window, k, max_side, preview)
     # free the images we only kept for QC

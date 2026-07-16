@@ -93,6 +93,8 @@ def prep(
                           f"tune --sauvola-window/--sauvola-k, then re-run without --sample[/yellow]")
         else:
             console.print(f"[green]✓ binarized {len(recs)} images → {out_dir}[/green]")
+            if (out_dir / "labels.csv").is_file():
+                console.print(f"[green]✓ labels.csv carried over (extensions → .png) → {out_dir}/labels.csv[/green]")
         console.print(f"[green]✓ QC sheet → {qc}[/green]")
         return
 

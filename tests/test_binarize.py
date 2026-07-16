@@ -49,6 +49,29 @@ def test_binarize_image_respects_max_side():
     assert binarize_image(src).size == (800, 600)             # default = no cap
 
 
+def test_carry_labels_rewrites_extension_to_png(tmp_path):
+    src = tmp_path / "in"; src.mkdir()
+    _page(src, "a.jpg"); _page(src, "b.tif")
+    (src / "labels.csv").write_text("filename,hand_id\na.jpg,H1\nb.tif,H2\n")
+    out = tmp_path / "out"; qc = tmp_path / "qc.html"
+    binarize_folder(src, out, sample=None, qc_html=qc)
+    got = (out / "labels.csv").read_text()
+    assert "a.png,H1" in got and "b.png,H2" in got   # extensions rewritten to match binarized files
+    assert ".jpg" not in got and ".tif" not in got
+    # and the labels now actually match the binarized images on the folder
+    from mole.data.datasets import load_labels
+    tbl = load_labels(out)
+    assert tbl.hand_by_filename == {"a.png": "H1", "b.png": "H2"} and not tbl.orphan_rows
+
+
+def test_carry_labels_noop_without_labels(tmp_path):
+    src = tmp_path / "in"; src.mkdir()
+    _page(src, "a.jpg")
+    out = tmp_path / "out"
+    binarize_folder(src, out, sample=None, qc_html=tmp_path / "qc.html")
+    assert not (out / "labels.csv").exists()          # nothing to carry, no empty file
+
+
 def test_binarize_preview_writes_nothing(tmp_path):
     src = tmp_path / "in"; src.mkdir()
     for i in range(4):
