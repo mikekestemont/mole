@@ -18,7 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from mole.data.datasets import load_labels
-from mole.data.patches import load_rgb
+from mole.data.patches import load_rgb, patch_contrast_mask
 from mole.progress import track
 
 # Kept modest so the extra forward passes and sprite stay cheap.
@@ -66,6 +66,7 @@ def log_document_projector(writer, teacher, dataset, device, step: int, *,
 
     backbone = teacher.backbone
     nct = backbone.num_class_tokens
+    invert = getattr(dataset, "invert", False)                 # match the training polarity
     was_training = teacher.training
     teacher.eval()
     vecs, meta_rows, thumbs = [], [], []
@@ -76,11 +77,20 @@ def log_document_projector(writer, teacher, dataset, device, step: int, *,
                 if len(wins) > _WINDOWS_PER_IMAGE:
                     idx = sorted(rng.sample(range(len(wins)), _WINDOWS_PER_IMAGE))
                     wins = [wins[i] for i in idx]
-                img = load_rgb(path)
+                img = load_rgb(path, invert=invert)
                 crops = torch.stack([resize(img.crop((w.x, w.y, w.x + w.size, w.y + w.size)))
                                      for w in wins]).to(device)
                 tokens = backbone(crops, return_attention=False, return_all_tokens=True)
-                vec = tokens[:, nct:].mean(dim=(0, 1))          # mean over windows + patches
+                # Foreground-weighted mean over patch tokens: blank patches (smooth,
+                # low local std) are excluded so the page vector reflects script, not
+                # how much empty parchment the page happens to contain.
+                patch_tok = tokens[:, nct:]                     # [W, P, D]
+                patch_size = model_size // int(round(patch_tok.shape[1] ** 0.5))
+                keep = patch_contrast_mask(crops, patch_size).to(patch_tok.dtype)  # [W, P]
+                w = keep.unsqueeze(-1)
+                denom = w.sum()
+                vec = ((patch_tok * w).sum(dim=(0, 1)) / denom if denom > 0
+                       else patch_tok.mean(dim=(0, 1)))         # fallback if nothing inked
                 vec = torch.nn.functional.normalize(vec, dim=0)
                 vecs.append(vec.cpu())
                 meta_rows.append([hand_for(path), path.parent.name, path.name])

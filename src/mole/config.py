@@ -29,6 +29,7 @@ DEFAULTS: dict[str, Any] = {
         "overlap": 0.5,               # window grid overlap
         "use_zones": True,            # restrict windows to prep text zones (zones.json)
         "invert": False,              # negate intensity at load (white-on-black -> black-on-white)
+        "foreground_min": 0.0,        # drop training windows with < this inked fraction (0 = off)
         "num_workers": 8,
     },
     "aug": {

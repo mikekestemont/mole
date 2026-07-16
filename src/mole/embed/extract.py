@@ -180,15 +180,15 @@ def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "in
     """
     import torch
 
+    from mole.data.patches import patch_contrast_mask
+
     x = torch.stack(crops)                                     # [W, C, S, S] in [0,1]
-    g = x[:, 0:1]
-    mean = torch.nn.functional.avg_pool2d(g, patch_size).squeeze(1).reshape(x.shape[0], -1)
-    if method == "contrast":
-        sq = torch.nn.functional.avg_pool2d(g * g, patch_size).squeeze(1).reshape(x.shape[0], -1)
-        std = (sq - mean * mean).clamp(min=0).sqrt()
-        return std > threshold                                 # keep inked (high-contrast) patches
+    if method == "contrast":                                   # polarity-invariant (shared helper)
+        return patch_contrast_mask(x, patch_size, threshold)   # keep inked (high local std) patches
     if method != "intensity":
         raise ValueError(f"foreground method must be 'intensity' or 'contrast', got {method!r}")
+    g = x[:, 0:1]
+    mean = torch.nn.functional.avg_pool2d(g, patch_size).squeeze(1).reshape(x.shape[0], -1)
     return mean < (1.0 - threshold)                            # keep non-white patches
 
 

@@ -25,7 +25,8 @@ from torch.utils.data import Dataset
 
 from mole.data.augment import build_transform, resolve_config
 from mole.data.datasets import IMAGE_EXTENSIONS
-from mole.data.patches import Window, load_rgb, window_coords
+from mole.data.patches import (Window, load_rgb, window_coords,
+                                window_foreground_fractions)
 from mole.data.zones import find_zones, load_zones
 
 
@@ -40,7 +41,7 @@ class PatchWindowDataset(Dataset):
     def __init__(self, root: str | Path, window_size: int = 512, model_size: int = 224,
                  overlap: float = 0.5, use_zones: bool = True, preset="mild",
                  aug_overrides: dict | None = None, pred_ratio=0.3, pred_ratio_var=0.0,
-                 pred_start_epoch: int = 0, invert: bool = False):
+                 pred_start_epoch: int = 0, invert: bool = False, foreground_min: float = 0.0):
         root = Path(root)
         overrides = {**(aug_overrides or {}), "model_size": model_size}
         # Resolved AugConfig is the source of truth for global/local crop counts
@@ -53,12 +54,16 @@ class PatchWindowDataset(Dataset):
         # Build the (image_path, window) index from sizes only — no pixel loads.
         folders = [root] + [p for p in sorted(root.iterdir()) if p.is_dir()] if root.is_dir() else []
         self.index: list[tuple[Path, Window]] = []
+        # foreground_min > 0 drops near-blank windows (polarity-invariant contrast test).
+        # It needs one pixel load per page, so show a bar and skip the load when off.
+        from mole.progress import track
         for folder in folders:
             images = _list_images(folder)
             if not images:
                 continue
             manifest = load_zones(find_zones(folder)) if use_zones and find_zones(folder) else None
-            for img in images:
+            imgs = track(images, "Indexing windows", unit="img") if foreground_min > 0.0 else images
+            for img in imgs:
                 bbox = manifest.bbox_for(img.name) if manifest else None
                 size = None
                 if manifest and img.name in manifest.images:
@@ -67,11 +72,17 @@ class PatchWindowDataset(Dataset):
                     from PIL import Image, ImageFile
                     ImageFile.LOAD_TRUNCATED_IMAGES = True
                     size = Image.open(img).size
-                for win in window_coords(size[0], size[1], window_size, overlap, bbox):
+                wins = window_coords(size[0], size[1], window_size, overlap, bbox)
+                if foreground_min > 0.0:
+                    fracs = window_foreground_fractions(load_rgb(img), wins)
+                    wins = [w for w, f in zip(wins, fracs) if f >= foreground_min]
+                for win in wins:
                     self.index.append((img, win))
 
         if not self.index:
-            raise FileNotFoundError(f"No images/windows found under {root!r}")
+            raise FileNotFoundError(
+                f"No images/windows found under {root!r}"
+                + (f" (foreground_min={foreground_min} may be too high)" if foreground_min > 0 else ""))
 
         # Masking-ratio schedule (ported from ImageFolderMask).
         self.pred_ratio = pred_ratio[0] if isinstance(pred_ratio, list) and len(pred_ratio) == 1 else pred_ratio

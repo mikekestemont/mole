@@ -64,15 +64,53 @@ def load_rgb(image_path: str | Path, invert: bool = False):
     return ImageOps.invert(img) if invert else img
 
 
-def _foreground_fraction(crop) -> float:
-    """Fraction of non-background pixels in a window (background ~ light parchment).
+# Foreground = INKED (high local contrast), not "dark". Text strokes create local
+# intensity variance; blank parchment/paper/binarized background is smooth. This is
+# polarity-invariant (std(x)==std(1-x), so black-on-white and white-on-black behave
+# identically) and background-colour-agnostic (works on parchment, colour, bitonal) —
+# unlike a "darker than X" test, which assumes black-ink-on-white and mistakes
+# parchment for ink. The same std criterion is used at token level by
+# :func:`patch_contrast_mask` (embedding / projector), so training and inference agree.
+DEFAULT_CONTRAST_THRESHOLD = 0.05
 
-    Uses a simple luminance threshold: pixels darker than ~90% white count as ink.
+
+def window_foreground_fractions(img, windows, contrast_threshold: float = DEFAULT_CONTRAST_THRESHOLD,
+                                block: int = 8) -> list[float]:
+    """Inked-pixel fraction for each window, via a single image-level contrast map.
+
+    Computes the local std once over the whole page (two box filters), thresholds it
+    into an inked mask, then reads each window's mean as a fast slice — O(1) per window
+    instead of re-filtering every crop. Returns one fraction in ``[0, 1]`` per window.
     """
     import numpy as np
+    from scipy.ndimage import uniform_filter
 
-    arr = np.asarray(crop.convert("L"), dtype="float32")
-    return float((arr < 0.9 * 255).mean())
+    g = np.asarray(img.convert("L"), dtype=np.float32) / 255.0
+    mean = uniform_filter(g, block)
+    var = np.clip(uniform_filter(g * g, block) - mean * mean, 0.0, None)
+    inked = var > (contrast_threshold * contrast_threshold)      # std > thr  <=>  var > thr^2
+    out = []
+    for w in windows:
+        sub = inked[w.y:w.y + w.size, w.x:w.x + w.size]
+        out.append(float(sub.mean()) if sub.size else 0.0)
+    return out
+
+
+def patch_contrast_mask(x, patch_size: int, threshold: float = DEFAULT_CONTRAST_THRESHOLD):
+    """Per-patch inked mask for a batch of crops ``x`` ``[N, C, S, S]`` in ``[0, 1]``.
+
+    Returns a bool tensor ``[N, num_patches]`` (row-major, matching ViT patch-token
+    order): True where the patch's local std exceeds ``threshold`` (inked), False on
+    smooth/blank patches. Polarity-invariant; shared by embedding, the projector and
+    (via :func:`window_foreground_fractions`) training-window selection.
+    """
+    import torch.nn.functional as F
+
+    g = x[:, :1]                                                 # intensity channel
+    mean = F.avg_pool2d(g, patch_size).flatten(1)
+    sq = F.avg_pool2d(g * g, patch_size).flatten(1)
+    std = (sq - mean * mean).clamp(min=0).sqrt()
+    return std > threshold
 
 
 def window_coords(width: int, height: int, window_size: int = DEFAULT_WINDOW_SIZE,
@@ -115,9 +153,8 @@ def sample_windows(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZ
     coords = window_coords(w, h, window_size, overlap, bounds)
     if foreground_min <= 0.0:
         return coords
-    return [win for win in coords
-            if _foreground_fraction(img.crop((win.x, win.y, win.x + win.size, win.y + win.size)))
-            >= foreground_min]
+    fractions = window_foreground_fractions(img, coords)
+    return [win for win, frac in zip(coords, fractions) if frac >= foreground_min]
 
 
 def iter_window_crops(image_path: str | Path, window_size: int = DEFAULT_WINDOW_SIZE,

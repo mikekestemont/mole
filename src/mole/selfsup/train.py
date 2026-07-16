@@ -245,6 +245,7 @@ def train(config_path: str | Path, output_dir: str | Path | None = None,
         aug_overrides=cfg["aug"].get("overrides") or None,
         pred_ratio=cfg["mask"]["pred_ratio"], pred_ratio_var=cfg["mask"]["pred_ratio_var"],
         pred_start_epoch=cfg["mask"]["pred_start_epoch"], invert=d.get("invert", False),
+        foreground_min=d.get("foreground_min", 0.0),
     )
     ac = dataset.aug_config
     ngc, nlc = ac.global_crops_number, ac.local_crops_number
