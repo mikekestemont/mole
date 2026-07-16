@@ -168,15 +168,24 @@ def _page_tokens(model, crops, device, batch_size: int):
 def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "intensity"):
     """Per-patch foreground mask, aligned with :func:`patch_descriptors` order.
 
-    ``intensity`` (Raven et al.'s ``get_foreground_mask``): keep patches whose
-    mean input intensity is below ``1 - threshold`` — drops near-white background.
-    Correct for binarized / white-background scans, but USELESS on parchment,
-    where the background sits well below white and nothing gets dropped.
+    ``raven`` — Raven et al.'s ACTUAL rule (arXiv:2409.00751): keep patches whose
+    FOREGROUND-PIXEL FRACTION is at least ``threshold`` (the paper's 2.5%). On
+    binarized input (pixels are ~0/1) the per-patch mean *is* that fraction once the
+    ink tone is known, so this is exact parity rather than an approximation. Ink
+    polarity is detected per page as the minority tone (a page is never mostly ink),
+    which makes it correct on white-on-black (raven/HWI native) and black-on-white
+    alike. Binarized data only — on greyscale/parchment there is no clean ink/
+    background split to count, so use ``contrast`` there.
 
     ``contrast``: keep patches whose local std exceeds ``threshold`` — text is
-    dark strokes on a lighter ground (high variance), blank parchment is smooth
-    (low variance). Background-colour-agnostic, so it removes empty patches on
-    parchment / colour photos where ``intensity`` cannot.
+    high-variance strokes, blank ground is smooth. Polarity-invariant
+    (``std(x) == std(1-x)``) and background-colour-agnostic, so it is the tool for
+    parchment / colour photos, where pixel counting cannot work.
+
+    ``intensity``: mole's own heuristic (NOT Raven's, despite an earlier docstring
+    here claiming so): keep patches with mean below ``1 - threshold``. Assumes
+    black-ink-on-white; useless on parchment and backwards on white-on-black. Kept
+    for backwards compatibility — prefer ``raven`` (binarized) or ``contrast``.
     """
     import torch
 
@@ -185,10 +194,15 @@ def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "in
     x = torch.stack(crops)                                     # [W, C, S, S] in [0,1]
     if method == "contrast":                                   # polarity-invariant (shared helper)
         return patch_contrast_mask(x, patch_size, threshold)   # keep inked (high local std) patches
-    if method != "intensity":
-        raise ValueError(f"foreground method must be 'intensity' or 'contrast', got {method!r}")
+    if method not in ("intensity", "raven"):
+        raise ValueError(
+            f"foreground method must be 'raven', 'contrast' or 'intensity', got {method!r}")
     g = x[:, 0:1]
     mean = torch.nn.functional.avg_pool2d(g, patch_size).squeeze(1).reshape(x.shape[0], -1)
+    if method == "raven":
+        ink_is_bright = g.mean().item() < 0.5                  # ink = the minority tone
+        frac = mean if ink_is_bright else (1.0 - mean)         # fraction of foreground pixels
+        return frac >= threshold                               # PAPER: >= 2.5% foreground
     return mean < (1.0 - threshold)                            # keep non-white patches
 
 
@@ -216,7 +230,9 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 
     pooling = Pooling(pooling)
     if foreground_threshold is None:   # method-appropriate default
-        foreground_threshold = 0.05 if foreground_method == "contrast" else 0.02
+        foreground_threshold = {"contrast": 0.05,   # local std
+                                "raven": 0.025,     # PAPER: >= 2.5% foreground pixels
+                                "intensity": 0.02}.get(foreground_method, 0.02)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
 

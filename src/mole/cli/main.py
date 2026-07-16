@@ -205,11 +205,13 @@ def embed(
         False, "--foreground/--no-foreground",
         help="Drop background patch tokens before patches/vlad pooling."),
     foreground_method: str = typer.Option(
-        "intensity", help="Foreground test: 'intensity' (Raven, white-bg/binarized) or "
-                          "'contrast' (local std — works on parchment/colour)."),
+        "intensity", help="Foreground test: 'raven' (>=2.5% foreground pixels — the paper's exact "
+                          "rule, binarized data, polarity auto-detected), 'contrast' (local std — "
+                          "works on parchment/colour), or 'intensity' (mole's legacy black-on-white "
+                          "heuristic; NOT Raven's rule)."),
     foreground_threshold: Optional[float] = typer.Option(
-        None, help="Keep threshold; default 0.02 for intensity (mean<1-thr), 0.05 for "
-                   "contrast (std>thr)."),
+        None, help="Keep threshold; defaults: 0.025 for raven (>=2.5% foreground pixels, the "
+                   "paper's rule), 0.05 for contrast (std>thr), 0.02 for intensity (mean<1-thr)."),
     vlad_intra_norm: bool = typer.Option(
         True, "--vlad-intra-norm/--no-vlad-intra-norm",
         help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
