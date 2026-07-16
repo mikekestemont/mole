@@ -261,6 +261,22 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     desc_images: list[str] = []              # image aligned with page_descriptors
 
     meta["invert"] = bool(settings["invert"])  # record the value actually applied
+
+    # VLAD with an EXTERNAL codebook can encode each page on the fly and discard its
+    # raw descriptors — otherwise every page's foreground tokens pile up in RAM and a
+    # large test set (3600 HWI pages) OOM-kills the process. Transductive VLAD (fits a
+    # codebook across all descriptors) and patches pooling still need them retained.
+    stream_codebook = None
+    if pooling is Pooling.VLAD and codebook_from is not None:
+        stream_codebook = np.load(codebook_from).astype(np.float32)
+        if stream_codebook.ndim != 2 or stream_codebook.shape[1] != meta["embed_dim"]:
+            raise ValueError(
+                f"codebook {codebook_from} has shape {stream_codebook.shape}; expected "
+                f"(K, {meta['embed_dim']}) to match this model's {meta['embed_dim']}-dim descriptors")
+        print(f"[mole] VLAD: streaming with external {stream_codebook.shape[0]}-cluster "
+              f"codebook from {codebook_from} (per-page, low memory)", flush=True)
+    vlad_vecs: list[np.ndarray] = []
+
     for img, wins in track(pages, "Embedding pages", unit="page"):
         page = load_rgb(img, invert=settings["invert"])
         crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
@@ -284,15 +300,25 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                 desc = patches[keep].reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
             else:
                 desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
-            page_descriptors.append(desc)
-            desc_images.append(str(img))
-            if pooling is Pooling.PATCHES:
-                start = len(rows)
-                rows.extend({"row": start + j, "image": str(img)} for j in range(len(desc)))
+            if stream_codebook is not None:      # encode now, discard raw descriptors
+                vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm))
+                desc_images.append(str(img))
+            else:
+                page_descriptors.append(desc)
+                desc_images.append(str(img))
+                if pooling is Pooling.PATCHES:
+                    start = len(rows)
+                    rows.extend({"row": start + j, "image": str(img)} for j in range(len(desc)))
 
-    matrix, codebook = _assemble(pooling, vectors, page_descriptors, desc_images, rows,
-                                 vlad_clusters, seed, intra_norm=vlad_intra_norm,
-                                 codebook_from=codebook_from)
+    if stream_codebook is not None:
+        matrix = (np.vstack(vlad_vecs) if vlad_vecs
+                  else np.zeros((0, stream_codebook.shape[0] * meta["embed_dim"]), np.float32))
+        codebook = stream_codebook
+        rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
+    else:
+        matrix, codebook = _assemble(pooling, vectors, page_descriptors, desc_images, rows,
+                                     vlad_clusters, seed, intra_norm=vlad_intra_norm,
+                                     codebook_from=codebook_from)
 
     whiten_transform = None
     did_whiten = (whiten or whiten_dim or whiten_from) and pooling is not Pooling.PATCHES

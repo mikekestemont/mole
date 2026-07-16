@@ -41,3 +41,20 @@ def test_codebook_dim_mismatch_raises(tmp_path):
     with pytest.raises(ValueError, match="expected .*8"):
         _assemble(Pooling.VLAD, [], _pages(rng), ["p0", "p1", "p2", "p3"], [],
                   vlad_clusters=5, seed=0, codebook_from=cb_path)
+
+
+def test_streaming_vlad_matches_accumulate(tmp_path):
+    # embed()'s external-codebook streaming path (encode per page, discard descriptors)
+    # must be bit-identical to the accumulate-then-_assemble path — only memory differs.
+    rng = np.random.default_rng(0)
+    dim = 8
+    pages = [rng.standard_normal((n, dim)).astype(np.float32) for n in (30, 12, 25)]
+    codebook = _vlad.fit_codebook(np.vstack(pages), n_clusters=5, seed=0)
+    cb_path = tmp_path / "cb.npy"; np.save(cb_path, codebook)
+    imgs = ["a", "b", "c"]
+
+    mat_accumulate, _ = _assemble(Pooling.VLAD, [], list(pages), list(imgs), [], 5, 0,
+                                  intra_norm=False, codebook_from=cb_path)
+    mat_stream = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=False) for d in pages])
+    assert mat_accumulate.shape == mat_stream.shape
+    assert np.array_equal(mat_accumulate, mat_stream)
