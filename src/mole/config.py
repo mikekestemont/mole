@@ -24,7 +24,7 @@ from typing import Any
 DEFAULTS: dict[str, Any] = {
     "data": {
         "path": "data/samples",       # dataset root (flat folder or subfolders-as-datasets)
-        "window_size": 512,           # physical crop from the page
+        "window_size": 256,           # physical crop; Raven/HWI scale (see patches.DEFAULT_WINDOW_SIZE)
         "model_size": 224,            # ViT input size
         "overlap": 0.5,               # window grid overlap
         "use_zones": True,            # restrict windows to prep text zones (zones.json)

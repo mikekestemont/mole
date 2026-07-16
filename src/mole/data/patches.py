@@ -24,10 +24,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterator, NamedTuple
 
-# Locked in Phase 2 after visual review on medieval charters: 512px windows give
-# ~4-6 words / 3-4 lines of context per sample (256 was too zoomed for writer
-# style; it suited binarized ICDAR data, not these scans).
-DEFAULT_WINDOW_SIZE = 512
+# 256px windows = Raven et al.'s scale (arXiv:2409.00751) and the HWI-breakthrough
+# geometry: finer descriptors, and — crucially — the scale foreign checkpoints
+# (raven) were trained at, so they embed correctly without an override. (Phase 2
+# used 512 for colour charter scans; every mole config now sets window_size
+# explicitly, so this default only governs geometry-less foreign checkpoints.)
+DEFAULT_WINDOW_SIZE = 256
 DEFAULT_MODEL_SIZE = 224
 DEFAULT_OVERLAP = 0.5
 
