@@ -337,6 +337,9 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
         print(f"[mole] VLAD: using external {codebook.shape[0]}-cluster codebook "
               f"from {codebook_from}", flush=True)
     else:
+        n_desc = sum(len(d) for d in page_descriptors)
+        print(f"[mole] VLAD: assembling {n_desc:,} patch descriptors from "
+              f"{len(page_descriptors)} pages…", flush=True)
         all_desc = np.vstack(page_descriptors)
         print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
               f"patch descriptors (seed {seed})…", flush=True)

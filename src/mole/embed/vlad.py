@@ -35,13 +35,45 @@ def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
     k = int(min(n_clusters, len(x)))
     try:
         from sklearn.cluster import MiniBatchKMeans
-
-        km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=10_000,
-                             n_init=3, max_iter=max_iter)
-        km.fit(x)
-        return km.cluster_centers_.astype(np.float32)
     except ModuleNotFoundError:
         return _numpy_kmeans(x, k, seed, max_iter)
+
+    km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=10_000,
+                         n_init=3, max_iter=max_iter)
+    _fit_with_heartbeat(km, x, f"Fitting VLAD codebook (K={k}, {len(x):,} pts)")
+    return km.cluster_centers_.astype(np.float32)
+
+
+def _fit_with_heartbeat(km, x, description: str) -> None:
+    """Run ``km.fit(x)`` in a worker thread with a live elapsed-time bar.
+
+    MiniBatchKMeans is a single blocking call with no per-iteration callback, so a
+    true ``%`` bar isn't available without reimplementing the fit as a partial_fit
+    loop — which would change the codebook numerically. To keep results comparable
+    (we A/B retrieval scores against this codebook) we keep the exact fit and just
+    show that it's alive and how long it's taken.
+    """
+    import threading
+
+    from mole.progress import progress_bar
+
+    err: dict = {}
+
+    def _run():
+        try:
+            km.fit(x)
+        except BaseException as e:                    # re-raise in the main thread
+            err["e"] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    bar = progress_bar(description=description, unit="s", bar_format="{desc} | {elapsed} elapsed")
+    while t.is_alive():
+        t.join(timeout=0.5)
+        bar.refresh()                                 # advance the elapsed clock
+    bar.close()
+    if "e" in err:
+        raise err["e"]
 
 
 def _numpy_kmeans(x: np.ndarray, k: int, seed: int, max_iter: int) -> np.ndarray:
@@ -58,7 +90,8 @@ def _numpy_kmeans(x: np.ndarray, k: int, seed: int, max_iter: int) -> np.ndarray
         centers[i] = x[idx]
         closest = np.minimum(closest, ((x - centers[i]) ** 2).sum(1))
     # Lloyd iterations.
-    for _ in range(max_iter):
+    from mole.progress import track
+    for _ in track(range(max_iter), "Fitting VLAD codebook (Lloyd)", unit="iter"):
         d = ((x[:, None, :] - centers[None, :, :]) ** 2).sum(2)
         assign = d.argmin(1)
         moved = False
