@@ -199,7 +199,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           foreground: bool = False, foreground_threshold: float | None = None,
           foreground_method: str = "intensity",
           vlad_intra_norm: bool = True, invert: bool | None = None,
-          codebook_from: str | Path | None = None, whiten_dim: int | None = None):
+          codebook_from: str | Path | None = None, whiten_dim: int | None = None,
+          whiten_from: str | Path | None = None):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -293,18 +294,28 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                                  vlad_clusters, seed, intra_norm=vlad_intra_norm,
                                  codebook_from=codebook_from)
 
-    did_whiten = (whiten or whiten_dim) and pooling is not Pooling.PATCHES
+    whiten_transform = None
+    did_whiten = (whiten or whiten_dim or whiten_from) and pooling is not Pooling.PATCHES
     if did_whiten:
-        matrix = _pca_whiten(matrix, dim=whiten_dim)
+        if whiten_from is not None:              # apply a transform fit on another split
+            wt = np.load(whiten_from)
+            whiten_apply = {"mean": wt["mean"], "proj": wt["proj"]}
+            matrix = _apply_pca_whiten(matrix, whiten_apply)
+            print(f"[mole] whiten: applied {whiten_apply['proj'].shape[1]}-dim transform "
+                  f"from {whiten_from}", flush=True)
+            meta["whiten_source"] = str(whiten_from)
+        else:                                    # fit transductively (and save for reuse)
+            matrix, whiten_transform = _fit_pca_whiten(matrix, dim=whiten_dim)
+            meta["whiten_source"] = "fitted"
         meta["whitened"] = True
-        if whiten_dim:
-            meta["whiten_dim"] = int(matrix.shape[1])
+        meta["whiten_dim"] = int(matrix.shape[1])
 
     _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
                   vlad_clusters, seed, foreground=foreground,
                   foreground_threshold=foreground_threshold, foreground_method=foreground_method,
                   vlad_intra_norm=vlad_intra_norm,
-                  codebook_source=str(codebook_from) if codebook_from else "fitted")
+                  codebook_source=str(codebook_from) if codebook_from else "fitted",
+                  whiten_transform=whiten_transform)
     return output
 
 
@@ -362,24 +373,41 @@ def _pick_device():
     return torch.device("cpu")
 
 
-def _pca_whiten(mat: np.ndarray, dim: int | None = None, eps: float = 1e-6) -> np.ndarray:
-    """PCA-whiten rows of ``mat`` (classic retrieval post-processing), re-L2'd.
+def _fit_pca_whiten(mat: np.ndarray, dim: int | None = None, eps: float = 1e-6):
+    """Fit PCA-whitening on ``mat``; return ``(whitened_rows, transform)``.
 
-    Fit transductively on the same matrix (standard for a one-shot index build).
-    ``dim`` keeps only the top-``dim`` principal components (largest variance) —
-    the reduce-and-whiten step writer retrieval uses (e.g. VLAD 38400 -> 384).
+    ``transform`` is ``{"mean": [D], "proj": [D, k]}`` — reusable on another matrix
+    via :func:`_apply_pca_whiten` (Raven's fit-on-train / apply-on-test protocol).
+    ``dim`` keeps only the top-``dim`` principal components (VLAD 38400 -> 384). The
+    whitened rows are byte-for-byte what the old transductive code produced.
     """
     n = len(mat)
-    x = mat - mat.mean(0, keepdims=True)
-    u, s, _ = np.linalg.svd(x, full_matrices=False)
+    mu = mat.mean(0, keepdims=True)
+    x = mat - mu
+    _, s, vt = np.linalg.svd(x, full_matrices=False)
     keep = s > eps * s.max() if s.size else np.array([], dtype=bool)
     if dim is not None and keep.size:
         top = np.zeros_like(keep)
         top[:dim] = True                      # SVD returns singular values descending
         keep = keep & top
-    white = (u * np.sqrt(max(n - 1, 1)))[:, keep]
-    norms = np.linalg.norm(white, axis=1, keepdims=True)
-    return (white / np.maximum(norms, 1e-12)).astype(np.float32)
+    proj = (vt[keep].T / s[keep]) * np.sqrt(max(n - 1, 1))   # [D, k]; white = x @ proj
+    transform = {"mean": mu.astype(np.float32), "proj": proj.astype(np.float32)}
+    return _l2(x @ proj), transform
+
+
+def _apply_pca_whiten(mat: np.ndarray, transform: dict) -> np.ndarray:
+    """Apply a saved PCA-whitening ``transform`` (fit elsewhere) to ``mat``, re-L2'd."""
+    proj = transform["proj"]
+    if proj.shape[0] != mat.shape[1]:
+        raise ValueError(
+            f"whiten transform expects {proj.shape[0]}-dim input but the embeddings are "
+            f"{mat.shape[1]}-dim — the codebook/pooling must match the one it was fit on")
+    return _l2((mat - transform["mean"]) @ proj)
+
+
+def _l2(x: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    return (x / np.maximum(norms, 1e-12)).astype(np.float32)
 
 
 # ----------------------------------------------------------------------- output
@@ -399,7 +427,8 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str) -> None:
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
                   vlad_clusters, seed, *, foreground: bool = False,
                   foreground_threshold: float = 0.02, foreground_method: str = "intensity",
-                  vlad_intra_norm: bool = True, codebook_source: str = "fitted") -> None:
+                  vlad_intra_norm: bool = True, codebook_source: str = "fitted",
+                  whiten_transform: dict | None = None) -> None:
     if output.suffix == ".parquet":
         _write_parquet(output, matrix, rows)
     else:
@@ -426,6 +455,10 @@ def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
         sidecar["vlad_intra_norm"] = bool(vlad_intra_norm)
         sidecar["vlad_codebook_source"] = codebook_source
         sidecar["codebook"] = str(cb_path.name)
+    if whiten_transform is not None:             # save so a test split can --whiten-from it
+        w_path = output.with_suffix(".whiten.npz")
+        np.savez(w_path, mean=whiten_transform["mean"], proj=whiten_transform["proj"])
+        sidecar["whiten_transform"] = str(w_path.name)
     output.with_suffix(".mapping.json").write_text(json.dumps(sidecar, indent=2))
     print(f"[mole] ✓ wrote {tuple(matrix.shape)} embeddings → {output}")
     print(f"[mole] ✓ sidecar → {output.with_suffix('.mapping.json')}")

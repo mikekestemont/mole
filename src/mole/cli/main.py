@@ -221,6 +221,11 @@ def embed(
         None, "--codebook-from",
         help="Reuse a saved .codebook.npy (pooling=vlad) instead of fitting one on this set — "
              "e.g. a codebook fit on the training split (fit-on-train / apply-on-test)."),
+    whiten_from: Optional[Path] = typer.Option(
+        None, "--whiten-from",
+        help="Apply a saved .whiten.npz PCA-whitening transform (fit on another split) instead "
+             "of fitting it transductively — Raven's fit-on-train / apply-on-test protocol. A "
+             "transductive --whiten-dim run saves its transform as <out>.whiten.npz for reuse."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -235,7 +240,8 @@ def embed(
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, foreground_method=foreground_method,
            vlad_intra_norm=vlad_intra_norm,
-           invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim)
+           invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim,
+           whiten_from=whiten_from)
 
 
 # ---------------------------------------------------------------------------- viz
