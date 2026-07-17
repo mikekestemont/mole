@@ -126,6 +126,17 @@ def _categories(rows: list[dict], color: str, color_regex: str | None) -> list[s
     return cats
 
 
+# Category values that mean "this document has no ground-truth hand". Covers mole's
+# own placeholders ("unlabeled" from a missing labels.csv row, "—" from a regex miss)
+# and the conventions that show up in supplied label files ("-1" is the noise/unassigned
+# marker in the Antwerp clusterings spreadsheet).
+_UNLABELED = {"unlabeled", "-1", "—", "-", "", "none", "nan", "unknown", "na", "n/a", "?"}
+
+
+def _is_unlabeled(cat: str) -> bool:
+    return str(cat).strip().lower() in _UNLABELED
+
+
 def _palette(n: int) -> list[str]:
     if n <= 1:
         return ["#4c78a8"]
@@ -151,16 +162,24 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
     dots = []
     for x, y, c, r in zip(nx, ny, cats, rows):
         name = escape(Path(r["image"]).name, quote=True)
+        unl = ' data-unl="1"' if _is_unlabeled(c) else ""
         dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{cmap[c]}" '
                     f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
-                    f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"/>')
+                    f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"{unl}/>')
 
+    n_unlabeled = sum(1 for c in cats if _is_unlabeled(c))
     show = uniq[:60]
     legend = "".join(
-        f'<span class="lg"><i style="background:{cmap[c]}"></i>{escape(str(c))} '
+        f'<span class="lg{" unl" if _is_unlabeled(c) else ""}">'
+        f'<i style="background:{cmap[c]}"></i>{escape(str(c))} '
         f'<b>{cats.count(c)}</b></span>' for c in show)
     if len(uniq) > len(show):
         legend += f'<span class="lg more">+{len(uniq) - len(show)} more…</span>'
+
+    # Unlabeled documents usually dominate (e.g. 200/300 on brackley-set) and swamp the
+    # labelled structure, so offer to hide them. Only render the control if any exist.
+    toggle = (f'<label class="tgl"><input type="checkbox" id="unl" checked> '
+              f'show unlabeled <b>{n_unlabeled}</b></label>') if n_unlabeled else ""
 
     mid = meta.get("model_id", "?")
     pooling = meta.get("pooling", "?")
@@ -187,6 +206,10 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
            margin-right: 5px; vertical-align: baseline; }}
   .lg b {{ opacity: .55; font-weight: 500; }}
   .more {{ opacity: .6; font-style: italic; }}
+  .tgl {{ display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
+          cursor: pointer; user-select: none; opacity: .85; }}
+  .tgl b {{ opacity: .55; font-weight: 500; }}
+  .lg.unl.off {{ opacity: .3; text-decoration: line-through; }}
   code {{ font-size: 12px; opacity: .8; }}
   circle {{ cursor: crosshair; }}
   #tt {{ position: fixed; z-index: 10; display: none; pointer-events: none;
@@ -196,6 +219,7 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
 </style></head><body>
 <h1>Document embedding scatter</h1>
 <div class="sub">{subtitle}</div>
+{toggle}
 <div class="wrap">
   <svg viewBox="0 0 {W} {H}" width="{W}" height="{H}">{''.join(dots)}</svg>
   <div class="legend">{legend}</div>
@@ -222,6 +246,17 @@ should form neighbourhoods as the model learns.</p>
   svg.addEventListener('mouseout', function(e) {{
     if (e.target.tagName === 'circle') tt.style.display = 'none';
   }});
+  var unl = document.getElementById('unl');
+  if (unl) {{
+    var pts = svg.querySelectorAll('circle[data-unl]');
+    var keys = document.querySelectorAll('.lg.unl');
+    unl.addEventListener('change', function() {{
+      var vis = unl.checked;
+      for (var i = 0; i < pts.length; i++) pts[i].style.display = vis ? '' : 'none';
+      for (var j = 0; j < keys.length; j++) keys[j].classList.toggle('off', !vis);
+      tt.style.display = 'none';
+    }});
+  }}
 }})();
 </script>
 </body></html>"""
