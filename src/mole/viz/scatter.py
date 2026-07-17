@@ -132,6 +132,12 @@ def _categories(rows: list[dict], color: str, color_regex: str | None) -> list[s
 # marker in the Antwerp clusterings spreadsheet).
 _UNLABELED = {"unlabeled", "-1", "—", "-", "", "none", "nan", "unknown", "na", "n/a", "?"}
 
+# Unlabeled points are drawn as a neutral grey disc with a cross through it: they read
+# as "no ground truth here" rather than as just another hand, and the categorical
+# palette is then spent entirely on real hands.
+_UNLABELED_GREY = "#9aa0a6"
+_UNLABELED_CROSS = "#2f3336"
+
 
 def _is_unlabeled(cat: str) -> bool:
     return str(cat).strip().lower() in _UNLABELED
@@ -157,22 +163,32 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
     nx = norm(xs) * (W - 2 * pad) + pad
     ny = (1.0 - norm(ys)) * (H - 2 * pad) + pad          # SVG y grows downward
     uniq = sorted(set(cats), key=lambda c: (-cats.count(c), c))
-    cmap = dict(zip(uniq, _palette(len(uniq))))
+    # Spend the categorical palette on real hands only; unlabeled always gets grey.
+    labeled_uniq = [c for c in uniq if not _is_unlabeled(c)]
+    cmap = dict(zip(labeled_uniq, _palette(len(labeled_uniq))))
+    cmap.update({c: _UNLABELED_GREY for c in uniq if _is_unlabeled(c)})
 
     dots = []
     for x, y, c, r in zip(nx, ny, cats, rows):
         name = escape(Path(r["image"]).name, quote=True)
-        unl = ' data-unl="1"' if _is_unlabeled(c) else ""
-        dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{cmap[c]}" '
-                    f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
-                    f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"{unl}/>')
+        dot = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{cmap[c]}" '
+               f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
+               f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"/>')
+        if _is_unlabeled(c):
+            # Cross drawn over the disc; pointer-events:none so the circle stays the
+            # hover target. Wrapped in a <g> so the toggle hides disc + cross together.
+            a = 2.2
+            dot = (f'<g data-unl="1">{dot}<path d="M{x - a:.1f} {y - a:.1f}L{x + a:.1f} {y + a:.1f}'
+                   f'M{x - a:.1f} {y + a:.1f}L{x + a:.1f} {y - a:.1f}" stroke="{_UNLABELED_CROSS}" '
+                   f'stroke-width="1.1" stroke-linecap="round" pointer-events="none"/></g>')
+        dots.append(dot)
 
     n_unlabeled = sum(1 for c in cats if _is_unlabeled(c))
     show = uniq[:60]
     legend = "".join(
         f'<span class="lg{" unl" if _is_unlabeled(c) else ""}">'
-        f'<i style="background:{cmap[c]}"></i>{escape(str(c))} '
-        f'<b>{cats.count(c)}</b></span>' for c in show)
+        f'<i class="{"xm" if _is_unlabeled(c) else ""}" style="background:{cmap[c]}"></i>'
+        f'{escape(str(c))} <b>{cats.count(c)}</b></span>' for c in show)
     if len(uniq) > len(show):
         legend += f'<span class="lg more">+{len(uniq) - len(show)} more…</span>'
 
@@ -203,7 +219,9 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
              align-content: flex-start; }}
   .lg {{ white-space: nowrap; opacity: .9; }}
   .lg i {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px;
-           margin-right: 5px; vertical-align: baseline; }}
+           margin-right: 5px; vertical-align: baseline; position: relative; }}
+  .lg i.xm::after {{ content: "×"; position: absolute; inset: -1px 0 0 0; color: #2f3336;
+                     font-size: 11px; line-height: 10px; text-align: center; font-weight: 700; }}
   .lg b {{ opacity: .55; font-weight: 500; }}
   .more {{ opacity: .6; font-style: italic; }}
   .tgl {{ display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
@@ -248,7 +266,7 @@ should form neighbourhoods as the model learns.</p>
   }});
   var unl = document.getElementById('unl');
   if (unl) {{
-    var pts = svg.querySelectorAll('circle[data-unl]');
+    var pts = svg.querySelectorAll('[data-unl]');   // the <g> wrapping disc + cross
     var keys = document.querySelectorAll('.lg.unl');
     unl.addEventListener('change', function() {{
       var vis = unl.checked;
