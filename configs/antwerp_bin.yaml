@@ -1,0 +1,89 @@
+# Antwerp finetune on the SAUVOLA-BINARIZED set — warm-start raven.
+#
+# THE FAIR TEST OF FINETUNING. Both previous finetunes lost to raven-raw, but both
+# were handicapped by bugs since fixed:
+#   * brackley_ft  — trained COLOUR, invert:false, i.e. the WRONG polarity for raven's
+#                    warm-started weights (it burned capacity flipping patch-embed
+#                    layer 1 instead of learning style). Scored macro 0.381 vs
+#                    raven-raw's 0.764 on the same collection.
+#   * antw_base_v1 — trained greyscale dark-on-light (wrong polarity) AND at 512px
+#                    windows (36.6px/token vs raven's 16px — a 2.3x scale error).
+#                    Still reached macro 0.701 vs raven-raw's 0.718, while doubly
+#                    handicapped.
+# So "finetuning doesn't help" was never actually tested. This config fixes both:
+# binarized + inverted (raven's native white-on-black) at raven's own training scale.
+#
+# Baseline to beat: raven-RAW on data/antwerp-bin = mAP 0.7443 / macro 0.7183 /
+# Top-1 0.9511 (zero training). If this can't clear that, finetuning is genuinely
+# dead for this data and we stop asking.
+#
+# Prep (already done):
+#   mole prep ~/SSL_ViT_WR/SSL_ViT_WR/assets/img-antw --binarize sauvola \
+#       --binarize-out data/antwerp-bin
+#   NB no --max-side: Antwerp's height (1229) is already BELOW raven's ~1750 scale,
+#   and page scale proved near-irrelevant anyway (worth 0.009 macro on brackley).
+#
+# Launch:
+#   CUDA_VISIBLE_DEVICES=<free> mole train configs/antwerp_bin.yaml \
+#       --init-from checkpoints/raven_checkpoint.pth
+#
+# Then (the embed defaults are now the Raven-parity baseline, and invert is
+# inherited from this config, so no flags are needed):
+#   mole embed runs/antwerp_bin_ft/checkpoint.pth data/antwerp-bin outputs/antwerp_ft/ft.npy
+#   mole eval outputs/antwerp_ft/ft.npy data/antwerp-bin --topk 1,5
+
+data:
+  path: data/antwerp-bin
+  window_size: 256          # raven's TRAINING geometry (multi-crop RRCs this down to
+                            #   224). NB this is deliberately NOT the 224 we use at
+                            #   EMBED time: 224-no-resize gives 16px/token to match his
+                            #   inference, but training samples crops from a 256 window.
+  model_size: 224
+  overlap: 0.5              # stride 128 -> ~184 windows/page x 470 = ~86k windows.
+                            #   Raven trained at stride 32, but that is ~1.3M windows
+                            #   here = days; 0.5 is the tractable compromise for a
+                            #   warm-started finetune on a small collection.
+  use_zones: false          # no zones.json for the binarized copy
+  invert: true              # KEY: Sauvola writes black-on-white; raven wants
+                            #   white-on-black. Getting this wrong is what sank
+                            #   brackley_ft. Inherited by `mole embed` automatically.
+  foreground_min: 0.05      # drop near-blank windows (polarity-invariant contrast test).
+                            #   Antwerp charters are wide strips with lots of empty
+                            #   margin. NB a deliberate DEVIATION from raven, who does
+                            #   not filter training windows (his 2.5% filter is
+                            #   inference-only) — kept for compute, not fidelity.
+  num_workers: 6
+
+aug:
+  preset: mild              # keeps gaussian blur (DINO base); the rest disabled below
+  overrides:
+    local_crops_number: 8   # 2 global + 8 local (raven's multi-crop)
+    local_size: 96
+    global_crops_scale: [0.4, 1.0]
+    local_crops_scale: [0.05, 0.4]
+    erosion_dilation_prob: 0.5   # raven's binary morphology aug
+    # Colour/JPEG/rotation are meaningless on 2-tone data.
+    color_jitter_prob: 0.0
+    grayscale_prob: 0.0
+    jpeg_prob: 0.0
+    rotation_prob: 0.0
+
+model:
+  arch: vit_small           # matches raven; --init-from adopts it regardless
+  patch_size: 16
+
+optim:
+  lr: 5.0e-4                # GENTLE peak @ ref batch 256 -> ~9.4e-5 at batch 48, so
+                            #   raven's features ADAPT rather than get wiped. (NOT
+                            #   historical_wi's 0.005, which is a from-scratch LR.)
+  warmup_epochs: 5          # shorter than brackley_bin's 10: only 30 epochs total here
+  batch_size: 48
+
+train:
+  epochs: 30                # ~1800 steps/epoch -> ~54k steps. Warm-started, so this is
+                            #   plenty; watch the projector and stop early if it plateaus.
+  fp16: true
+  output_dir: runs/antwerp_bin_ft
+  save_every_steps: 500
+  saveckp_epoch_freq: 5
+  projector_every_epochs: 5

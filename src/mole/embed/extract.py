@@ -264,12 +264,12 @@ def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           pooling: Pooling | str = Pooling.VLAD, whiten: bool = False,
           overrides: list[str] | None = None, *, batch_size: int = 32,
-          vlad_clusters: int = 64, vlad_max_descriptors: int = 0,
+          vlad_clusters: int = 100, vlad_max_descriptors: int = 0,
           seed: int = 0, device: str | None = None,
-          foreground: bool = False, foreground_threshold: float | None = None,
-          foreground_method: str = "intensity",
+          foreground: bool = True, foreground_threshold: float | None = None,
+          foreground_method: str = "contrast",
           window_foreground: bool = False, window_foreground_threshold: float = 0.025,
-          vlad_intra_norm: bool = True, invert: bool | None = None,
+          vlad_intra_norm: bool = False, invert: bool | None = None,
           codebook_from: str | Path | None = None, whiten_dim: int | None = None,
           whiten_from: str | Path | None = None):
     """Extract page embeddings for a folder of images.

@@ -198,14 +198,16 @@ def embed(
         help="PCA-whiten AND reduce to this many dims (implies --whiten; e.g. 384 for the "
              "writer-retrieval VLAD->384 recipe)."),
     batch_size: int = typer.Option(32, help="Windows per forward pass."),
-    vlad_clusters: int = typer.Option(64, help="VLAD codebook size (pooling=vlad)."),
+    vlad_clusters: int = typer.Option(
+        100, help="VLAD codebook size (pooling=vlad). Default 100 = Raven's C."),
     seed: int = typer.Option(0, help="VLAD k-means seed (reproducible codebook)."),
     device: Optional[str] = typer.Option(None, help="Force device (cuda/mps/cpu); default auto."),
     foreground: bool = typer.Option(
-        False, "--foreground/--no-foreground",
-        help="Drop background patch tokens before patches/vlad pooling."),
+        True, "--foreground/--no-foreground",
+        help="Drop background patch tokens before patches/vlad pooling (default on; "
+             "no-op for mean/cls)."),
     foreground_method: str = typer.Option(
-        "intensity", help="Foreground test. 'intensity' = Raven's get_foreground_mask verbatim as "
+        "contrast", help="Foreground test. 'intensity' = Raven's get_foreground_mask verbatim as "
                           "RELEASED (mean < 1-thr; assumes black-ink-on-white). 'raven' = the rule "
                           "as stated in his PAPER (>= t_fg 10px of foreground; polarity "
                           "auto-detected) — his code does NOT implement this; paper and code "
@@ -222,8 +224,9 @@ def embed(
         0.025, help="Per-WINDOW keep threshold (paper: >2.5% foreground pixels). Distinct from "
                     "the per-patch t_fg above."),
     vlad_intra_norm: bool = typer.Option(
-        True, "--vlad-intra-norm/--no-vlad-intra-norm",
-        help="Per-cluster intra-normalisation in VLAD; use --no-vlad-intra-norm for Raven-parity."),
+        False, "--vlad-intra-norm/--no-vlad-intra-norm",
+        help="Per-cluster intra-normalisation in VLAD. Default OFF = Raven's plain VLAD; "
+             "--vlad-intra-norm restores mole's own variant."),
     invert: Optional[bool] = typer.Option(
         None, "--invert/--no-invert",
         help="Negate intensity at load (white-on-black -> black-on-white). Default: inherit "
@@ -245,8 +248,14 @@ def embed(
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
 
-    Raven-parity VLAD baseline: --pooling vlad --vlad-clusters 100 --foreground
-    --no-vlad-intra-norm.
+    The Raven-parity VLAD baseline is now the DEFAULT (vlad pooling, C=100,
+    foreground on via the polarity-invariant contrast test, plain VLAD without
+    intra-normalisation, codebook fit on all tokens), so a retrieval embed is just:
+
+        mole embed CKPT DATASET out.npy            # add --invert for black-on-white input
+
+    Geometry (window_size/overlap/use_zones/invert) is inherited from the
+    checkpoint's training config; override any of it with --set key=value.
     """
     from mole.embed import embed as _embed
 
