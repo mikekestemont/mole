@@ -5,6 +5,12 @@
 * ``meanstd`` -- mean concatenated with the per-dimension std of the (foreground)
                  tokens (768-dim). A cheap second-order descriptor that captures
                  the token *distribution* VLAD exploits, still codebook-free.
+* ``cov``     -- second-order (bilinear) pooling: the flattened upper triangle of
+                 the token second-moment matrix, signed-sqrt + L2 (~74k-dim for
+                 d=384). Codebook-free and captures cross-dimensional structure
+                 (the token cloud's shape) that meanstd's marginal std cannot; it
+                 is unimodal, so expected to sit between mean and VLAD. Reduce with
+                 --whiten-dim for a scalable-length descriptor.
 * ``cls``     -- the [CLS] token(s), flattened when there is more than one.
 * ``vlad``    -- VLAD aggregation (reproducible codebook, see vlad.py). Strongest,
                  but 38400-dim and needs a fitted codebook (transductive / per-set).
@@ -35,6 +41,7 @@ from enum import Enum
 class Pooling(str, Enum):
     MEAN = "mean"
     MEANSTD = "meanstd"
+    COV = "cov"
     CLS = "cls"
     VLAD = "vlad"
     PATCHES = "patches"

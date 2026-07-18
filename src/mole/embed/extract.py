@@ -244,12 +244,37 @@ def _mean_pool(desc: np.ndarray, with_std: bool, embed_dim: int) -> np.ndarray:
     return np.concatenate([mu, sd]).astype(np.float32)
 
 
+def _cov_pool(desc: np.ndarray, embed_dim: int) -> np.ndarray:
+    """Second-order (bilinear) page descriptor: flattened upper triangle of the token
+    second-moment matrix, signed-square-rooted and L2-normalised.
+
+    ``G = XᵀX / n`` captures cross-dimensional structure — the *shape* of the token
+    cloud — that mean/meanstd (marginal only) miss, and it is codebook-free. Off-
+    diagonal entries are scaled by ``√2`` so the flattened vector's inner product
+    equals the full matrix's Frobenius inner product; the signed square root is the
+    'improved bilinear pooling' burst-normalisation. Length is ``d(d+1)/2`` (73,920
+    for d=384) — reduce with ``--whiten-dim`` for a scalable descriptor. Unimodal, so
+    expected between mean and (multimodal) VLAD.
+    """
+    out_dim = embed_dim * (embed_dim + 1) // 2
+    if len(desc) == 0:
+        return np.zeros(out_dim, dtype=np.float32)
+    g = (desc.T @ desc) / len(desc)                     # [d, d] second moment
+    g = np.sign(g) * np.sqrt(np.abs(g))                 # signed sqrt (burst norm)
+    iu = np.triu_indices(embed_dim)
+    v = g[iu].astype(np.float32)
+    v[iu[0] != iu[1]] *= np.float32(np.sqrt(2.0))       # off-diagonals: preserve Frobenius norm
+    return (v / max(float(np.linalg.norm(v)), 1e-12)).astype(np.float32)
+
+
 def _fixed_vector_dim(pooling, embed_dim: int, num_class_tokens: int) -> int:
     """Output dim of the one-vector-per-page poolings (for the all-blank-page case)."""
     if pooling is Pooling.CLS:
         return embed_dim * num_class_tokens
     if pooling is Pooling.MEANSTD:
         return embed_dim * 2
+    if pooling is Pooling.COV:
+        return embed_dim * (embed_dim + 1) // 2
     return embed_dim                                    # MEAN
 
 
@@ -394,7 +419,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             crops = [c for c, k in zip(crops, keep_win.tolist()) if k]
         n_win_kept += len(crops)
         if not crops:                        # every window was blank -> no descriptors
-            if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.CLS):
+            if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.COV, Pooling.CLS):
                 vectors.append(np.zeros(_fixed_vector_dim(pooling, meta["embed_dim"], nct),
                                         dtype=np.float32))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": 0})
@@ -426,8 +451,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             else:
                 desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
 
-            if pooling in (Pooling.MEAN, Pooling.MEANSTD):        # codebook-free page vector
-                vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, meta["embed_dim"]))
+            if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.COV):  # codebook-free page vector
+                if pooling is Pooling.COV:
+                    vectors.append(_cov_pool(desc, meta["embed_dim"]))
+                else:
+                    vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, meta["embed_dim"]))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": len(crops)})
             elif stream_codebook is not None:    # VLAD, external codebook: encode + discard
                 vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm))
@@ -497,7 +525,7 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
     training split), which is then loaded and applied — the Raven-style
     fit-on-train / apply-on-test protocol.
     """
-    if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.CLS):
+    if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.COV, Pooling.CLS):
         return np.vstack(vectors), None
     if pooling is Pooling.PATCHES:
         return np.vstack(page_descriptors), None
