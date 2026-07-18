@@ -71,6 +71,7 @@ class PatchWindowDataset(Dataset):
                 if not size:
                     from PIL import Image, ImageFile
                     ImageFile.LOAD_TRUNCATED_IMAGES = True
+                    Image.MAX_IMAGE_PIXELS = None   # trusted large scans > PIL's ~179MP bomb limit
                     size = Image.open(img).size
                 wins = window_coords(size[0], size[1], window_size, overlap, bbox)
                 if foreground_min > 0.0:

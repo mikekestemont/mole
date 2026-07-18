@@ -53,6 +53,7 @@ def load_rgb(image_path: str | Path, invert: bool = False):
     from PIL import Image, ImageFile, ImageOps
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     img = Image.open(image_path)
     if getattr(img, "n_frames", 1) > 1:      # multi-frame / pyramidal TIFF
         best, area = 0, -1                   # keep the largest frame (the full image,

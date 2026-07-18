@@ -302,6 +302,7 @@ def augview(folder: str, output: str, n_images: int = 5, n_views: int = 5,
     from mole.progress import track
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     random.seed(seed)
 
     if presets is None:

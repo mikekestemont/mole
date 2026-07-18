@@ -113,6 +113,7 @@ def _page_index(input_dir: Path, window_size: int, overlap: float,
     from PIL import Image, ImageFile
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     folders = ([input_dir] + [p for p in sorted(input_dir.iterdir()) if p.is_dir()]
                if input_dir.is_dir() else [])
     pages: list[tuple[Path, list[Window]]] = []

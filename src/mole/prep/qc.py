@@ -44,6 +44,7 @@ def _render_overlay(record, box_width: int):
     from PIL import Image, ImageDraw, ImageFile
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     img = Image.open(record.path).convert("RGB")
     w, h = img.size
     scale = box_width / w
@@ -72,6 +73,7 @@ def build_contact_sheet(records, output_html: str | Path, detector_name: str = "
 
     from mole.progress import track
 
+    Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     rows = []
     for r in track(records, "Building QC sheet", unit="page"):
         overlay = _render_overlay(r, box_width)
