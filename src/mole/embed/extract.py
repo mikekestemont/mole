@@ -224,6 +224,35 @@ def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "in
     return mean < (1.0 - threshold)                            # keep non-white patches
 
 
+def _mean_pool(desc: np.ndarray, with_std: bool, embed_dim: int) -> np.ndarray:
+    """Codebook-free page vector from a page's foreground patch descriptors.
+
+    ``mean``: L2-normalised mean of the tokens (``embed_dim``). ``meanstd``: the mean
+    concatenated with the per-dimension std — a cheap second-order descriptor that
+    keeps some of the token *distribution* VLAD encodes (``2*embed_dim``). Mean and
+    std blocks are L2-normalised separately so the std contributes regardless of its
+    raw magnitude. Both are fully incremental — no codebook, no cross-page fit.
+    """
+    if len(desc) == 0:
+        return np.zeros(embed_dim * (2 if with_std else 1), dtype=np.float32)
+    mu = desc.mean(0)
+    mu = mu / max(float(np.linalg.norm(mu)), 1e-12)
+    if not with_std:
+        return mu.astype(np.float32)
+    sd = desc.std(0)
+    sd = sd / max(float(np.linalg.norm(sd)), 1e-12)
+    return np.concatenate([mu, sd]).astype(np.float32)
+
+
+def _fixed_vector_dim(pooling, embed_dim: int, num_class_tokens: int) -> int:
+    """Output dim of the one-vector-per-page poolings (for the all-blank-page case)."""
+    if pooling is Pooling.CLS:
+        return embed_dim * num_class_tokens
+    if pooling is Pooling.MEANSTD:
+        return embed_dim * 2
+    return embed_dim                                    # MEAN
+
+
 def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
     """Raven's inference-time WINDOW pre-filter, applied to the crops *before* the ViT,
     so discarded windows cost no forward pass ("to save computation", per the paper).
@@ -320,11 +349,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     transform = _build_transform(meta["model_size"])
     nct = meta["num_class_tokens"]
 
-    if foreground and pooling in (Pooling.MEAN, Pooling.CLS):
-        # Foreground filtering selects *patch* tokens; mean/cls pool differently
-        # (mean over all patches / the class token) so it has no effect there.
-        print("[mole] note: --foreground only affects patches/vlad pooling; ignored "
-              f"for {pooling.value}")
+    if foreground and pooling is Pooling.CLS:
+        # The class token is not a patch token, so per-patch foreground selection
+        # cannot apply to it (mean/meanstd/vlad/patches all honour it).
+        print("[mole] note: --foreground selects patch tokens; the CLS token isn't "
+              "one, so it's ignored for cls pooling")
 
     fg_note = (f" foreground[{foreground_method}>{foreground_threshold:g}]" if foreground else "")
     wfg_note = (f" window-fg[>{window_foreground_threshold:g}]" if window_foreground else "")
@@ -365,8 +394,9 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             crops = [c for c, k in zip(crops, keep_win.tolist()) if k]
         n_win_kept += len(crops)
         if not crops:                        # every window was blank -> no descriptors
-            if pooling in (Pooling.MEAN, Pooling.CLS):
-                vectors.append(np.zeros(meta["embed_dim"], dtype=np.float32))
+            if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.CLS):
+                vectors.append(np.zeros(_fixed_vector_dim(pooling, meta["embed_dim"], nct),
+                                        dtype=np.float32))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": 0})
             elif stream_codebook is not None:
                 vlad_vecs.append(np.zeros(stream_codebook.shape[0] * meta["embed_dim"], np.float32))
@@ -377,12 +407,12 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             continue
         tokens = _page_tokens(model, crops, dev, settings["batch_size"])
 
-        if pooling in (Pooling.MEAN, Pooling.CLS):
-            vec = pool_window(tokens, nct, pooling).mean(dim=0)     # avg over windows
+        if pooling is Pooling.CLS:            # class token — foreground N/A
+            vec = pool_window(tokens, nct, Pooling.CLS).mean(dim=0)  # avg over windows
             vec = torch.nn.functional.normalize(vec, dim=0).numpy().astype(np.float32)
             vectors.append(vec)
-            rows.append({"row": len(rows), "image": str(img), "n_windows": len(wins)})
-        else:  # patches / vlad both need the raw per-patch descriptors
+            rows.append({"row": len(rows), "image": str(img), "n_windows": len(crops)})
+        else:  # mean / meanstd / patches / vlad all aggregate foreground patch descriptors
             patches = patch_descriptors(tokens, nct)             # [W, num_patches, dim]
             if foreground:
                 keep = _foreground_mask(crops, meta["patch_size"], foreground_threshold,
@@ -395,10 +425,14 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                 desc = patches[keep].reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
             else:
                 desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
-            if stream_codebook is not None:      # encode now, discard raw descriptors
+
+            if pooling in (Pooling.MEAN, Pooling.MEANSTD):        # codebook-free page vector
+                vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, meta["embed_dim"]))
+                rows.append({"row": len(rows), "image": str(img), "n_windows": len(crops)})
+            elif stream_codebook is not None:    # VLAD, external codebook: encode + discard
                 vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm))
                 desc_images.append(str(img))
-            else:
+            else:                                # VLAD (transductive) / patches: retain
                 page_descriptors.append(desc)
                 desc_images.append(str(img))
                 if pooling is Pooling.PATCHES:
@@ -463,7 +497,7 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
     training split), which is then loaded and applied — the Raven-style
     fit-on-train / apply-on-test protocol.
     """
-    if pooling in (Pooling.MEAN, Pooling.CLS):
+    if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.CLS):
         return np.vstack(vectors), None
     if pooling is Pooling.PATCHES:
         return np.vstack(page_descriptors), None

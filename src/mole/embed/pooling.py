@@ -1,9 +1,18 @@
 """Pooling strategies for turning patch tokens into a page embedding.
 
-* ``mean``    -- mean over patch tokens (cheap NLP-style default). DEFAULT.
+* ``mean``    -- L2-normed mean of the (foreground) patch tokens. Codebook-free,
+                 384-dim, incremental (embed one document without any refit).
+* ``meanstd`` -- mean concatenated with the per-dimension std of the (foreground)
+                 tokens (768-dim). A cheap second-order descriptor that captures
+                 the token *distribution* VLAD exploits, still codebook-free.
 * ``cls``     -- the [CLS] token(s), flattened when there is more than one.
-* ``vlad``    -- VLAD aggregation (optional; reproducible codebook, see vlad.py).
+* ``vlad``    -- VLAD aggregation (reproducible codebook, see vlad.py). Strongest,
+                 but 38400-dim and needs a fitted codebook (transductive / per-set).
 * ``patches`` -- raw per-patch embeddings, no pooling.
+
+``mean``/``meanstd`` honour the foreground filter (they aggregate the same
+foreground patch descriptors VLAD does); ``cls`` cannot (a window has one class
+token, not per-patch ones), so foreground filtering does not apply to it.
 
 The ViT returns, per window, a token sequence ``[num_class_tokens + num_patches,
 dim]`` (class tokens first, exactly as the training model lays them out). The
@@ -25,6 +34,7 @@ from enum import Enum
 
 class Pooling(str, Enum):
     MEAN = "mean"
+    MEANSTD = "meanstd"
     CLS = "cls"
     VLAD = "vlad"
     PATCHES = "patches"

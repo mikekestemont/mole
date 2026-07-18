@@ -191,7 +191,11 @@ def embed(
     checkpoint: Path = typer.Argument(..., help="Model checkpoint to extract with."),
     input_dir: Path = typer.Argument(..., help="Folder of images to embed."),
     output: Path = typer.Argument(..., help="Output .npy/.parquet path."),
-    pooling: Pooling = typer.Option(Pooling.VLAD, help="Pooling strategy (default: vlad)."),
+    pooling: Pooling = typer.Option(
+        Pooling.VLAD,
+        help="Page pooling. vlad (default, strongest, 38400-d + needs a codebook); "
+             "mean / meanstd (codebook-free, 384/768-d, incremental — foreground-aware); "
+             "cls; patches (raw, no pooling)."),
     whiten: bool = typer.Option(False, help="Apply PCA-whitening (fixed-vector poolings)."),
     whiten_dim: Optional[int] = typer.Option(
         None, "--whiten-dim",
