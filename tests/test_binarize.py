@@ -72,6 +72,21 @@ def test_carry_labels_noop_without_labels(tmp_path):
     assert not (out / "labels.csv").exists()          # nothing to carry, no empty file
 
 
+def test_full_run_qc_caps_rows_but_writes_all_images(tmp_path):
+    from mole.prep.binarize import QC_MAX_ROWS
+    src = tmp_path / "in"; src.mkdir()
+    n = QC_MAX_ROWS * 3
+    for i in range(n):
+        _page(src, f"p{i:03}.png")
+    out = tmp_path / "out"; qc = tmp_path / "qc.html"
+    recs = binarize_folder(src, out, sample=None, qc_html=qc)
+    assert len(recs) == n                                   # all processed
+    assert len(list(out.glob("*.png"))) == n                # all written
+    html = qc.read_text()
+    assert html.count("<tr>") - 1 == QC_MAX_ROWS            # QC capped (minus header)
+    assert f"of {n}" in html                                # caption notes the sampling
+
+
 def test_binarize_preview_writes_nothing(tmp_path):
     src = tmp_path / "in"; src.mkdir()
     for i in range(4):

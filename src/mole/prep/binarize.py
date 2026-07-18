@@ -22,6 +22,7 @@ import random
 from pathlib import Path
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
+QC_MAX_ROWS = 40      # a full-run QC sheet shows at most this many evenly-spaced rows
 
 
 def sauvola_threshold(gray, window: int = 25, k: float = 0.2, r: float = 128.0):
@@ -169,29 +170,40 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Only keep the (heavy) orig/binary images for the rows the QC sheet will show:
+    # a full 841-row contact sheet is unscrollable, slow to build, and would hold every
+    # full-res original in RAM. A --sample run shows all; a full run shows an evenly-
+    # spaced subset of at most QC_MAX_ROWS so it's representative of the whole corpus.
+    qc_rows = set(range(len(files)))
+    if qc_html and not preview and len(files) > QC_MAX_ROWS:
+        step = len(files) / QC_MAX_ROWS
+        qc_rows = {int(i * step) for i in range(QC_MAX_ROWS)}
+
     records = []
-    for p in track(files, "Binarizing", unit="img"):
+    for i, p in enumerate(track(files, "Binarizing", unit="img")):
         orig = load_rgb(p)
         binary = binarize_image(orig, method=method, window=window, k=k, max_side=max_side)
         dst = out_dir / f"{p.stem}.png"
         if not preview:
             binary.save(dst)
-        records.append({"src": p, "dst": dst, "orig": orig, "binary": binary,
-                        "orig_size": orig.size, "final_size": binary.size})
+        rec = {"src": p, "dst": dst, "orig_size": orig.size, "final_size": binary.size}
+        if qc_html and i in qc_rows:            # retain images only for QC-shown rows
+            rec["orig"], rec["binary"] = orig, binary
+        records.append(rec)
 
     if not preview:
         _carry_labels(input_dir, out_dir)
     if qc_html:
-        _write_qc(records, Path(qc_html), method, window, k, max_side, preview)
-    # free the images we only kept for QC
-    for r in records:
+        shown = [r for r in records if "orig" in r]
+        _write_qc(shown, Path(qc_html), method, window, k, max_side, preview, total=len(records))
+    for r in records:                            # free the images we kept for QC
         r.pop("orig", None)
         r.pop("binary", None)
     return records
 
 
 def _write_qc(records, out: Path, method: str, window: int, k: float,
-              max_side: int | None, preview: bool):
+              max_side: int | None, preview: bool, total: int | None = None):
     rows = []
     for r in records:
         ow, oh = r["orig_size"]
@@ -205,6 +217,8 @@ def _write_qc(records, out: Path, method: str, window: int, k: float,
             f'<td><img class=detail src="data:image/png;base64,{_detail_b64(_ink_detail_crop(r["binary"]))}"></td></tr>')
     tag = "PREVIEW (nothing written)" if preview else "full run"
     cap = f"max_side={max_side}px" if max_side else "max_side=off (native resolution)"
+    shown = (f"{len(records)} of {total} images (evenly-spaced sample)"
+             if total and total > len(records) else f"{len(records)} images")
     html = f"""<!doctype html><html><head><meta charset=utf-8><title>binarize QC</title><style>
  body{{font-family:system-ui;margin:20px;background:#111;color:#eee}}
  .meta{{color:#9ab;font-family:ui-monospace,monospace;margin-bottom:12px}}
@@ -214,7 +228,7 @@ def _write_qc(records, out: Path, method: str, window: int, k: float,
  td img{{width:240px;height:240px;object-fit:contain;background:#222;border-radius:4px}}
  td img.detail{{width:auto;height:auto;max-width:480px;max-height:480px;image-rendering:pixelated}}</style></head><body>
 <h1>Binarization QC — {method}</h1>
-<div class=meta>{tag} · window={window}px · k={k} · {cap} · {len(records)} images · judge stroke crispness in the 1:1 detail column, then tune max_side / window / k</div>
+<div class=meta>{tag} · window={window}px · k={k} · {cap} · {shown} · judge stroke crispness in the 1:1 detail column, then tune max_side / window / k</div>
 <table><tr><th>file</th><th>original</th><th>binarized (black-on-white)</th><th>detail (1:1, ink-centred)</th></tr>{"".join(rows)}</table>
 </body></html>"""
     out.parent.mkdir(parents=True, exist_ok=True)
