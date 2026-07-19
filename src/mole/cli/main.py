@@ -26,6 +26,9 @@ app = typer.Typer(
 )
 models_app = typer.Typer(help="Inspect the model lineage registry.", no_args_is_help=True)
 app.add_typer(models_app, name="models")
+sup_app = typer.Typer(help="Supervised metric learning (masked-SupCon head).",
+                      no_args_is_help=True)
+app.add_typer(sup_app, name="sup")
 
 console = Console()
 
@@ -338,6 +341,41 @@ def eval_compare(
 
     report = compare_evals(a, b, section=section, n_boot=n_boot, seed=seed)
     console.print(format_compare(report))
+
+
+# ---------------------------------------------------------------------- sup
+@sup_app.command("cache")
+def sup_cache(
+    checkpoint: Path = typer.Argument(..., help="Base backbone checkpoint (frozen)."),
+    labels_root: Path = typer.Argument(..., help="Dataset dir or pooled root with labels.csv."),
+    cache_dir: Path = typer.Argument(..., help="Output dir for cache.npy + cache.index.json."),
+    window_size: int = typer.Option(224, help="Window size (px)."),
+    overlap: float = typer.Option(0.0, help="Window overlap fraction."),
+    invert: bool = typer.Option(True, help="Invert intensity (raven wants white-on-black)."),
+    fg_method: str = typer.Option("contrast", help="Foreground filter: contrast | raven | intensity."),
+    batch_size: int = typer.Option(32, help="Window forward batch size."),
+) -> None:
+    """Cache one frozen-backbone descriptor per window (the one GPU pass)."""
+    from mole.supervised.datasets import build_feature_cache, load_labeled_pairs
+
+    index = load_labeled_pairs(labels_root)
+    console.print(f"[cyan]{index.stats()}[/cyan]")
+    build_feature_cache(checkpoint, index, cache_dir, window_size=window_size,
+                        overlap=overlap, invert=invert, fg_method=fg_method,
+                        batch_size=batch_size)
+
+
+@sup_app.command("train")
+def sup_train(
+    config: Path = typer.Argument(..., help="Config YAML with a `sup:` section."),
+    checkpoint: Path = typer.Argument(..., help="Base backbone checkpoint (frozen)."),
+    labels_root: Path = typer.Argument(..., help="Dataset dir or pooled root with labels.csv."),
+    out: Optional[Path] = typer.Option(None, "--out", help="Run output dir (default: runs/sup_head)."),
+) -> None:
+    """Train the Tier-1 masked-SupCon head on cached descriptors (CPU/MPS friendly)."""
+    from mole.supervised.metric import train_metric
+
+    train_metric(config, checkpoint, labels_root, out)
 
 
 # ------------------------------------------------------------------- models list/show

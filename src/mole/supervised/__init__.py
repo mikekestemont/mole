@@ -17,8 +17,17 @@ from mole.supervised.datasets import (
     HandBatchSampler,
     SupervisedIndex,
     SupItem,
+    build_feature_cache,
     load_labeled_pairs,
     pair_masks,
+    window_descriptors,
+)
+from mole.supervised.metric import (
+    build_head,
+    holdout_macro_map,
+    masked_supcon,
+    train_head,
+    train_metric,
 )
 
 __all__ = [
@@ -26,6 +35,13 @@ __all__ = [
     "HandBatchSampler",
     "SupItem",
     "SupervisedIndex",
+    "build_feature_cache",
+    "build_head",
+    "holdout_macro_map",
     "load_labeled_pairs",
+    "masked_supcon",
     "pair_masks",
+    "train_head",
+    "train_metric",
+    "window_descriptors",
 ]

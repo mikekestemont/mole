@@ -38,6 +38,7 @@ import numpy as np
 
 from mole.data.datasets import IMAGE_EXTENSIONS, discover_datasets
 from mole.data.docids import doc_id_resolver
+from mole.progress import track
 
 
 @dataclass
@@ -277,6 +278,18 @@ class FeatureCache:
             window_archive=idx["archive"], window_item=idx["item"],
             meta=idx.get("meta", {}))
 
+    def filter(self, hands: set[str]) -> "FeatureCache":
+        """A new cache keeping only windows whose (namespaced) hand is in ``hands``."""
+        keep = [i for i, h in enumerate(self.window_hand) if h in hands]
+        return FeatureCache(
+            descriptors=self.descriptors[keep] if keep
+            else np.zeros((0, self.dim), np.float32),
+            window_hand=[self.window_hand[i] for i in keep],
+            window_doc=[self.window_doc[i] for i in keep],
+            window_archive=[self.window_archive[i] for i in keep],
+            window_item=[self.window_item[i] for i in keep],
+            meta=dict(self.meta))
+
 
 class HandBatchSampler:
     """P×D×W batches over LABELED windows: the negative rule made structural.
@@ -369,3 +382,97 @@ class HandBatchSampler:
     def __iter__(self):
         for _ in range(self.batches_per_epoch):
             yield self._batch()
+
+
+def window_descriptors(patches, keep) -> list[np.ndarray | None]:
+    """One descriptor per window: mean of its foreground patch tokens.
+
+    ``patches`` is ``[W, P, dim]`` (patch tokens per window) and ``keep`` is
+    ``[W, P]`` boolean (the foreground mask). Returns a length-``W`` list; a
+    window with no foreground patch yields ``None`` (skipped by the cache — it is
+    a near-blank window carrying no writer signal). Accepts torch tensors or
+    numpy arrays.
+    """
+    p = patches.detach().cpu().numpy() if hasattr(patches, "detach") else np.asarray(patches)
+    k = keep.detach().cpu().numpy() if hasattr(keep, "detach") else np.asarray(keep)
+    out: list[np.ndarray | None] = []
+    for w in range(p.shape[0]):
+        m = k[w]
+        out.append(p[w][m].mean(0).astype(np.float32) if m.any() else None)
+    return out
+
+
+def build_feature_cache(checkpoint: str | Path, index: SupervisedIndex,
+                        out_dir: str | Path, *, window_size: int = 224,
+                        overlap: float = 0.0, invert: bool = True,
+                        fg_method: str = "contrast", fg_threshold: float | None = None,
+                        batch_size: int = 32, device: str | None = None,
+                        progress: bool = True) -> FeatureCache:
+    """Cache one frozen-backbone descriptor per window for every image in ``index``.
+
+    Reuses the embed path verbatim (``load_backbone`` → deterministic window
+    resize → ``_page_tokens`` → ``patch_descriptors`` → ``_foreground_mask``); the
+    only new step is collapsing each window's foreground patch tokens to their
+    mean (:func:`window_descriptors`). Labeled items carry their namespaced
+    hand/doc; the unlabeled pool is cached too (hand/doc ``""``) for the later
+    ``suggest`` path. Writes ``cache.npy`` + ``cache.index.json`` under ``out_dir``.
+    This is the one GPU pass of the supervised pipeline; everything after is CPU.
+    """
+    import torch
+    from PIL import Image, ImageFile
+
+    from mole.data.patches import load_rgb, window_coords
+    from mole.embed.extract import (
+        _build_transform, _foreground_mask, _page_tokens, _pick_device, load_backbone)
+    from mole.embed.pooling import patch_descriptors
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None
+
+    dev = torch.device(device) if device else _pick_device()
+    model, meta = load_backbone(checkpoint, map_location=str(dev))
+    nct, patch_size, dim = meta["num_class_tokens"], meta["patch_size"], meta["embed_dim"]
+    if fg_threshold is None:
+        fg_threshold = 0.05 if fg_method == "contrast" else 0.02
+    transform = _build_transform(meta["model_size"])
+
+    entries = [(it.path, it.archive, it.hand, it.doc) for it in index.items]
+    entries += [(p, a, "", "") for (a, p) in index.unlabeled]
+
+    descs: list[np.ndarray] = []
+    w_hand: list[str] = []
+    w_doc: list[str] = []
+    w_arch: list[str] = []
+    w_item: list[str] = []
+    for path, archive, hand, doc in track(entries, "Caching features", unit="img",
+                                          disable=not progress):
+        w, h = Image.open(path).size
+        wins = window_coords(w, h, window_size, overlap, None)
+        if not wins:
+            continue
+        page = load_rgb(path, invert=invert)
+        crops = [transform(page.crop((win.x, win.y, win.x + win.size, win.y + win.size)))
+                 for win in wins]
+        tokens = _page_tokens(model, crops, dev, batch_size)
+        patches = patch_descriptors(tokens, nct)
+        keep = _foreground_mask(crops, patch_size, fg_threshold, method=fg_method)
+        for vec in window_descriptors(patches, keep):
+            if vec is None:
+                continue
+            descs.append(vec)
+            w_hand.append(hand); w_doc.append(doc)
+            w_arch.append(archive); w_item.append(str(path))
+
+    descriptors = (np.asarray(descs, dtype=np.float32) if descs
+                   else np.zeros((0, dim), np.float32))
+    cache = FeatureCache(
+        descriptors, w_hand, w_doc, w_arch, w_item,
+        meta={"model_id": meta["model_id"], "embed_dim": int(dim),
+              "patch_size": int(patch_size), "model_size": int(meta["model_size"]),
+              "window_size": int(window_size), "overlap": float(overlap),
+              "invert": bool(invert), "fg_method": fg_method,
+              "fg_threshold": float(fg_threshold),
+              "base_checkpoint": str(checkpoint)})
+    cache.save(out_dir)
+    print(f"[mole] ✓ feature cache: {cache.n_windows:,} windows × {dim} → {out_dir}")
+    return cache

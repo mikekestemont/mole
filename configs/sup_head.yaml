@@ -1,0 +1,26 @@
+# Tier-1 masked-SupCon head (SUPERVISED_PLAN.md §2.2). Trains a small projection
+# on cached frozen-backbone window descriptors — no per-hand parameters, model-
+# selected on held-out-hand macro-mAP. CPU/MPS friendly (minutes on the cache).
+#
+#   mole sup cache  <base_ckpt> <pooled_root> runs/sup_head_v1/cache
+#   mole sup train  configs/sup_head.yaml <base_ckpt> <pooled_root> --out runs/sup_head_v1
+#
+# `mole sup train` reuses the cache if runs/sup_head_v1/cache exists, else builds
+# it from <base_ckpt> (the one GPU pass).
+sup:
+  tier: head              # head | hybrid (hybrid = Tier 3, Phase 5)
+  head: linear            # linear (v0) | mlp (v1, only if v0 plateaus)
+  out_dim: 128            # projection bottleneck = regulariser (D6)
+  temperature: 0.07       # SupCon/DINO-family standard (D6)
+  min_confidence: null    # training-side label floor (Leroy; D2 keeps this null)
+  holdout_frac: 0.2       # fraction of retrievable hands held out (unseen classes)
+  seed: 0
+  epochs: 30
+  lr: 0.001
+  weight_decay: 0.0001
+  cache_dir: null         # default: <out>/cache
+  sampler:
+    hands_per_batch: 16
+    docs_per_hand: 2
+    windows_per_doc: 4
+    same_archive_frac: 0.5   # force within-archive negatives (risk R1)
