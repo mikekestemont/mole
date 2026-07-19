@@ -301,14 +301,20 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
     datasets_root: Path = typer.Argument(..., help="Dataset dir or root holding labels.csv."),
     metric: str = typer.Option("cosine", help="Ranking metric: cosine | euclidean."),
     topk: str = typer.Option("1,5,10", help="Comma-separated Top-k cutoffs to report."),
+    min_confidence: Optional[float] = typer.Option(
+        None, "--min-confidence",
+        help="Drop labels whose confidence column is below this floor (e.g. Leroy auto-matches)."),
+    per_hand: bool = typer.Option(
+        False, "--per-hand", help="Print the worst-first per-hand AP table."),
     out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
 ) -> None:
     """Retrieval benchmark from partial labels: mAP, Top-k, cross-dataset breakdown."""
     from mole.eval import evaluate, format_report
 
     ks = tuple(int(k) for k in topk.split(",") if k.strip())
-    result = evaluate(embeddings, datasets_root, metric=metric, topk=ks, out=out)
-    console.print(format_report(result))
+    result = evaluate(embeddings, datasets_root, metric=metric, topk=ks,
+                      min_confidence=min_confidence, out=out)
+    console.print(format_report(result, per_hand=per_hand))
 
 
 # ------------------------------------------------------------------- models list/show

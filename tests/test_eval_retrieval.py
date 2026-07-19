@@ -39,6 +39,55 @@ def test_rank_metrics_hand_computed():
     assert abs(s.topk[5] - 1.0) < 1e-9  # every query has a relevant within top-(n-1)
 
 
+def test_per_hand_ap_is_serialized():
+    """Per-hand AP is exposed on RetrievalScores and macro == mean of it."""
+    labels = np.array(["A", "A", "B", "B"], dtype=object)
+    sim = np.array([
+        [0.00, 0.90, 0.50, 0.10],
+        [0.90, 0.00, 0.40, 0.20],
+        [0.80, 0.30, 0.00, 0.20],
+        [0.20, 0.10, 0.95, 0.00],
+    ])
+    s = _rank_metrics(sim, labels, ~np.eye(4, dtype=bool), (1,))
+    assert set(s.per_hand) == {"A", "B"}
+    assert abs(s.per_hand["A"]["ap"] - 1.0) < 1e-9
+    assert abs(s.per_hand["B"]["ap"] - (1 / 3 + 1.0) / 2) < 1e-9
+    assert s.per_hand["A"]["n_queries"] == 2 and s.per_hand["B"]["n_queries"] == 2
+    # macro is exactly the mean of the per-hand AP values
+    assert abs(s.macro_map - np.mean([s.per_hand[h]["ap"] for h in ("A", "B")])) < 1e-12
+
+
+def test_min_confidence_demotes_low_rows_to_unlabeled(tmp_path):
+    """A label below the floor drops out entirely — not counted as a negative."""
+    ds = tmp_path / "wi"
+    ds.mkdir(parents=True)
+    names = ["a1.png", "a2.png", "b1.png", "b2.png"]
+    for n in names:
+        (ds / n).write_bytes(b"")
+    # a2 is a low-confidence auto-match; the rest are trusted (confidence 0.9).
+    (ds / "labels.csv").write_text(
+        "filename,hand_id,confidence\n"
+        "a1.png,A,0.90\na2.png,A,0.30\nb1.png,B,0.90\nb2.png,B,0.95\n")
+    mat = np.asarray([[1, 0], [1, 0.01], [0, 1], [0.01, 1]], dtype=np.float32)
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({
+        "model_id": "t@0",
+        "rows": [{"row": i, "image": f"{ds}/{n}"} for i, n in enumerate(names)],
+    }))
+
+    # Without a floor: hand A has two docs, so A is a valid query.
+    full = evaluate(npy, ds, topk=(1,))
+    assert full.n_labeled == 4
+    assert "A" in full.overall.per_hand
+    # With a floor of 0.5: a2 is demoted -> A is now a singleton -> skipped as a
+    # query, and a2 is not in the gallery either (only B remains retrievable).
+    floored = evaluate(npy, ds, topk=(1,), min_confidence=0.5)
+    assert floored.n_labeled == 3
+    assert floored.min_confidence == 0.5
+    assert "A" not in floored.overall.per_hand
+
+
 def test_singleton_hand_query_is_skipped():
     """A hand with only one labeled doc yields no relevant gallery item -> skipped."""
     labels = np.array(["A", "A", "Z"], dtype=object)  # Z is a singleton

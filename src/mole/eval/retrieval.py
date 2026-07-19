@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mole.data.datasets import discover_datasets
+from mole.data.datasets import LabelTable, discover_datasets
 from mole.progress import track
 
 
@@ -38,6 +38,11 @@ class RetrievalScores:
     macro_map: float        # per-hand-averaged AP (robust to class skew)
     top1: float
     topk: dict[int, float]  # k -> soft Top-k accuracy (any relevant in top k)
+    # hand -> {"ap": mean AP over that hand's queries, "n_queries": how many}.
+    # macro_map == mean of the per-hand "ap" values; serialised so downstream
+    # tools (eval-compare's paired per-hand bootstrap, the "which hands are
+    # hopeless" view) can consume it without re-running retrieval.
+    per_hand: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +55,7 @@ class EvalResult:
     coverage: float
     datasets: list[str]
     overall: RetrievalScores
+    min_confidence: float | None = None
     within_dataset: RetrievalScores | None = None
     cross_dataset: RetrievalScores | None = None
     per_dataset: dict[str, RetrievalScores] = field(default_factory=dict)
@@ -67,13 +73,31 @@ def _load_embeddings(path: str | Path):
     return X, images, meta.get("model_id")
 
 
-def _label_tables(datasets_root: str | Path) -> dict[str, dict[str, str]]:
-    """dataset_name -> {basename: hand_id} for every labeled dataset under root."""
-    tables: dict[str, dict[str, str]] = {}
+def _label_tables(datasets_root: str | Path) -> dict[str, LabelTable]:
+    """dataset_name -> LabelTable for every labeled dataset under root."""
+    tables: dict[str, LabelTable] = {}
     for m in discover_datasets(datasets_root):
         if m.labels and m.labels.hand_by_filename:
-            tables[m.name] = m.labels.hand_by_filename
+            tables[m.name] = m.labels
     return tables
+
+
+def _hand_if_confident(table: LabelTable, fname: str,
+                       min_confidence: float | None) -> str | None:
+    """hand_id for ``fname`` in ``table``, or None if unlabeled / below floor.
+
+    A row below ``min_confidence`` is demoted to *unlabeled* (it becomes neither
+    a query nor a gallery item) rather than kept as a low-trust label. Rows with
+    no confidence value are treated as confident (the floor only bites where a
+    ``confidence`` column exists — e.g. Leroy's auto-matched labels)."""
+    hand = table.hand_by_filename.get(fname)
+    if hand is None:
+        return None
+    if min_confidence is not None:
+        conf = table.confidence.get(fname)
+        if conf is not None and conf < min_confidence:
+            return None
+    return hand
 
 
 # --------------------------------------------------------------------- metrics
@@ -123,25 +147,36 @@ def _rank_metrics(sim: np.ndarray, labels: np.ndarray, allow: np.ndarray,
 
     if not aps:
         return None
-    macro = float(np.mean([float(np.mean(v)) for v in per_hand.values()]))
+    per_hand_summary = {
+        h: {"ap": float(np.mean(v)), "n_queries": len(v)}
+        for h, v in per_hand.items()
+    }
+    macro = float(np.mean([s["ap"] for s in per_hand_summary.values()]))
     return RetrievalScores(
         n_queries=len(aps),
         mean_ap=float(np.mean(aps)),
         macro_map=macro,
         top1=float(np.mean(t1)),
         topk={k: float(np.mean(hitk[k])) for k in ks},
+        per_hand=per_hand_summary,
     )
 
 
 # ------------------------------------------------------------------ public API
 def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
              *, metric: str = "cosine", topk: tuple[int, ...] = (1, 5, 10),
+             min_confidence: float | None = None,
              out: str | Path | None = None) -> EvalResult:
     """Run the retrieval benchmark and write a JSON report sidecar.
 
     ``datasets_root`` may be a single dataset folder (its ``labels.csv``) or a
     root of several; labels are matched to embeddings by image basename, exactly
     as ``mole embed``/``viz`` match them.
+
+    ``min_confidence`` demotes any label whose ``confidence`` column value is
+    below the floor to *unlabeled* (drops it from both queries and gallery) —
+    the honest way to read auto-matched label sets like Leroy. Labels without a
+    confidence value are unaffected.
     """
     X, images, model_id = _load_embeddings(embeddings_path)
     if len(images) != len(X):
@@ -161,11 +196,13 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     for i, path in enumerate(images):
         p = Path(path)
         ds = p.parent.name
-        if ds in tables and p.name in tables[ds]:
-            hand = tables[ds][p.name]
-        elif solo and p.name in tables[solo]:
-            hand, ds = tables[solo][p.name], solo
+        if ds in tables:
+            hand = _hand_if_confident(tables[ds], p.name, min_confidence)
+        elif solo:
+            hand, ds = _hand_if_confident(tables[solo], p.name, min_confidence), solo
         else:
+            hand = None
+        if hand is None:
             continue
         hands.append(hand)
         dsets.append(ds)
@@ -193,7 +230,7 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     result = EvalResult(
         model_id=model_id, metric=metric, n_embeddings=len(X), n_labeled=n,
         n_hands=len(set(hands)), coverage=n / len(X), datasets=dataset_names,
-        overall=overall,
+        overall=overall, min_confidence=min_confidence,
     )
 
     if len(dataset_names) > 1:
@@ -240,13 +277,29 @@ def _fmt_scores(s: RetrievalScores, indent: str = "    ") -> str:
     return "\n".join(lines)
 
 
-def format_report(r: EvalResult) -> str:
+def format_per_hand(scores: RetrievalScores, *, title: str = "Per-hand AP",
+                    indent: str = "    ") -> str:
+    """Worst-first per-hand AP table — the 'which hands are hopeless' view."""
+    if not scores.per_hand:
+        return f"{indent}(no per-hand breakdown)"
+    rows = sorted(scores.per_hand.items(), key=lambda kv: kv[1]["ap"])
+    width = max((len(h) for h in scores.per_hand), default=4)
+    lines = [f"{indent}{title} (worst first):",
+             f"{indent}  {'hand'.ljust(width)}   AP      n"]
+    for hand, s in rows:
+        lines.append(f"{indent}  {hand.ljust(width)}   {s['ap']:.4f}  {s['n_queries']:>3d}")
+    return "\n".join(lines)
+
+
+def format_report(r: EvalResult, *, per_hand: bool = False) -> str:
     ds = ", ".join(r.datasets)
     out = [
         f"Retrieval eval — {r.model_id or '?'}",
         f"  metric: {r.metric} | {r.n_embeddings} embeddings, "
         f"{r.n_labeled} labeled ({r.coverage:.1%}), {r.n_hands} hands, "
         f"{len(r.datasets)} dataset(s): {ds}",
+        *([f"  min-confidence: ≥{r.min_confidence:g} (lower-confidence labels dropped)"]
+          if r.min_confidence is not None else []),
         "",
         f"  Overall (leave-one-out, {r.overall.n_queries} queries)",
         _fmt_scores(r.overall, "    "),
@@ -261,4 +314,6 @@ def format_report(r: EvalResult) -> str:
         for name, s in r.per_dataset.items():
             out.append(f"    {name}: mAP {s.mean_ap:.4f}  Top-1 {s.top1:.4f}  "
                        f"({s.n_queries} queries)")
+    if per_hand:
+        out += ["", "  " + format_per_hand(r.overall, indent="  ")]
     return "\n".join(out)

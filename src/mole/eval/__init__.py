@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
-from mole.eval.retrieval import EvalResult, RetrievalScores, evaluate, format_report
+from mole.eval.retrieval import (
+    EvalResult,
+    RetrievalScores,
+    evaluate,
+    format_per_hand,
+    format_report,
+)
 
-__all__ = ["EvalResult", "RetrievalScores", "evaluate", "format_report"]
+__all__ = [
+    "EvalResult",
+    "RetrievalScores",
+    "evaluate",
+    "format_per_hand",
+    "format_report",
+]
