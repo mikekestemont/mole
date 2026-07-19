@@ -1,7 +1,8 @@
 # POOLED MULTI-ARCHIVE finetune on the SAUVOLA-BINARIZED sets — warm-start raven.
 #
-# PHASE A of the multi-archive plan: train ONE model over ALL binarized archives
-# (Antwerp + Brackley + Utrecht + Flanders, and archive #5 when it lands) at once.
+# PHASE A of the multi-archive plan: train ONE model over ALL 5 binarized CHARTER
+# archives (Antwerp 470 + Brackley 300 + Utrecht 841 + Flanders 383 + Leroy 1398 =
+# ~3392 imgs) at once. (HWI is excluded — German cursive book hands, a different domain.)
 # Hypothesis: more + more-diverse data -> better, less over-specialised features that
 # LIFT the data-starved collections (Brackley's solo finetune was ~no-op at 300 imgs;
 # Antwerp's was +0.11). This is the honest cross-collection generalization test the
@@ -18,9 +19,10 @@
 # later lever — don't confound the data effect with a capacity change.)
 #
 # Prep each archive first (Sauvola black-on-white), then assemble the pool from SYMLINKS
-# (no copies) — extensible: re-run the script with the 5th archive appended.
+# (no copies) — extensible: re-run the script with any further archive appended.
 #   bash scripts/assemble_pooled.sh \
-#       data/antwerp-bin data/brackley-2350 data/utrecht-bin data/flanders-set-bin
+#       data/antwerp-bin data/brackley-2350 data/utrecht-bin data/flanders-set-bin data/leroy-bin
+#   NB use brackley-2350 (not brackley-set-bin) — one Brackley only.
 #
 # Launch (single-GPU; the box is CPU-bound so 1 GPU is fastest):
 #   CUDA_VISIBLE_DEVICES=<free> mole train configs/pooled_bin.yaml \
@@ -30,19 +32,20 @@
 # from difficulty alone = an artifact). Hold each eval set FIXED and embed the pooled
 # checkpoint on EACH archive against ITS OWN gallery, comparing to raven-raw and the solo
 # finetune. The hypothesis is that pooled LIFTS the starved ones without hurting Antwerp:
-#   for A in antwerp-bin brackley-2350 utrecht-bin flanders-set-bin; do
+#   for A in antwerp-bin brackley-2350 utrecht-bin flanders-set-bin leroy-bin; do
 #     mole embed runs/pooled_bin_ft/checkpoint.pth data/$A outputs/pooled/$A.npy \
 #         --set window_size=224 --set overlap=0 --set use_zones=false   # invert inherited
 #     mole eval outputs/pooled/$A.npy data/$A --topk 1,5
 #   done
-# (Numbers to beat, macro-mAP: Antwerp 0.827 ft / 0.718 raw; Brackley 0.778 ft / 0.764 raw;
-#  Utrecht 0.515 raw; Flanders TBD. Read Flanders/Utrecht as lower bounds — partial labels.)
+# (Numbers to beat, macro-mAP raven-raw: Antwerp 0.718 (ft 0.827); Brackley 0.764 (ft 0.778);
+#  Utrecht 0.515 (ft 0.645); Flanders 0.385; Leroy 0.782. Read Flanders/Utrecht/Leroy as lower
+#  bounds — partial labels; Leroy labels are auto-matched so also possibly optimistic.)
 
 data:
   path: data/pooled-bin     # symlink dir assembled by scripts/assemble_pooled.sh
   window_size: 256          # raven's TRAINING geometry (multi-crop RRCs down to 224).
   model_size: 224
-  overlap: 0.5              # stride 128. Across ~4 archives this is a lot of windows on a
+  overlap: 0.5              # stride 128. Across 5 archives (~3392 imgs) this is a lot of windows on a
                             #   CPU-bound box; drop to 0.25 or 0.0 if epochs are too slow
                             #   (fewer windows, same warm-started adaptation).
   use_zones: false          # no zones for the binarized copies (contrast fg handles bg)
