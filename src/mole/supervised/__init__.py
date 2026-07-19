@@ -12,4 +12,16 @@ embeddings through the same ``mole embed`` machinery.
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from mole.supervised.datasets import (
+    SupervisedIndex,
+    SupItem,
+    load_labeled_pairs,
+    pair_masks,
+)
+
+__all__ = [
+    "SupItem",
+    "SupervisedIndex",
+    "load_labeled_pairs",
+    "pair_masks",
+]
