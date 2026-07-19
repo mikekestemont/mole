@@ -316,8 +316,49 @@ def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
     return frac < (1.0 - threshold)                            # legacy: keep non-white windows
 
 
+def _load_head(head_path: str | Path, model_id: str):
+    """Load a trained Tier-1 projection head for embed-time application.
+
+    Returns ``(project, out_dim, head_id)``. ``project`` maps a foreground
+    patch-descriptor block ``[n, in_dim]`` to ``[n, out_dim]``. Enforces that the
+    head was trained against THIS backbone (a head is only valid on its base
+    model). Only the linear (v0) head is supported here: a linear map commutes
+    with the fg-token mean used in training, so applying it per patch token and
+    pooling as usual matches train-time semantics. The MLP head (v1) pools at
+    window granularity and is Phase 4.
+    """
+    import hashlib
+
+    import torch
+
+    blob = torch.load(head_path, map_location="cpu", weights_only=False)
+    base = blob.get("base_model_id")
+    if base is not None and base != model_id:
+        raise ValueError(
+            f"--head was trained on {base!r} but this checkpoint is {model_id!r}; "
+            "a head is only valid on the backbone it was trained against")
+    if blob.get("kind") != "linear":
+        raise NotImplementedError(
+            f"--head kind={blob.get('kind')!r}: only the linear (v0) head applies at "
+            "embed time; the MLP head (v1) pools at window granularity (Phase 4)")
+    sd = blob["state_dict"]
+    W = sd["weight"].numpy().astype(np.float32)            # [out, in]
+    b = (sd["bias"].numpy().astype(np.float32) if "bias" in sd
+         else np.zeros(W.shape[0], np.float32))
+    out_dim = int(W.shape[0])
+    head_id = hashlib.sha256(Path(head_path).read_bytes()).hexdigest()[:8] + "+" + str(model_id)
+
+    def project(desc: np.ndarray) -> np.ndarray:
+        if len(desc) == 0:
+            return desc.reshape(0, out_dim)
+        return (desc @ W.T + b).astype(np.float32)
+
+    return project, out_dim, head_id
+
+
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           pooling: Pooling | str = Pooling.VLAD, whiten: bool = False,
+          head: str | Path | None = None,
           overrides: list[str] | None = None, *, batch_size: int = 32,
           vlad_clusters: int = 100, vlad_max_descriptors: int = 0,
           seed: int = 0, device: str | None = None,
@@ -353,6 +394,16 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             foreground_threshold = 10.0 / float(meta["patch_size"] ** 2)
         else:
             foreground_threshold = 0.05 if foreground_method == "contrast" else 0.02
+
+    # Tier-1 head: project foreground patch tokens into the learned space before
+    # pooling. pool_dim is the dimensionality everything downstream pools over.
+    project_head, head_id = None, None
+    pool_dim = meta["embed_dim"]
+    if head is not None:
+        if pooling is Pooling.CLS:
+            raise ValueError("--head projects patch tokens; use mean/meanstd/cov/vlad "
+                             "pooling, not cls")
+        project_head, pool_dim, head_id = _load_head(head, meta["model_id"])
 
     settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
                 "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
@@ -402,10 +453,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     stream_codebook = None
     if pooling is Pooling.VLAD and codebook_from is not None:
         stream_codebook = np.load(codebook_from).astype(np.float32)
-        if stream_codebook.ndim != 2 or stream_codebook.shape[1] != meta["embed_dim"]:
+        if stream_codebook.ndim != 2 or stream_codebook.shape[1] != pool_dim:
             raise ValueError(
                 f"codebook {codebook_from} has shape {stream_codebook.shape}; expected "
-                f"(K, {meta['embed_dim']}) to match this model's {meta['embed_dim']}-dim descriptors")
+                f"(K, {pool_dim}) to match the {pool_dim}-dim "
+                f"{'head-projected ' if project_head else ''}descriptors")
         print(f"[mole] VLAD: streaming with external {stream_codebook.shape[0]}-cluster "
               f"codebook from {codebook_from} (per-page, low memory)", flush=True)
     vlad_vecs: list[np.ndarray] = []
@@ -421,14 +473,14 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         n_win_kept += len(crops)
         if not crops:                        # every window was blank -> no descriptors
             if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.COV, Pooling.CLS):
-                vectors.append(np.zeros(_fixed_vector_dim(pooling, meta["embed_dim"], nct),
+                vectors.append(np.zeros(_fixed_vector_dim(pooling, pool_dim, nct),
                                         dtype=np.float32))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": 0})
             elif stream_codebook is not None:
-                vlad_vecs.append(np.zeros(stream_codebook.shape[0] * meta["embed_dim"], np.float32))
+                vlad_vecs.append(np.zeros(stream_codebook.shape[0] * pool_dim, np.float32))
                 desc_images.append(str(img))
             else:
-                page_descriptors.append(np.zeros((0, meta["embed_dim"]), np.float32))
+                page_descriptors.append(np.zeros((0, pool_dim), np.float32))
                 desc_images.append(str(img))
             continue
         tokens = _page_tokens(model, crops, dev, settings["batch_size"])
@@ -452,11 +504,14 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             else:
                 desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
 
+            if project_head is not None:      # Tier-1 head: project patch tokens (linear commutes with the mean)
+                desc = project_head(desc)
+
             if pooling in (Pooling.MEAN, Pooling.MEANSTD, Pooling.COV):  # codebook-free page vector
                 if pooling is Pooling.COV:
-                    vectors.append(_cov_pool(desc, meta["embed_dim"]))
+                    vectors.append(_cov_pool(desc, pool_dim))
                 else:
-                    vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, meta["embed_dim"]))
+                    vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, pool_dim))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": len(crops)})
             elif stream_codebook is not None:    # VLAD, external codebook: encode + discard
                 vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm))
@@ -504,6 +559,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         meta["window_foreground"] = True
         meta["window_foreground_threshold"] = float(window_foreground_threshold)
         meta["window_kept_fraction"] = (n_win_kept / n_win_total) if n_win_total else 0.0
+    if project_head is not None:                 # Tier-1 head-projected space (versioned artifact)
+        meta["head"] = str(head)
+        meta["head_id"] = head_id
+        meta["head_out_dim"] = int(pool_dim)
     _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
                   vlad_clusters, seed, foreground=foreground,
                   foreground_threshold=foreground_threshold, foreground_method=foreground_method,

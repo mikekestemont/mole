@@ -251,6 +251,10 @@ def embed(
         0, help="Cap descriptors used to FIT the VLAD codebook. Default 0 = use ALL, as in Raven "
                 "('gather all foreground tokens from the entire training set'). Set a positive N "
                 "to subsample for tractability — a deviation from the paper."),
+    head: Optional[Path] = typer.Option(
+        None, "--head",
+        help="Apply a trained Tier-1 head.pt (linear v0): projects foreground patch tokens "
+             "into the learned space before pooling. Must match the checkpoint it was trained on."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -266,7 +270,7 @@ def embed(
     """
     from mole.embed import embed as _embed
 
-    _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten,
+    _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten, head=head,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            vlad_max_descriptors=vlad_max_descriptors,
            seed=seed, device=device, foreground=foreground,
