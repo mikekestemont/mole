@@ -57,6 +57,7 @@ class EvalResult:
     overall: RetrievalScores
     min_confidence: float | None = None
     cross_doc_only: bool = False
+    n_holdout_hands: int | None = None  # queries restricted to N held-out hands
     within_dataset: RetrievalScores | None = None
     cross_dataset: RetrievalScores | None = None
     per_dataset: dict[str, RetrievalScores] = field(default_factory=dict)
@@ -81,6 +82,19 @@ def _label_tables(datasets_root: str | Path) -> dict[str, LabelTable]:
         if m.labels and m.labels.hand_by_filename:
             tables[m.name] = m.labels
     return tables
+
+
+def load_hand_set(path: str | Path, key: str = "holdout_hands") -> set[str]:
+    """Load a set of hand ids from a split file.
+
+    Accepts either a bare JSON list of hands, or an object with a ``key`` list
+    (default ``holdout_hands``) — the format written by the Phase-1 hand
+    splitter. Hands may be namespaced (``archive/hand``) or raw; :func:`evaluate`
+    matches a query against both forms.
+    """
+    data = json.loads(Path(path).read_text())
+    hands = data if isinstance(data, list) else data.get(key, [])
+    return {str(h) for h in hands}
 
 
 def _doc_resolvers(datasets_root: str | Path):
@@ -124,13 +138,18 @@ def _similarity(X: np.ndarray, metric: str) -> np.ndarray:
 
 
 def _rank_metrics(sim: np.ndarray, labels: np.ndarray, allow: np.ndarray,
-                  ks: tuple[int, ...], *, progress: bool = False,
+                  ks: tuple[int, ...], *, query_mask: np.ndarray | None = None,
+                  progress: bool = False,
                   desc: str = "Scoring") -> RetrievalScores | None:
     """Leave-one-out retrieval metrics over the gallery defined by ``allow``.
 
     ``allow[i, j]`` marks j as an eligible gallery item for query i (self is
     excluded by the caller). Queries with no eligible relevant item are skipped
     — standard for mAP when a writer has no other document in the gallery.
+
+    ``query_mask`` (optional bool array) restricts which rows may act as
+    *queries* while leaving the gallery untouched — used for held-out-hand eval
+    (queries = held-out-hand docs, gallery = the full archive).
     """
     n = len(labels)
     aps: list[float] = []
@@ -139,6 +158,8 @@ def _rank_metrics(sim: np.ndarray, labels: np.ndarray, allow: np.ndarray,
     per_hand: dict[str, list[float]] = {}
 
     for i in track(range(n), desc, unit="query", disable=not progress):
+        if query_mask is not None and not query_mask[i]:
+            continue
         gal = np.where(allow[i])[0]
         if gal.size == 0:
             continue
@@ -177,6 +198,7 @@ def _rank_metrics(sim: np.ndarray, labels: np.ndarray, allow: np.ndarray,
 def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
              *, metric: str = "cosine", topk: tuple[int, ...] = (1, 5, 10),
              min_confidence: float | None = None, cross_doc_only: bool = False,
+             holdout_hands: set[str] | None = None,
              out: str | Path | None = None) -> EvalResult:
     """Run the retrieval benchmark and write a JSON report sidecar.
 
@@ -195,6 +217,11 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     credit for re-finding a sibling scan. This is the honest metric for any
     label-trained claim. For archives that are one-image-per-charter it is a
     no-op (every doc id is unique).
+
+    ``holdout_hands`` (a set of hand ids, possibly namespaced ``archive/hand``)
+    restricts which docs may act as *queries* — the gallery stays the full
+    archive. This is the §4.2 held-out-hand protocol: it measures whether the
+    geometry improved for *unseen* hands, not memorization.
     """
     X, images, model_id = _load_embeddings(embeddings_path)
     if len(images) != len(X):
@@ -253,30 +280,49 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     else:
         base_allow = off_diag
 
-    overall = _rank_metrics(sim, labels, base_allow, topk, progress=True,
-                            desc="Retrieval mAP")
+    # held-out-hand protocol: restrict queries (not the gallery) to those hands.
+    n_holdout = None
+    query_mask = None
+    if holdout_hands is not None:
+        query_mask = np.asarray(
+            [(h in holdout_hands) or (f"{d}/{h}" in holdout_hands)
+             for h, d in zip(hands, dsets)], dtype=bool)
+        n_holdout = len({h for h, m in zip(hands, query_mask) if m})
+        if not query_mask.any():
+            raise ValueError(
+                "no labeled doc belongs to a held-out hand — check the split file "
+                "(namespaced 'archive/hand' or raw 'hand') against these datasets")
+
+    overall = _rank_metrics(sim, labels, base_allow, topk, query_mask=query_mask,
+                            progress=True, desc="Retrieval mAP")
     if overall is None:
         raise ValueError(
             "no hand has ≥2 labeled documents"
             + (" in *different* charters (cross-doc-only)" if cross_doc_only else "")
+            + (" among the held-out hands" if holdout_hands is not None else "")
             + " — nothing to retrieve")
 
     result = EvalResult(
         model_id=model_id, metric=metric, n_embeddings=len(X), n_labeled=n,
         n_hands=len(set(hands)), coverage=n / len(X), datasets=dataset_names,
         overall=overall, min_confidence=min_confidence, cross_doc_only=cross_doc_only,
+        n_holdout_hands=n_holdout,
     )
 
     if len(dataset_names) > 1:
         same = datasets[:, None] == datasets[None, :]
-        result.within_dataset = _rank_metrics(sim, labels, base_allow & same, topk)
-        result.cross_dataset = _rank_metrics(sim, labels, base_allow & ~same, topk)
+        result.within_dataset = _rank_metrics(sim, labels, base_allow & same, topk,
+                                               query_mask=query_mask)
+        result.cross_dataset = _rank_metrics(sim, labels, base_allow & ~same, topk,
+                                              query_mask=query_mask)
         for d in dataset_names:
             idx = np.where(datasets == d)[0]
             if idx.size < 2:
                 continue
             sub = _rank_metrics(sim[np.ix_(idx, idx)], labels[idx],
-                                base_allow[np.ix_(idx, idx)], topk)
+                                base_allow[np.ix_(idx, idx)], topk,
+                                query_mask=query_mask[idx] if query_mask is not None
+                                else None)
             if sub is not None:
                 result.per_dataset[d] = sub
 
@@ -336,6 +382,8 @@ def format_report(r: EvalResult, *, per_hand: bool = False) -> str:
           if r.min_confidence is not None else []),
         *(["  relevance: cross-document only (sibling scans excluded)"]
           if r.cross_doc_only else []),
+        *([f"  queries: held-out hands only ({r.n_holdout_hands} unseen hands)"]
+          if r.n_holdout_hands is not None else []),
         "",
         f"  Overall (leave-one-out, {r.overall.n_queries} queries)",
         _fmt_scores(r.overall, "    "),

@@ -307,18 +307,37 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
     cross_doc_only: bool = typer.Option(
         False, "--cross-doc-only",
         help="Relevance = same hand AND different charter (excludes sibling scans)."),
+    holdout_hands: Optional[Path] = typer.Option(
+        None, "--holdout-hands",
+        help="Split file (JSON) of held-out hands; restricts queries to them (gallery stays full)."),
     per_hand: bool = typer.Option(
         False, "--per-hand", help="Print the worst-first per-hand AP table."),
     out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
 ) -> None:
     """Retrieval benchmark from partial labels: mAP, Top-k, cross-dataset breakdown."""
-    from mole.eval import evaluate, format_report
+    from mole.eval import evaluate, format_report, load_hand_set
 
     ks = tuple(int(k) for k in topk.split(",") if k.strip())
+    hold = load_hand_set(holdout_hands) if holdout_hands else None
     result = evaluate(embeddings, datasets_root, metric=metric, topk=ks,
                       min_confidence=min_confidence, cross_doc_only=cross_doc_only,
-                      out=out)
+                      holdout_hands=hold, out=out)
     console.print(format_report(result, per_hand=per_hand))
+
+
+@app.command(name="eval-compare")
+def eval_compare(
+    a: Path = typer.Argument(..., help="Baseline <name>.eval.json (side A)."),
+    b: Path = typer.Argument(..., help="Candidate <name>.eval.json (side B)."),
+    section: str = typer.Option("overall", help="Which block to compare: overall | within_dataset | cross_dataset."),
+    n_boot: int = typer.Option(10000, help="Hand-level bootstrap resamples for the CI."),
+    seed: int = typer.Option(0, help="Bootstrap seed (reproducible CI)."),
+) -> None:
+    """Paired per-hand ΔAP between two eval.json files: bootstrap CI + sign test."""
+    from mole.eval import compare_evals, format_compare
+
+    report = compare_evals(a, b, section=section, n_boot=n_boot, seed=seed)
+    console.print(format_compare(report))
 
 
 # ------------------------------------------------------------------- models list/show

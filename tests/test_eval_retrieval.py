@@ -155,6 +155,42 @@ def test_cross_doc_only_noop_when_all_docs_unique(tmp_path):
     assert std.overall.n_queries == xdoc.overall.n_queries
 
 
+def test_holdout_hands_restricts_queries_not_gallery(tmp_path):
+    """Held-out eval scores only held-out-hand queries, against the full gallery."""
+    ds = tmp_path / "wi"
+    ds.mkdir(parents=True)
+    names = ["a1.png", "a2.png", "b1.png", "b2.png", "c1.png", "c2.png"]
+    hands = ["A", "A", "B", "B", "C", "C"]
+    for n in names:
+        (ds / n).write_bytes(b"")
+    (ds / "labels.csv").write_text(
+        "filename,hand_id\n" + "".join(f"{n},{h}\n" for n, h in zip(names, hands)))
+    mat = np.asarray([[1, 0, 0], [1, 0.02, 0], [0, 1, 0],
+                      [0, 1, 0.02], [0, 0, 1], [0.02, 0, 1]], dtype=np.float32)
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({
+        "model_id": "t@0",
+        "rows": [{"row": i, "image": f"{ds}/{n}"} for i, n in enumerate(names)],
+    }))
+
+    from mole.eval.retrieval import load_hand_set
+    split = tmp_path / "holdout.json"
+    split.write_text(json.dumps({"holdout_hands": ["C"]}))
+    held = load_hand_set(split)
+
+    full = evaluate(npy, ds, topk=(1,))
+    r = evaluate(npy, ds, topk=(1,), holdout_hands=held)
+    assert full.overall.n_queries == 6      # A,B,C all query
+    assert r.overall.n_queries == 2         # only the two C docs query
+    assert set(r.overall.per_hand) == {"C"}
+    assert r.n_holdout_hands == 1
+    # gallery is still full: a namespaced entry matches the same way
+    split.write_text(json.dumps({"holdout_hands": ["wi/C"]}))
+    r2 = evaluate(npy, ds, topk=(1,), holdout_hands=load_hand_set(split))
+    assert r2.overall.n_queries == 2
+
+
 def test_singleton_hand_query_is_skipped():
     """A hand with only one labeled doc yields no relevant gallery item -> skipped."""
     labels = np.array(["A", "A", "Z"], dtype=object)  # Z is a singleton
