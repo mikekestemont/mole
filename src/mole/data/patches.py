@@ -55,14 +55,20 @@ def load_rgb(image_path: str | Path, invert: bool = False):
     ImageFile.LOAD_TRUNCATED_IMAGES = True
     Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     img = Image.open(image_path)
-    if getattr(img, "n_frames", 1) > 1:      # multi-frame / pyramidal TIFF
-        best, area = 0, -1                   # keep the largest frame (the full image,
-        for i in range(img.n_frames):        # not a thumbnail); mismatched frames also
-            img.seek(i)                      # crash OpenCV's loader in the YOLO detector
+    if getattr(img, "n_frames", 1) > 1:      # multi-frame: pyramidal/multi-page TIFF, or an
+        best, area = 0, -1                   # MPO (phone/camera JPEG carrying a 2nd frame).
+        for i in range(img.n_frames):        # Keep the largest READABLE frame (the full image,
+            try:                             # not a thumbnail). Some frames are broken — e.g.
+                img.seek(i)                  # an MPO's 2nd frame ("No data found for frame") —
+            except (EOFError, ValueError, OSError):
+                continue                     # skip those rather than crash the whole load.
             a = img.size[0] * img.size[1]
             if a > area:
                 area, best = a, i
-        img.seek(best)
+        try:
+            img.seek(best)
+        except (EOFError, ValueError, OSError):
+            img = Image.open(image_path)     # pathological: fall back to the default frame
     img = img.convert("RGB")
     return ImageOps.invert(img) if invert else img
 
