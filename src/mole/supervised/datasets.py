@@ -230,15 +230,142 @@ def pair_masks(hands: list[str], docs: list[str]) -> tuple[np.ndarray, np.ndarra
     return pos, neg
 
 
-class HandBatchSampler:  # pragma: no cover - Phase 2
-    """P×D×W batches over LABELED windows (Phase 2 — needs the feature cache).
+@dataclass
+class FeatureCache:
+    """One frozen-backbone descriptor per window, with its provenance labels.
 
-    Deferred here on purpose: the sampling unit is a *window* (a cache row-id),
-    so this lands with ``build_feature_cache``. The negative rule it must respect
-    is already implemented and unit-tested via :func:`pair_masks`.
+    ``descriptors`` is ``[N_windows, dim]`` float32 (each row = mean of a
+    window's foreground patch tokens). The parallel lists label each window;
+    unlabeled windows carry ``hand == "" `` (kept for the ``suggest`` path, and
+    structurally skipped by :class:`HandBatchSampler`). Written by
+    ``build_feature_cache`` (Phase 2B) as ``cache.npy`` + ``cache.index.json``.
     """
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(
-            "HandBatchSampler lands in Phase 2 with build_feature_cache "
-            "(it samples window row-ids from the feature cache).")
+    descriptors: np.ndarray
+    window_hand: list[str]      # NAMESPACED hand, or "" if unlabeled
+    window_doc: list[str]       # NAMESPACED doc,  or "" if unlabeled
+    window_archive: list[str]
+    window_item: list[str]      # image path / id the window came from
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def n_windows(self) -> int:
+        return len(self.descriptors)
+
+    @property
+    def dim(self) -> int:
+        return int(self.descriptors.shape[1]) if len(self.descriptors) else 0
+
+    def save(self, cache_dir: str | Path) -> Path:
+        d = Path(cache_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        np.save(d / "cache.npy", self.descriptors.astype(np.float32))
+        (d / "cache.index.json").write_text(json.dumps({
+            "meta": self.meta,
+            "item": self.window_item, "archive": self.window_archive,
+            "hand": self.window_hand, "doc": self.window_doc,
+        }))
+        return d
+
+    @classmethod
+    def load(cls, cache_dir: str | Path) -> "FeatureCache":
+        d = Path(cache_dir)
+        idx = json.loads((d / "cache.index.json").read_text())
+        return cls(
+            descriptors=np.load(d / "cache.npy"),
+            window_hand=idx["hand"], window_doc=idx["doc"],
+            window_archive=idx["archive"], window_item=idx["item"],
+            meta=idx.get("meta", {}))
+
+
+class HandBatchSampler:
+    """P×D×W batches over LABELED windows: the negative rule made structural.
+
+    Each batch is ``hands_per_batch`` hands × ``docs_per_hand`` distinct
+    documents × ``windows_per_doc`` windows. Only hands with ≥``docs_per_hand``
+    distinct documents can be sampled (so every anchor has ≥1 cross-document
+    positive; 1-doc hands are never drawn). ``same_archive_frac`` forces at least
+    that fraction of a batch's hands to share one archive, so negatives are not
+    dominated by the trivial cross-archive contrast (risk R1). Unlabeled windows
+    are never drawn, so an ``(labeled, unlabeled)`` pair cannot enter the loss.
+
+    Yields ``(rows, hands, docs)`` per batch: ``rows`` are cache row-ids to gather
+    descriptors for; ``hands``/``docs`` are the namespaced labels aligned with
+    them, ready for :func:`pair_masks`.
+    """
+
+    def __init__(self, cache: FeatureCache, *, hands_per_batch: int = 16,
+                 docs_per_hand: int = 2, windows_per_doc: int = 4,
+                 same_archive_frac: float = 0.5, seed: int = 0,
+                 batches_per_epoch: int | None = None):
+        self.cache = cache
+        self.P = hands_per_batch
+        self.D = docs_per_hand
+        self.W = windows_per_doc
+        self.same_archive_frac = same_archive_frac
+        self.rng = np.random.default_rng(seed)
+
+        by_hand_doc: dict[str, dict[str, list[int]]] = defaultdict(
+            lambda: defaultdict(list))
+        hand_archive: dict[str, str] = {}
+        for i, (h, doc, arch) in enumerate(zip(cache.window_hand, cache.window_doc,
+                                               cache.window_archive)):
+            if not h:
+                continue                                   # unlabeled: never sampled
+            by_hand_doc[h][doc].append(i)
+            hand_archive[h] = arch
+        self.by_hand_doc = {h: dict(d) for h, d in by_hand_doc.items()}
+        self.hand_archive = hand_archive
+        self.anchor_hands = [h for h, docs in self.by_hand_doc.items()
+                             if len(docs) >= self.D]
+        if len(self.anchor_hands) < 2:
+            raise ValueError(
+                f"only {len(self.anchor_hands)} hand(s) have ≥{self.D} documents in "
+                "the cache — cannot form contrastive batches")
+        self.by_archive: dict[str, list[str]] = defaultdict(list)
+        for h in self.anchor_hands:
+            self.by_archive[self.hand_archive[h]].append(h)
+
+        # a sensible default epoch length: cover every anchor hand ~once.
+        self.batches_per_epoch = batches_per_epoch or max(
+            1, len(self.anchor_hands) // max(1, self.P))
+
+    def _sample_hands(self) -> list[str]:
+        p = min(self.P, len(self.anchor_hands))
+        n_same = int(round(p * self.same_archive_frac))
+        chosen: list[str] = []
+        if n_same >= 2:
+            eligible = [a for a, hs in self.by_archive.items() if len(hs) >= n_same]
+            if eligible:
+                arch = self.rng.choice(eligible)
+                chosen = list(self.rng.choice(self.by_archive[arch], size=n_same,
+                                              replace=False))
+        chosen = [str(h) for h in chosen]
+        pool = [h for h in self.anchor_hands if h not in set(chosen)]
+        need = p - len(chosen)
+        if need > 0:
+            chosen += [str(h) for h in self.rng.choice(
+                pool, size=min(need, len(pool)), replace=False)]
+        return chosen
+
+    def _batch(self):
+        rows: list[int] = []
+        hands: list[str] = []
+        docs: list[str] = []
+        for h in self._sample_hands():
+            doc_ids = list(self.by_hand_doc[h])
+            picked = self.rng.choice(doc_ids, size=self.D, replace=False)
+            for doc in picked:
+                wins = self.by_hand_doc[h][doc]
+                sel = self.rng.choice(wins, size=self.W, replace=len(wins) < self.W)
+                rows.extend(int(r) for r in sel)
+                hands.extend([h] * self.W)
+                docs.extend([str(doc)] * self.W)
+        return np.asarray(rows, dtype=np.int64), hands, docs
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch
+
+    def __iter__(self):
+        for _ in range(self.batches_per_epoch):
+            yield self._batch()

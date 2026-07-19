@@ -13,6 +13,8 @@ embeddings through the same ``mole embed`` machinery.
 from __future__ import annotations
 
 from mole.supervised.datasets import (
+    FeatureCache,
+    HandBatchSampler,
     SupervisedIndex,
     SupItem,
     load_labeled_pairs,
@@ -20,6 +22,8 @@ from mole.supervised.datasets import (
 )
 
 __all__ = [
+    "FeatureCache",
+    "HandBatchSampler",
     "SupItem",
     "SupervisedIndex",
     "load_labeled_pairs",
