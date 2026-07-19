@@ -1,0 +1,89 @@
+# POOLED MULTI-ARCHIVE finetune on the SAUVOLA-BINARIZED sets — warm-start raven.
+#
+# PHASE A of the multi-archive plan: train ONE model over ALL binarized archives
+# (Antwerp + Brackley + Utrecht + Flanders, and archive #5 when it lands) at once.
+# Hypothesis: more + more-diverse data -> better, less over-specialised features that
+# LIFT the data-starved collections (Brackley's solo finetune was ~no-op at 300 imgs;
+# Antwerp's was +0.11). This is the honest cross-collection generalization test the
+# per-collection transductive evals cannot give.
+#
+# BATCHES ARE POOLED ACROSS ARCHIVES FOR FREE: the DataLoader shuffles the whole
+# window index globally every epoch (train.py shuffle=True / DistributedSampler
+# shuffle=True), so each batch is a uniform draw across every archive. Mixing is
+# proportional to each archive's window count (the standard SSL default); switch to a
+# balanced WeightedRandomSampler only if a per-archive eval shows one archive dominating.
+#
+# Clean ablation: the ONLY thing that changes vs the solo finetunes is the POOLED data.
+# Same vit_small, same raven warm-start, same geometry/LR. (vit_base is a separate,
+# later lever — don't confound the data effect with a capacity change.)
+#
+# Prep each archive first (Sauvola black-on-white), then assemble the pool from SYMLINKS
+# (no copies) — extensible: re-run the script with the 5th archive appended.
+#   bash scripts/assemble_pooled.sh \
+#       data/antwerp-bin data/brackley-2350 data/utrecht-bin data/flanders-set-bin
+#
+# Launch (single-GPU; the box is CPU-bound so 1 GPU is fastest):
+#   CUDA_VISIBLE_DEVICES=<free> mole train configs/pooled_bin.yaml \
+#       --init-from checkpoints/raven_checkpoint.pth
+#
+# EVAL = the guardrail. Do NOT eval on a pooled gallery (more distractors -> mAP drops
+# from difficulty alone = an artifact). Hold each eval set FIXED and embed the pooled
+# checkpoint on EACH archive against ITS OWN gallery, comparing to raven-raw and the solo
+# finetune. The hypothesis is that pooled LIFTS the starved ones without hurting Antwerp:
+#   for A in antwerp-bin brackley-2350 utrecht-bin flanders-set-bin; do
+#     mole embed runs/pooled_bin_ft/checkpoint.pth data/$A outputs/pooled/$A.npy \
+#         --set window_size=224 --set overlap=0 --set use_zones=false   # invert inherited
+#     mole eval outputs/pooled/$A.npy data/$A --topk 1,5
+#   done
+# (Numbers to beat, macro-mAP: Antwerp 0.827 ft / 0.718 raw; Brackley 0.778 ft / 0.764 raw;
+#  Utrecht 0.515 raw; Flanders TBD. Read Flanders/Utrecht as lower bounds — partial labels.)
+
+data:
+  path: data/pooled-bin     # symlink dir assembled by scripts/assemble_pooled.sh
+  window_size: 256          # raven's TRAINING geometry (multi-crop RRCs down to 224).
+  model_size: 224
+  overlap: 0.5              # stride 128. Across ~4 archives this is a lot of windows on a
+                            #   CPU-bound box; drop to 0.25 or 0.0 if epochs are too slow
+                            #   (fewer windows, same warm-started adaptation).
+  use_zones: false          # no zones for the binarized copies (contrast fg handles bg)
+  invert: true              # ALL archives are Sauvola black-on-white -> feed raven
+                            #   white-on-black. One flag covers the whole pool. Inherited
+                            #   by `mole embed`.
+  foreground_min: 0.05      # drop near-blank windows (polarity-invariant contrast test)
+  num_workers: 6            # = the box's core count (CPU-bound aug pipeline)
+
+aug:
+  preset: mild              # keeps gaussian blur (DINO base); the rest disabled below
+  overrides:
+    local_crops_number: 8   # 2 global + 8 local (raven's multi-crop)
+    local_size: 96
+    global_crops_scale: [0.4, 1.0]
+    local_crops_scale: [0.05, 0.4]
+    erosion_dilation_prob: 0.5   # raven's binary morphology aug
+    color_jitter_prob: 0.0       # meaningless on 2-tone data
+    grayscale_prob: 0.0
+    jpeg_prob: 0.0
+    rotation_prob: 0.0
+
+model:
+  arch: vit_small           # matches raven; --init-from adopts it regardless
+  patch_size: 16
+
+optim:
+  lr: 5.0e-4                # GENTLE peak @ ref batch 256 -> ~9.4e-5 at batch 48: adapt
+                            #   raven's features, don't wipe them.
+  warmup_epochs: 5
+  batch_size: 48
+
+train:
+  epochs: 20                # warm-started + more data than any solo run; ~85% of the
+                            #   value lands in the first ~10 epochs (Antwerp lesson).
+                            #   Watch the projector / per-archive eval and stop early.
+  fp16: true
+  output_dir: runs/pooled_bin_ft
+  save_every_steps: 500
+  saveckp_epoch_freq: 5
+  projector_every_epochs: 5   # NB projector colours by per-archive labels.csv; hand IDs
+                              #   aren't namespaced across archives yet (cosmetic only —
+                              #   training ignores labels; namespacing is a Phase-B eval/
+                              #   supervised concern).
