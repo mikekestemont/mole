@@ -304,6 +304,9 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
     min_confidence: Optional[float] = typer.Option(
         None, "--min-confidence",
         help="Drop labels whose confidence column is below this floor (e.g. Leroy auto-matches)."),
+    cross_doc_only: bool = typer.Option(
+        False, "--cross-doc-only",
+        help="Relevance = same hand AND different charter (excludes sibling scans)."),
     per_hand: bool = typer.Option(
         False, "--per-hand", help="Print the worst-first per-hand AP table."),
     out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
@@ -313,7 +316,8 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
 
     ks = tuple(int(k) for k in topk.split(",") if k.strip())
     result = evaluate(embeddings, datasets_root, metric=metric, topk=ks,
-                      min_confidence=min_confidence, out=out)
+                      min_confidence=min_confidence, cross_doc_only=cross_doc_only,
+                      out=out)
     console.print(format_report(result, per_hand=per_hand))
 
 

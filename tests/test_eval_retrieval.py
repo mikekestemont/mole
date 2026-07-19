@@ -88,6 +88,73 @@ def test_min_confidence_demotes_low_rows_to_unlabeled(tmp_path):
     assert "A" not in floored.overall.per_hand
 
 
+def test_cross_doc_only_excludes_sibling_scans(tmp_path):
+    """A sibling scan (same charter) must not count as a cross-document hit."""
+    ds = tmp_path / "flanders-set-bin"
+    ds.mkdir(parents=True)
+    # Hand A: two scans of ONE charter (134) + one scan of another (140).
+    # Hand B: two distinct charters (200, 201).
+    names = ["134_2_x.jpg", "134_3_x.jpg", "140_1_y.jpg",
+             "200_1_z.jpg", "201_1_w.jpg"]
+    hands = ["A", "A", "A", "B", "B"]
+    for n in names:
+        (ds / n).write_bytes(b"")
+    (ds / "labels.csv").write_text(
+        "filename,hand_id\n" + "".join(f"{n},{h}\n" for n, h in zip(names, hands)))
+    # Geometry (angles on the unit circle): the 134 siblings sit at ~0-5°, the
+    # second A charter (140) sits far away at 90°, and the two B docs sit at
+    # ~40-42° — *between* the 134 pair and 140. So with ordinary relevance a 134
+    # query trivially retrieves its sibling at rank 1 (the scan shortcut); under
+    # cross-doc-only the sibling is gone and the B docs outrank the distant 140,
+    # so hand A's AP and Top-1 both drop.
+    mat = np.asarray([
+        [1.0000, 0.0000],   # 134_2  (0°)
+        [0.9962, 0.0872],   # 134_3  (5°, sibling of 134_2)
+        [0.0000, 1.0000],   # 140_1  (90°, second A charter, far away)
+        [0.7660, 0.6430],   # 200_1  (40°, hand B)
+        [0.7430, 0.6690],   # 201_1  (42°, hand B)
+    ], dtype=np.float32)
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({
+        "model_id": "t@0",
+        "rows": [{"row": i, "image": f"{ds}/{n}"} for i, n in enumerate(names)],
+    }))
+
+    # Standard relevance: the 134 siblings retrieve each other -> hand A looks great.
+    std = evaluate(npy, ds, topk=(1,))
+    # Cross-doc-only: 134 siblings are excluded, so 134_2/134_3 must reach 140
+    # (which is far away) -> hand A's AP collapses; the flag demonstrably bites.
+    xdoc = evaluate(npy, ds, topk=(1,), cross_doc_only=True)
+    assert xdoc.cross_doc_only is True
+    assert xdoc.overall.per_hand["A"]["ap"] < std.overall.per_hand["A"]["ap"]
+    # 134 queries no longer count their sibling as a top-1 hit
+    assert xdoc.overall.top1 < std.overall.top1
+
+
+def test_cross_doc_only_noop_when_all_docs_unique(tmp_path):
+    """With one image per charter, cross-doc-only equals the standard metric."""
+    ds = tmp_path / "brackley-set"
+    ds.mkdir(parents=True)
+    names = ["Brackley_D4.jpg", "Brackley_D5.jpg", "Brackley_D6.jpg", "Brackley_D7.jpg"]
+    hands = ["A", "A", "B", "B"]
+    for n in names:
+        (ds / n).write_bytes(b"")
+    (ds / "labels.csv").write_text(
+        "filename,hand_id\n" + "".join(f"{n},{h}\n" for n, h in zip(names, hands)))
+    mat = np.asarray([[1, 0], [1, 0.02], [0, 1], [0.02, 1]], dtype=np.float32)
+    npy = tmp_path / "emb.npy"
+    np.save(npy, mat)
+    (tmp_path / "emb.mapping.json").write_text(json.dumps({
+        "model_id": "t@0",
+        "rows": [{"row": i, "image": f"{ds}/{n}"} for i, n in enumerate(names)],
+    }))
+    std = evaluate(npy, ds, topk=(1,))
+    xdoc = evaluate(npy, ds, topk=(1,), cross_doc_only=True)
+    assert abs(std.overall.mean_ap - xdoc.overall.mean_ap) < 1e-12
+    assert std.overall.n_queries == xdoc.overall.n_queries
+
+
 def test_singleton_hand_query_is_skipped():
     """A hand with only one labeled doc yields no relevant gallery item -> skipped."""
     labels = np.array(["A", "A", "Z"], dtype=object)  # Z is a singleton

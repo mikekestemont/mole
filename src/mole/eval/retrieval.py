@@ -56,6 +56,7 @@ class EvalResult:
     datasets: list[str]
     overall: RetrievalScores
     min_confidence: float | None = None
+    cross_doc_only: bool = False
     within_dataset: RetrievalScores | None = None
     cross_dataset: RetrievalScores | None = None
     per_dataset: dict[str, RetrievalScores] = field(default_factory=dict)
@@ -80,6 +81,16 @@ def _label_tables(datasets_root: str | Path) -> dict[str, LabelTable]:
         if m.labels and m.labels.hand_by_filename:
             tables[m.name] = m.labels
     return tables
+
+
+def _doc_resolvers(datasets_root: str | Path):
+    """dataset_name -> (basename -> doc_id) resolver, for cross-doc grouping."""
+    from mole.data.docids import doc_id_resolver
+    return {
+        m.name: doc_id_resolver(m.root)
+        for m in discover_datasets(datasets_root)
+        if m.labels and m.labels.hand_by_filename
+    }
 
 
 def _hand_if_confident(table: LabelTable, fname: str,
@@ -165,7 +176,7 @@ def _rank_metrics(sim: np.ndarray, labels: np.ndarray, allow: np.ndarray,
 # ------------------------------------------------------------------ public API
 def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
              *, metric: str = "cosine", topk: tuple[int, ...] = (1, 5, 10),
-             min_confidence: float | None = None,
+             min_confidence: float | None = None, cross_doc_only: bool = False,
              out: str | Path | None = None) -> EvalResult:
     """Run the retrieval benchmark and write a JSON report sidecar.
 
@@ -177,6 +188,13 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     below the floor to *unlabeled* (drops it from both queries and gallery) —
     the honest way to read auto-matched label sets like Leroy. Labels without a
     confidence value are unaffected.
+
+    ``cross_doc_only`` redefines relevance as *same hand AND different document*:
+    sibling scans of one physical charter (grouped by :mod:`mole.data.docids`)
+    are removed from both the relevant set and the ranking, so a model earns no
+    credit for re-finding a sibling scan. This is the honest metric for any
+    label-trained claim. For archives that are one-image-per-charter it is a
+    no-op (every doc id is unique).
     """
     X, images, model_id = _load_embeddings(embeddings_path)
     if len(images) != len(X):
@@ -185,6 +203,7 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
             "patch-level embedding; eval needs page-level (mean/cls/vlad) output")
 
     tables = _label_tables(datasets_root)
+    resolvers = _doc_resolvers(datasets_root) if cross_doc_only else {}
     # When only one dataset carries labels, attribute every embedding to it even
     # if the mapping's folder name differs (embedded elsewhere, evaluated here).
     # With several datasets we key on the image's parent-folder name so shared
@@ -192,6 +211,7 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     solo = next(iter(tables)) if len(tables) == 1 else None
     hands: list[str] = []
     dsets: list[str] = []
+    docs: list[str] = []
     keep: list[int] = []
     for i, path in enumerate(images):
         p = Path(path)
@@ -206,6 +226,11 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
             continue
         hands.append(hand)
         dsets.append(ds)
+        if cross_doc_only:
+            resolve = resolvers.get(ds)
+            # doc ids are namespaced by dataset so they never collide across
+            # archives; fall back to the basename if the dataset has no resolver.
+            docs.append(f"{ds}/{resolve(p.name)}" if resolve else f"{ds}/{p.name}")
         keep.append(i)
 
     if len(keep) < 2:
@@ -221,28 +246,37 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
 
     sim = _similarity(Xk, metric)
     off_diag = ~np.eye(n, dtype=bool)
+    # cross-doc-only: also forbid same-document (sibling-scan) gallery items.
+    if cross_doc_only:
+        doc_arr = np.asarray(docs, dtype=object)
+        base_allow = off_diag & (doc_arr[:, None] != doc_arr[None, :])
+    else:
+        base_allow = off_diag
 
-    overall = _rank_metrics(sim, labels, off_diag, topk, progress=True,
+    overall = _rank_metrics(sim, labels, base_allow, topk, progress=True,
                             desc="Retrieval mAP")
     if overall is None:
-        raise ValueError("no hand has ≥2 labeled documents — nothing to retrieve")
+        raise ValueError(
+            "no hand has ≥2 labeled documents"
+            + (" in *different* charters (cross-doc-only)" if cross_doc_only else "")
+            + " — nothing to retrieve")
 
     result = EvalResult(
         model_id=model_id, metric=metric, n_embeddings=len(X), n_labeled=n,
         n_hands=len(set(hands)), coverage=n / len(X), datasets=dataset_names,
-        overall=overall, min_confidence=min_confidence,
+        overall=overall, min_confidence=min_confidence, cross_doc_only=cross_doc_only,
     )
 
     if len(dataset_names) > 1:
         same = datasets[:, None] == datasets[None, :]
-        result.within_dataset = _rank_metrics(sim, labels, off_diag & same, topk)
-        result.cross_dataset = _rank_metrics(sim, labels, off_diag & ~same, topk)
+        result.within_dataset = _rank_metrics(sim, labels, base_allow & same, topk)
+        result.cross_dataset = _rank_metrics(sim, labels, base_allow & ~same, topk)
         for d in dataset_names:
             idx = np.where(datasets == d)[0]
             if idx.size < 2:
                 continue
             sub = _rank_metrics(sim[np.ix_(idx, idx)], labels[idx],
-                                ~np.eye(idx.size, dtype=bool), topk)
+                                base_allow[np.ix_(idx, idx)], topk)
             if sub is not None:
                 result.per_dataset[d] = sub
 
@@ -300,6 +334,8 @@ def format_report(r: EvalResult, *, per_hand: bool = False) -> str:
         f"{len(r.datasets)} dataset(s): {ds}",
         *([f"  min-confidence: ≥{r.min_confidence:g} (lower-confidence labels dropped)"]
           if r.min_confidence is not None else []),
+        *(["  relevance: cross-document only (sibling scans excluded)"]
+          if r.cross_doc_only else []),
         "",
         f"  Overall (leave-one-out, {r.overall.n_queries} queries)",
         _fmt_scores(r.overall, "    "),
