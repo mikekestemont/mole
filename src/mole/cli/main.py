@@ -407,17 +407,35 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
 
 @app.command(name="eval-compare")
 def eval_compare(
-    a: Path = typer.Argument(..., help="Baseline <name>.eval.json (side A)."),
-    b: Path = typer.Argument(..., help="Candidate <name>.eval.json (side B)."),
+    evals: list[Path] = typer.Argument(
+        ..., help="eval.json files in BASELINE CANDIDATE pairs: A B  [A2 B2 ...]. "
+                  "One pair = the paired per-hand report; several = the §4.2 "
+                  "multi-archive decision rule."),
     section: str = typer.Option("overall", help="Which block to compare: overall | within_dataset | cross_dataset."),
     n_boot: int = typer.Option(10000, help="Hand-level bootstrap resamples for the CI."),
     seed: int = typer.Option(0, help="Bootstrap seed (reproducible CI)."),
 ) -> None:
-    """Paired per-hand ΔAP between two eval.json files: bootstrap CI + sign test."""
-    from mole.eval import compare_evals, format_compare
+    """Paired per-hand ΔAP between eval.json files: bootstrap CI + sign test.
 
-    report = compare_evals(a, b, section=section, n_boot=n_boot, seed=seed)
-    console.print(format_compare(report))
+    With one A/B pair this is the single-archive report. With several pairs it
+    applies the SUPERVISED_PLAN.md §4.2 rule instead: each archive is compared on
+    its OWN gallery, the headline is the mean of the per-archive Δmacro (so a
+    90-hand archive cannot outvote a 3-hand one), the CI resamples hands within
+    each archive, and the guardrail flags any archive below -0.01.
+    """
+    from mole.eval import (
+        compare_evals, compare_evals_multi, format_compare, format_multi_compare)
+
+    if len(evals) < 2 or len(evals) % 2:
+        raise typer.BadParameter(
+            f"expected eval.json files in BASELINE CANDIDATE pairs, got {len(evals)}")
+    pairs = list(zip(evals[::2], evals[1::2]))
+    if len(pairs) == 1:
+        console.print(format_compare(
+            compare_evals(*pairs[0], section=section, n_boot=n_boot, seed=seed)))
+    else:
+        console.print(format_multi_compare(compare_evals_multi(
+            pairs, section=section, n_boot=n_boot, seed=seed)))
 
 
 # ---------------------------------------------------------------------- sup

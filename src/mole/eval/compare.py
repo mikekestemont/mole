@@ -111,12 +111,118 @@ def compare_evals(a_path: str | Path, b_path: str | Path, *,
     )
 
 
+# --------------------------------------------------- several archives at once
+# §4.2: "mean over the 5 archives of held-out Δmacro, bootstrap CI excluding 0,
+# AND no archive worse than -0.01".
+GUARDRAIL = -0.01
+
+
+@dataclass
+class MultiCompareReport:
+    """The §4.2 decision rule over several per-archive comparisons."""
+
+    pairs: list[CompareReport] = field(default_factory=list)
+    labels: list[str] = field(default_factory=list)
+    mean_delta: float = 0.0      # ARCHIVE-weighted: mean of the per-archive Δmacro
+    ci_low: float = 0.0
+    ci_high: float = 0.0
+    ci_excludes_zero: bool = False
+    pooled_delta: float = 0.0    # HAND-weighted, for reference (big archives dominate)
+    n_hands: int = 0
+    worst_label: str = ""
+    worst_delta: float = 0.0
+    guardrail_ok: bool = False
+    n_boot: int = 0
+    seed: int = 0
+
+    @property
+    def passes(self) -> bool:
+        """The full rule: positive, distinguishable from 0, and nobody regresses."""
+        return self.mean_delta > 0 and self.ci_excludes_zero and self.guardrail_ok
+
+
+def _dataset_label(path: str | Path) -> str:
+    """Name a comparison by the archive it covers (falls back to the filename)."""
+    try:
+        data = json.loads(Path(path).read_text())
+        ds = data.get("datasets") or []
+        if ds:
+            return ",".join(str(d) for d in ds)
+    except (OSError, ValueError):
+        pass
+    return Path(path).name.split(".")[0]
+
+
+def compare_evals_multi(pairs: list[tuple[str | Path, str | Path]], *,
+                        section: str = "overall", n_boot: int = 10_000,
+                        seed: int = 0) -> MultiCompareReport:
+    """Combine per-archive paired comparisons into one verdict.
+
+    Each archive is compared on its own (paired per-hand, own gallery — never a
+    pooled gallery, which would change the task). The headline is the **mean of
+    the per-archive Δmacro**, so a 90-hand archive cannot outvote a 3-hand one;
+    the CI comes from resampling hands *within* each archive and re-averaging,
+    which propagates small-archive noise honestly. The hand-weighted pooled Δ is
+    reported alongside for contrast.
+    """
+    reports = [compare_evals(a, b, section=section, n_boot=n_boot, seed=seed)
+               for a, b in pairs]
+    labels = [_dataset_label(b) for _, b in pairs]
+
+    per_archive = [np.array(list(r.per_hand_delta.values())) for r in reports]
+    means = np.array([d.mean() for d in per_archive])
+
+    rng = np.random.default_rng(seed)
+    boot = np.zeros((n_boot, len(per_archive)))
+    for j, d in enumerate(per_archive):
+        boot[:, j] = d[rng.integers(0, len(d), size=(n_boot, len(d)))].mean(axis=1)
+    boot_mean = boot.mean(axis=1)
+    ci_low, ci_high = (float(np.percentile(boot_mean, 2.5)),
+                       float(np.percentile(boot_mean, 97.5)))
+
+    all_deltas = np.concatenate(per_archive)
+    worst = int(np.argmin(means))
+    return MultiCompareReport(
+        pairs=reports, labels=labels,
+        mean_delta=float(means.mean()), ci_low=ci_low, ci_high=ci_high,
+        ci_excludes_zero=(ci_low > 0.0 or ci_high < 0.0),
+        pooled_delta=float(all_deltas.mean()), n_hands=int(all_deltas.size),
+        worst_label=labels[worst], worst_delta=float(means[worst]),
+        guardrail_ok=bool(means.min() >= GUARDRAIL),
+        n_boot=n_boot, seed=seed,
+    )
+
+
+def format_multi_compare(r: MultiCompareReport) -> str:
+    w = max((len(x) for x in r.labels), default=7)
+    out = [f"eval-compare ({r.pairs[0].section})  B vs A over {len(r.pairs)} archives",
+           "",
+           f"  {'archive':<{w}}  {'hands':>5} {'A':>7} {'B':>7} {'Δmacro':>8}"]
+    for label, p in zip(r.labels, r.pairs):
+        flag = "  ⚠" if p.delta_macro < GUARDRAIL else ""
+        out.append(f"  {label:<{w}}  {p.n_shared:>5} {p.macro_a:>7.4f} "
+                   f"{p.macro_b:>7.4f} {p.delta_macro:>+8.4f}{flag}")
+    verdict = ("REAL — 95% CI excludes 0" if r.ci_excludes_zero
+               else "not distinguishable from 0 (CI includes 0)")
+    out += [
+        "",
+        f"  mean Δmacro : {r.mean_delta:+.4f}   95% CI [{r.ci_low:+.4f}, "
+        f"{r.ci_high:+.4f}]  ({r.n_boot} boot, seed {r.seed})",
+        f"  verdict     : {verdict}",
+        f"  guardrail   : " + ("all archives ≥ -0.01" if r.guardrail_ok else
+                               f"FAILED — {r.worst_label} {r.worst_delta:+.4f} "
+                               f"(< {GUARDRAIL})"),
+        f"  (hand-weighted Δ over all {r.n_hands} hands: {r.pooled_delta:+.4f})",
+    ]
+    return "\n".join(out)
+
+
 def format_compare(r: CompareReport, *, top: int = 5) -> str:
     verdict = ("REAL — 95% CI excludes 0" if r.ci_excludes_zero
                else "not distinguishable from 0 (CI includes 0)")
     arrow = "↑" if r.delta_macro > 0 else ("↓" if r.delta_macro < 0 else "=")
     out = [
-        f"eval-compare [{r.section}]  B vs A",
+        f"eval-compare ({r.section})  B vs A",
         f"  A: {r.a}",
         f"  B: {r.b}",
         f"  shared hands: {r.n_shared}"

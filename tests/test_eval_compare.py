@@ -59,3 +59,39 @@ def test_compare_pairs_only_shared_hands(tmp_path):
     assert r.n_shared == 2
     assert r.only_a == ["onlyA"] and r.only_b == ["onlyB"]
     assert set(r.per_hand_delta) == {"x", "y"}
+
+
+# ------------------------------------------------- §4.2 multi-archive rule
+def _pair(tmp_path, name, base: dict[str, float], delta: float):
+    a, b = tmp_path / f"{name}.a.json", tmp_path / f"{name}.b.json"
+    _write_eval(a, base)
+    _write_eval(b, {h: v + delta for h, v in base.items()})
+    return a, b
+
+
+def test_multi_compare_mean_is_archive_weighted_not_hand_weighted(tmp_path):
+    """A 3-hand archive counts as much as a 90-hand one (the §4.2 rule)."""
+    from mole.eval.compare import compare_evals_multi
+
+    small = _pair(tmp_path, "small", {f"s{i}": 0.5 for i in range(3)}, +0.20)
+    big = _pair(tmp_path, "big", {f"b{i}": 0.5 for i in range(90)}, 0.00)
+    r = compare_evals_multi([small, big], n_boot=2000, seed=0)
+
+    assert abs(r.mean_delta - 0.10) < 1e-9        # (0.20 + 0.00) / 2
+    assert abs(r.pooled_delta - (0.20 * 3 / 93)) < 1e-9   # hand-weighted differs sharply
+    assert r.n_hands == 93
+    assert [p.n_shared for p in r.pairs] == [3, 90]
+
+
+def test_multi_compare_guardrail_catches_one_regressed_archive(tmp_path):
+    """Mean can be strongly positive while one archive regresses — the rule fails."""
+    from mole.eval.compare import compare_evals_multi
+
+    good = _pair(tmp_path, "good", {f"g{i}": 0.5 for i in range(10)}, +0.10)
+    bad = _pair(tmp_path, "bad", {f"d{i}": 0.5 for i in range(10)}, -0.05)
+    r = compare_evals_multi([good, bad], n_boot=2000, seed=0)
+
+    assert r.mean_delta > 0 and r.ci_excludes_zero
+    assert not r.guardrail_ok
+    assert r.worst_delta < -0.01
+    assert not r.passes                            # positive mean is NOT enough
