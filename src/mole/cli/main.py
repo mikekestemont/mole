@@ -473,11 +473,22 @@ def sup_train(
     checkpoint: Path = typer.Argument(..., help="Base backbone checkpoint (frozen)."),
     labels_root: Path = typer.Argument(..., help="Dataset dir or pooled root with labels.csv."),
     out: Optional[Path] = typer.Option(None, "--out", help="Run output dir (default: runs/sup_head)."),
+    holdout_archive: Optional[str] = typer.Option(
+        None, "--holdout-archive",
+        help="Leave-one-archive-out fold: this archive contributes nothing to "
+             "training OR model selection, so every one of its hands is an unseen "
+             "class at eval time (no --holdout-hands needed — compare against the "
+             "archive's usual full-gallery macro-mAP)."),
+    cache: Optional[Path] = typer.Option(
+        None, "--cache",
+        help="Feature cache dir to reuse (default: <out>/cache). Point every LOAO "
+             "fold at the same one so the GPU pass is paid once."),
 ) -> None:
     """Train the Tier-1 masked-SupCon head on cached descriptors (CPU/MPS friendly)."""
     from mole.supervised.metric import train_metric
 
-    train_metric(config, checkpoint, labels_root, out)
+    train_metric(config, checkpoint, labels_root, out,
+                 holdout_archive=holdout_archive, cache_dir=cache)
 
 
 # ------------------------------------------------------------------- models list/show

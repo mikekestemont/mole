@@ -119,18 +119,26 @@ def holdout_macro_map(holdout_cache, head, device) -> float:
     return float(scores.macro_map) if scores else 0.0
 
 
-def train_head(cache, *, holdout_hands: set[str], out_dim: int = 128,
+def train_head(cache, *, holdout_hands: set[str],
+               exclude_hands: set[str] | frozenset = frozenset(),
+               out_dim: int = 128,
                temperature: float = 0.07, kind: str = "linear",
                sampler_cfg: dict | None = None, seed: int = 0, epochs: int = 30,
                lr: float = 1e-3, weight_decay: float = 1e-4,
                device: str | None = None, progress: bool = True):
     """Train the projection head on a :class:`FeatureCache`; return ``(head, report)``.
 
-    Trains on TRAIN-hand windows only (all labeled hands in the cache that are not
-    in ``holdout_hands``); the held-out hands are unseen classes and the model is
-    selected on their cross-document macro-mAP, so overfitting a starved train
-    hand cannot improve the stopping metric. The split itself is the caller's
-    responsibility (``SupervisedIndex.split_hands`` / ``write_holdout_split``).
+    Trains on TRAIN-hand windows only; ``holdout_hands`` are unseen classes and
+    the model is selected on THEIR cross-document macro-mAP, so overfitting a
+    starved train hand cannot improve the stopping metric. The split itself is the
+    caller's responsibility (``SupervisedIndex.split_hands`` /
+    ``write_holdout_split``).
+
+    ``exclude_hands`` are dropped from training as well, but are *not* selected
+    on — the leave-one-archive-out fold. Model selection touching the evaluation
+    set is a leak, so under LOAO the test archive goes here while
+    ``holdout_hands`` is a validation slice of the REMAINING archives: train,
+    select, and test then use three disjoint sets of hands.
     """
     import torch
 
@@ -140,8 +148,9 @@ def train_head(cache, *, holdout_hands: set[str], out_dim: int = 128,
     in_dim = cache.dim
 
     holdout_hands = set(holdout_hands)
+    exclude_hands = set(exclude_hands)
     all_hands = {h for h in cache.window_hand if h}
-    train_hands = all_hands - holdout_hands
+    train_hands = all_hands - holdout_hands - exclude_hands
 
     train_cache = cache.filter(train_hands)
     holdout_cache = cache.filter(holdout_hands)
@@ -184,7 +193,9 @@ def train_head(cache, *, holdout_hands: set[str], out_dim: int = 128,
         "kind": kind, "temperature": temperature, "epochs": epochs, "seed": seed,
         "base_model_id": cache.meta.get("model_id"),
         "n_train_hands": len(train_hands), "n_holdout_hands": len(holdout_hands),
+        "n_excluded_hands": len(exclude_hands),
         "train_hands": sorted(train_hands), "holdout_hands": sorted(holdout_hands),
+        "excluded_hands": sorted(exclude_hands),
         "history": history,
     }
     return head, report
@@ -200,13 +211,23 @@ _SUP_DEFAULTS = {
 
 
 def train_metric(config_path: str | Path, base_checkpoint: str | Path,
-                 labels_root: str | Path, output_dir: str | Path | None = None):
+                 labels_root: str | Path, output_dir: str | Path | None = None,
+                 *, holdout_archive: str | None = None,
+                 cache_dir: str | Path | None = None):
     """Config-driven Tier-1 head training (``sup.tier: head``).
 
     Builds (or reuses) the feature cache from ``base_checkpoint``, trains the head
     on the pooled labels under ``labels_root``, and writes ``head.pt`` +
     ``report.json`` + the frozen hand split. ``sup.tier: hybrid`` (Tier 3) is
     Phase 5.
+
+    ``holdout_archive`` switches to a **leave-one-archive-out** fold: that
+    archive contributes nothing to training or model selection, so evaluating on
+    it afterwards uses ALL of its hands as unseen classes (no ``--holdout-hands``
+    restriction) against the familiar full-gallery reference numbers. Model
+    selection then runs on a ``holdout_frac`` slice of the remaining archives'
+    hands, keeping train / select / test disjoint. ``cache_dir`` overrides where
+    the feature cache lives, so every fold reuses the ONE GPU pass.
     """
     import torch
 
@@ -222,7 +243,7 @@ def train_metric(config_path: str | Path, base_checkpoint: str | Path,
 
     out = Path(output_dir or "runs/sup_head")
     out.mkdir(parents=True, exist_ok=True)
-    cache_dir = Path(sup["cache_dir"]) if sup["cache_dir"] else out / "cache"
+    cache_dir = Path(cache_dir or sup["cache_dir"] or out / "cache")
 
     index = load_labeled_pairs(labels_root, sup["min_confidence"])
     if (cache_dir / "cache.npy").is_file():
@@ -235,14 +256,36 @@ def train_metric(config_path: str | Path, base_checkpoint: str | Path,
         cache = build_feature_cache(base_checkpoint, index, cache_dir,
                                     include_unlabeled=False)
 
+    excluded: set[str] = set()
+    split_index = index
+    if holdout_archive:
+        excluded = {h for h in index.hands if h.split("/", 1)[0] == holdout_archive}
+        if not excluded:
+            raise ValueError(
+                f"--holdout-archive {holdout_archive!r} matches no hand; the "
+                f"archives here are {sorted(index.archives)}")
+        # select on the REMAINING archives only — never on the test archive.
+        split_index = index.subset(set(index.hands) - excluded)
+        print(f"[mole] leave-one-archive-out: {holdout_archive} held out "
+              f"({len(excluded)} hands, 0 windows in training or selection)")
+
     # freeze the split so every tier / rerun uses the identical held-out hands.
-    _, hold = index.write_holdout_split(out / "split.json",
-                                        holdout_frac=sup["holdout_frac"], seed=sup["seed"])
+    _, hold = split_index.write_holdout_split(
+        out / "split.json", holdout_frac=sup["holdout_frac"], seed=sup["seed"])
+    if holdout_archive:
+        split_path = out / "split.json"
+        blob = json.loads(split_path.read_text())
+        blob["holdout_archive"] = holdout_archive
+        blob["excluded_hands"] = sorted(excluded)
+        split_path.write_text(json.dumps(blob, indent=2))
+
     head, report = train_head(
-        cache, holdout_hands=set(hold.hands), out_dim=sup["out_dim"],
+        cache, holdout_hands=set(hold.hands), exclude_hands=excluded,
+        out_dim=sup["out_dim"],
         temperature=sup["temperature"], kind=sup["head"], sampler_cfg=sup["sampler"],
         seed=sup["seed"], epochs=sup["epochs"], lr=sup["lr"],
         weight_decay=sup["weight_decay"])
+    report["holdout_archive"] = holdout_archive
 
     head_path = out / "head.pt"
     torch.save({

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -188,3 +190,84 @@ def test_train_metric_writes_head_report_split(tmp_path):
     blob = torch.load(head_path, weights_only=False)
     assert blob["in_dim"] == 192 and blob["out_dim"] == 8 and blob["kind"] == "linear"
     assert blob["base_model_id"] == "vit_tiny@" + blob["base_model_id"].split("@", 1)[1]
+
+
+# -------------------------------------------------- leave-one-archive-out fold
+def _two_archive_cache(seed=0):
+    """Two archives, each with several hands, in a shared signal subspace."""
+    rng = np.random.default_rng(seed)
+    sig, noise = 6, 18
+    dim = sig + noise
+    H, D, A, I, X = [], [], [], [], []
+    for arch, n_hands in (("a", 5), ("b", 5)):
+        for h in range(n_hands):
+            hid = f"{arch}/H{h}"
+            v0 = rng.standard_normal(sig)
+            v0 /= np.linalg.norm(v0)
+            for d in range(3):
+                for _ in range(6):
+                    v = np.zeros(dim, np.float32)
+                    v[:sig] = 0.6 * v0 + 0.1 * rng.standard_normal(sig)
+                    v[sig:] = rng.standard_normal(noise)
+                    X.append(v); H.append(hid); D.append(f"{hid}d{d}")
+                    A.append(arch); I.append(f"{hid}d{d}.png")
+    return FeatureCache(np.asarray(X, np.float32), H, D, A, I,
+                        meta={"model_id": "tiny@0"})
+
+
+def test_train_head_exclude_hands_are_absent_from_training_and_selection():
+    """LOAO: the excluded archive trains nothing and is never selected on."""
+    cache = _two_archive_cache()
+    excluded = {h for h in set(cache.window_hand) if h.startswith("b/")}
+    validation = {"a/H3", "a/H4"}
+    head, report = train_head(
+        cache, holdout_hands=validation, exclude_hands=excluded, out_dim=8,
+        kind="linear", epochs=5, lr=1e-2,
+        sampler_cfg={"hands_per_batch": 3, "docs_per_hand": 2, "windows_per_doc": 4,
+                     "same_archive_frac": 0.0, "batches_per_epoch": 10},
+        seed=0, progress=False)
+
+    trained = set(report["train_hands"])
+    assert trained.isdisjoint(excluded)          # test archive never trained on
+    assert trained.isdisjoint(validation)        # validation hands never trained on
+    assert set(report["holdout_hands"]) == validation   # ... and are what we select on
+    assert set(report["excluded_hands"]) == excluded
+    assert report["n_train_hands"] == 3          # a/H0..H2 only
+
+
+def test_train_metric_holdout_archive_excludes_it_from_the_split(tmp_path):
+    from PIL import Image
+
+    ck = _tiny_checkpoint(tmp_path)
+    root = tmp_path / "pool"
+    rng = np.random.default_rng(2)
+    for arch in ("arch1", "arch2"):
+        ds = root / arch
+        ds.mkdir(parents=True)
+        rows = ["filename,hand_id"]
+        for h in range(4):
+            for d in range(2):
+                n = f"h{h}_d{d}.png"
+                Image.fromarray((rng.random((250, 250, 3)) * 255).astype("uint8")).save(ds / n)
+                rows.append(f"{n},H{h}")
+        (ds / "labels.csv").write_text("\n".join(rows) + "\n")
+
+    cfg = tmp_path / "sup.yaml"
+    cfg.write_text(
+        "sup:\n  tier: head\n  head: linear\n  out_dim: 8\n  epochs: 2\n"
+        "  holdout_frac: 0.25\n  seed: 0\n"
+        "  sampler: {hands_per_batch: 2, docs_per_hand: 2, windows_per_doc: 2, "
+        "same_archive_frac: 0.0, batches_per_epoch: 5}\n")
+
+    out = tmp_path / "run"
+    train_metric(cfg, ck, root, out, holdout_archive="arch2")
+
+    split = json.loads((out / "split.json").read_text())
+    assert split["holdout_archive"] == "arch2"
+    # selection + training hands come only from the OTHER archive
+    assert all(h.startswith("arch1/") for h in split["holdout_hands"])
+    assert all(h.startswith("arch1/") for h in split["train_hands"])
+    assert all(h.startswith("arch2/") for h in split["excluded_hands"])
+    report = json.loads((out / "report.json").read_text())
+    assert report["holdout_archive"] == "arch2"
+    assert not set(report["train_hands"]) & set(split["excluded_hands"])
