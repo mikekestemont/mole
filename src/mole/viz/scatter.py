@@ -43,8 +43,19 @@ def _load_embeddings(path: Path):
 
 # -------------------------------------------------------------------- projection
 def _pca(X: np.ndarray, k: int) -> np.ndarray:
-    """Top-``k`` principal-component scores via SVD (no sklearn needed)."""
-    Xc = X - X.mean(0, keepdims=True)
+    """Top-``k`` principal-component scores via SVD (no sklearn needed).
+
+    When there are far more dimensions than rows — VLAD is 38,400-d and an archive
+    holds a few hundred pages — a full SVD wastes most of its work computing a
+    38,400-wide basis nobody asked for. The Gram route (n x n eigendecomposition)
+    is mathematically identical for the scores and orders of magnitude cheaper.
+    """
+    Xc = (X - X.mean(0, keepdims=True)).astype(np.float32)
+    n, d = Xc.shape
+    if d > 2 * n:
+        w, v = np.linalg.eigh(Xc @ Xc.T)                # [n, n], ascending
+        idx = np.argsort(-w)[:min(k, n)]
+        return (v[:, idx] * np.sqrt(np.maximum(w[idx], 0.0))).astype(np.float32)
     _, s, vt = np.linalg.svd(Xc, full_matrices=False)
     k = min(k, vt.shape[0])
     return (Xc @ vt[:k].T).astype(np.float32)

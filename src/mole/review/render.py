@@ -196,13 +196,17 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
     budget = ImageBudget(int(max_mb * 1024 * 1024) if max_mb else 0,
                          cache_dir=image_cache)
     if images:
+        # The UI shows at most 4 images per row, so only the FOCUS documents plus a
+        # couple of supporting ones are ever displayed. Enqueuing every member of a
+        # hand (Antwerp's hand R alone has 217) would encode hundreds of pages that
+        # nothing can show.
         wanted: list[int] = []
         for _kind, _h, _b, rws in sections:
             for r in rws:
-                wanted.extend(r.get("focus", []))
+                wanted.extend(r.get("focus", [])[:4])
         for _kind, _h, _b, rws in sections:
             for r in rws:
-                wanted.extend(r.get("docs", []))
+                wanted.extend(r.get("docs", [])[:4])
         seen = set()
         for i in wanted:
             if i in seen:

@@ -35,8 +35,13 @@ _FORMATS = (("WEBP", {"lossless": True, "quality": 100, "method": 4}),
 
 
 def _is_bilevel(img) -> bool:
-    a = np.asarray(img.convert("L"))
-    return len(np.unique(a)) <= 2
+    """Does this page use at most two grey levels?
+
+    ``getcolors`` early-exits as soon as a third colour appears, where
+    ``np.unique`` sorts every one of ~1.3M pixels — that difference was ~300 ms a
+    page, several times the cost of the encode it was there to inform.
+    """
+    return (img.convert("L").getcolors(maxcolors=2) or None) is not None
 
 
 def encode_page(path: str | Path, *, max_width: int = 1600,
@@ -62,29 +67,31 @@ def encode_page(path: str | Path, *, max_width: int = 1600,
         img.seek(best)
     img = img.convert("L")
 
-    if binarize and not _is_bilevel(img):
+    bilevel = _is_bilevel(img)
+    if binarize and not bilevel:
         from mole.prep.binarize import binarize_image
 
         img = binarize_image(img).convert("L")
+        bilevel = True                              # binarize_image emits two levels
 
     if img.width > max_width:
         h = max(1, int(img.height * max_width / img.width))
         img = img.resize((max_width, h))
-    img = img.convert("1") if _is_bilevel(img) else img
+        # resampling a bilevel page reintroduces greys; 1-bit mode re-thresholds
+    if bilevel:
+        img = img.convert("1")
 
-    best_blob, best_mime = None, "image/png"
+    # WebP lossless is smaller than PNG on every bilevel page measured, so try it
+    # FIRST and stop. Encoding both to compare cost ~2x for a decision already made
+    # by the measurements in REVIEW_PLAN.md — and PNG optimize=True is the slow one.
     for fmt, kw in _FORMATS:
         try:
             buf = io.BytesIO()
             img.save(buf, fmt, **kw)
         except (OSError, KeyError, ValueError):
             continue                                # e.g. Pillow built without WebP
-        blob = buf.getvalue()
-        if best_blob is None or len(blob) < len(best_blob):
-            best_blob, best_mime = blob, f"image/{fmt.lower()}"
-    if best_blob is None:                           # nothing encoded: give up cleanly
-        raise RuntimeError(f"could not encode {path}")
-    return best_blob, best_mime
+        return buf.getvalue(), f"image/{fmt.lower()}"
+    raise RuntimeError(f"could not encode {path}")
 
 
 def data_uri(blob: bytes, mime: str) -> str:
@@ -116,6 +123,8 @@ class ImageBudget:
         self.uris: dict[str, str] = {}
         self.skipped = 0
         self.failed = 0
+        self.full = False       # candidates arrive most-important-first: once one
+                                # does not fit, nothing later will either
 
     def _cache_path(self, path: Path) -> Path | None:
         if not self.cache_dir:
@@ -130,6 +139,9 @@ class ImageBudget:
         """Encode ``path`` under ``key`` if it fits the budget. Returns success."""
         if key in self.uris:
             return True
+        if self.full:
+            self.skipped += 1
+            return False        # encoding to then discard is pure waste
         path = Path(path)
         cp = self._cache_path(path)
         blob = mime = None
@@ -152,6 +164,7 @@ class ImageBudget:
 
         cost = int(len(blob) * 4 / 3) + 64          # base64 inflation + the attribute
         if self.max_bytes and self.used + cost > self.max_bytes:
+            self.full = True
             self.skipped += 1
             return False
         self.used += cost
