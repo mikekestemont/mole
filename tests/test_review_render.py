@@ -104,3 +104,29 @@ def test_local_file_links_by_default_and_template_when_given(tmp_path):
     out2, _ = render_review(npy, out=tmp_path / "b.html", method="pca", images=False,
                             image_url="https://arch.example/{filename}")
     assert "https://arch.example/h0_d0_x.png" in out2.read_text()
+
+
+def test_colour_schemes_and_the_unlabeled_toggle_survive(tmp_path):
+    """`mole viz`'s two affordances must exist here too: scheme switching and
+    show/hide-unlabeled with the cross marker."""
+    npy = _corpus(tmp_path, n_hands=5, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "s.html", method="pca", images=False)
+    html = out.read_text()
+    payload = json.loads(re.search(r"var D = (\{.*?\}), decisions = \{\}", html,
+                                   re.S).group(1))
+
+    assert payload["first"] == "hand"
+    # hand + FINCH's discovered clusters, so ground truth can be flipped against
+    # what the model found on the SAME projection
+    assert len(payload["schemes"]) >= 2
+    assert any("cluster" in n for n in payload["schemes"])
+    for sc in payload["schemes"].values():
+        assert len(sc["colors"]) == payload["schemes"][payload["first"]]["colors"].__len__()
+
+    assert 'id="scheme"' in html                 # the picker
+    assert 'id="unl"' in html                    # the show/hide toggle
+    assert "data-unl=" in html                   # crossed-through unattributed dots
+    assert "<path d=" in html                    # ... drawn as an actual cross
+    # unlabeled keeps the neutral grey, so the palette is spent on real hands
+    from mole.viz.scatter import _UNLABELED_GREY
+    assert _UNLABELED_GREY in json.dumps(payload["schemes"]["hand"]["colors"])

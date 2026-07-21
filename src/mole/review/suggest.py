@@ -58,6 +58,9 @@ class ReviewReport:
     duplicates: list[dict] = field(default_factory=list)
     isolated: list[dict] = field(default_factory=list)
     calibration: dict = field(default_factory=dict)
+    # FINCH's finest partition, kept so the renderer can offer "colour by
+    # discovered cluster" without paying for the clustering a second time.
+    cluster_labels: list[int] = field(default_factory=list)
 
     def to_json(self, path: str | Path) -> Path:
         p = Path(path)
@@ -441,6 +444,7 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
         from mole.cluster.finch import finch
         cl = np.asarray(finch(Xn, metric="cosine").partitions[0], dtype=int)
     if len(cl) == len(rows):
+        report.cluster_labels = [int(v) for v in cl]
         cohesions = [_cohesion(sim, idx, doc_arr) for idx in members.values()]
         report.new_hands = _new_hands(sim, cl, is_labeled, scores, doc_arr, names,
                                       [c for c in cohesions if np.isfinite(c)], limit)

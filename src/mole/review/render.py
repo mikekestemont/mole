@@ -145,8 +145,17 @@ def _rows_for(kind: str, items: list[dict], members: dict[str, list[int]],
     return rows
 
 
-def _svg(coords: np.ndarray, hands: list[str], names: list[str],
-         size: int = 620) -> str:
+def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
+         names: list[str], size: int = 620) -> str:
+    """The map, with unlabeled documents crossed through as in ``mole viz``.
+
+    The cross is a property of the DOCUMENT, not of the active colouring, so it is
+    fixed to the ground-truth (hand) scheme and stays put while fills change —
+    under a cluster scheme an unlabeled point is still coloured by its cluster,
+    which is exactly the attribution question ("which cluster did it join?").
+    """
+    from mole.viz.scatter import _UNLABELED_CROSS, _is_unlabeled
+
     xs, ys = coords[:, 0].astype(float), coords[:, 1].astype(float)
 
     def norm(a):
@@ -158,11 +167,58 @@ def _svg(coords: np.ndarray, hands: list[str], names: list[str],
     ny = (1.0 - norm(ys)) * (size - 2 * pad) + pad
     out = []
     for i, (x, y) in enumerate(zip(nx, ny)):
-        cls = "dot" + ("" if hands[i] else " unl")
-        out.append(f'<circle class="{cls}" cx="{x:.1f}" cy="{y:.1f}" r="3.4" '
-                   f'data-i="{i}"><title>{escape(names[i])}</title></circle>')
+        dot = (f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="3.6" '
+               f'fill="{first_colors[i]}" data-i="{i}">'
+               f'<title>{escape(names[i])}</title></circle>')
+        if _is_unlabeled(base_cats[i]):
+            a = 2.0
+            dot = (f'<g data-unl="1">{dot}'
+                   f'<path d="M{x - a:.1f} {y - a:.1f}L{x + a:.1f} {y + a:.1f}'
+                   f'M{x - a:.1f} {y + a:.1f}L{x + a:.1f} {y - a:.1f}" '
+                   f'stroke="{_UNLABELED_CROSS}" stroke-width="1" '
+                   f'stroke-linecap="round" pointer-events="none"/></g>')
+        out.append(dot)
     return (f'<svg id="map" viewBox="0 0 {size} {size}" width="{size}" '
             f'height="{size}">{"".join(out)}</svg>')
+
+
+def _schemes(report, hands: list[str], paths, clusters) -> list[tuple[str, list[str]]]:
+    """Colour schemes offered in the picker: hand, dataset, then FINCH levels."""
+    import json as _json
+
+    out: list[tuple[str, list[str]]] = [
+        ("hand", [_short(h) if h else "unlabeled" for h in hands])]
+    datasets = [p.parent.name or "root" for p in paths]
+    if len(set(datasets)) > 1:
+        out.append(("dataset", datasets))
+    if clusters:                       # a full mole cluster report: every level
+        rep = _json.loads(Path(clusters).read_text())
+        for lv in rep.get("levels", []):
+            if len(lv["labels"]) == len(hands):
+                out.append((f"FINCH L{lv['level']} ({lv['n_clusters']} clusters)",
+                            [f"c{v}" for v in lv["labels"]]))
+    elif report.cluster_labels and len(report.cluster_labels) == len(hands):
+        n = len(set(report.cluster_labels))
+        out.append((f"discovered clusters ({n})",
+                    [f"c{v}" for v in report.cluster_labels]))
+    return out
+
+
+def _picker(schemes, scheme_data, hands) -> str:
+    """Scheme dropdown + the show/hide-unlabeled toggle (both from `mole viz`)."""
+    from mole.viz.scatter import _is_unlabeled
+
+    n_unl = sum(1 for h in hands if _is_unlabeled(h or "unlabeled"))
+    bits = []
+    if len(schemes) > 1:
+        opts = "".join(
+            f'<option value="{escape(n, quote=True)}">{escape(n)} '
+            f'({scheme_data[n]["n_cats"]})</option>' for n, _ in schemes)
+        bits.append(f'<label>colour by <select id="scheme">{opts}</select></label>')
+    if n_unl:
+        bits.append(f'<label><input type="checkbox" id="unl" checked> '
+                    f'show unattributed <b>{n_unl}</b></label>')
+    return "".join(bits)
 
 
 def render_review(embeddings: str | Path, *, out: str | Path | None = None,
@@ -179,6 +235,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
     report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed)
     X, meta, rows_meta, names, paths, hands, _docs = document_table(embeddings)
     coords, used_method = reduce_2d(X, method, seed)
+    schemes = _schemes(report, hands, paths, clusters)
 
     members: dict[str, list[int]] = {}
     for i, h in enumerate(hands):
@@ -214,7 +271,14 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
             seen.add(i)
             budget.add(str(i), paths[i])
 
+    from mole.viz.scatter import _scheme_payload
+
+    scheme_data = {n: _scheme_payload(c) for n, c in schemes}
+    first = scheme_data[schemes[0][0]]
     payload = {
+        "schemes": {n: {"colors": p["colors"], "cats": p["cats"],
+                        "legend": p["legend"]} for n, p in scheme_data.items()},
+        "first": schemes[0][0],
         "sections": [{"kind": k, "heading": h, "blurb": b, "rows": r}
                      for k, h, b, r in sections],
         "images": budget.uris,
@@ -227,7 +291,10 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                 f"scribe · {report.n_hands} scribes · map: {used_method}")
     html = _HTML.replace("__TITLE__", escape(", ".join(report.datasets) or "archive")) \
                 .replace("__SUBTITLE__", subtitle) \
-                .replace("__SVG__", _svg(coords, hands, names)) \
+                .replace("__SVG__", _svg(coords, first["colors"],
+                                         schemes[0][1], names)) \
+                .replace("__PICKER__", _picker(schemes, scheme_data, hands)) \
+                .replace("__LEGEND__", first["legend"]) \
                 .replace("__PAYLOAD__", json.dumps(payload))
 
     out_path = Path(out) if out else embeddings.with_suffix(".review.html")
@@ -242,9 +309,20 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  body{font:15px/1.6 system-ui,sans-serif;margin:0;padding:18px;background:#fbfaf7;color:#1a1a1a}
  h1{font-size:20px;margin:0 0 2px} .sub{opacity:.7;margin-bottom:14px;font-size:13px}
  .wrap{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
- #map{background:#fff;border:1px solid #0002;border-radius:10px;position:sticky;top:12px}
- .dot{fill:#4c78a8;fill-opacity:.75;transition:fill-opacity .15s}
- .dot.unl{fill:#b9bcc0;fill-opacity:.5}
+ .mapcol{position:sticky;top:12px}
+ #map{background:#fff;border:1px solid #0002;border-radius:10px;display:block}
+ .dot{fill-opacity:.8;stroke:#0003;stroke-width:.5;transition:fill-opacity .15s}
+ .legend{max-width:620px;display:flex;flex-wrap:wrap;gap:3px 12px;margin-top:8px;
+   font-size:12px;max-height:132px;overflow:auto}
+ .lg{white-space:nowrap;opacity:.9}
+ .lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;
+   vertical-align:baseline;position:relative}
+ .lg i.xm::after{content:"×";position:absolute;inset:-1px 0 0 0;color:#2f3336;
+   font-size:11px;line-height:10px;text-align:center;font-weight:700}
+ .lg b{opacity:.55;font-weight:500} .more{opacity:.6;font-style:italic}
+ .lg.unl.off{opacity:.3;text-decoration:line-through}
+ .ctl{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px}
+ .ctl label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
  svg.dim .dot{fill-opacity:.06}
  svg.dim .dot.hot{fill-opacity:1;fill:#d1495b}
  svg.dim .dot.warm{fill-opacity:.85;fill:#2a9d8f}
@@ -287,7 +365,11 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   <span class="sub" id="tally"></span>
 </div>
 <div class="wrap">
-  __SVG__
+  <div class="mapcol">
+    <div class="ctl">__PICKER__</div>
+    __SVG__
+    <div class="legend" id="legend">__LEGEND__</div>
+  </div>
   <div class="panel" id="panel"></div>
 </div>
 <p class="sub">Hover a suggestion to see which charters it is about. Click it to
@@ -296,6 +378,27 @@ your answers only leave with the download button.</p>
 <script>
 var D = __PAYLOAD__, decisions = {}, svg = document.getElementById('map');
 var dots = svg.querySelectorAll('.dot');
+var active = D.first;
+function paint(name){
+  var sc = D.schemes[name]; if(!sc) return;
+  active = name;
+  for(var i=0;i<dots.length;i++){
+    dots[i].setAttribute('fill', sc.colors[+dots[i].getAttribute('data-i')]);
+  }
+  document.getElementById('legend').innerHTML = sc.legend;
+  syncUnl();
+}
+var picker = document.getElementById('scheme');
+if(picker) picker.addEventListener('change', function(){ paint(picker.value); });
+var unl = document.getElementById('unl');
+function syncUnl(){
+  if(!unl) return;
+  var vis = unl.checked, pts = svg.querySelectorAll('[data-unl]');
+  for(var i=0;i<pts.length;i++) pts[i].style.display = vis ? '' : 'none';
+  var keys = document.querySelectorAll('.lg.unl');
+  for(var j=0;j<keys.length;j++) keys[j].classList.toggle('off', !vis);
+}
+if(unl) unl.addEventListener('change', syncUnl);
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function light(row){
   svg.classList.add('dim');
