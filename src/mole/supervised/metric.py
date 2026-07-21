@@ -147,6 +147,13 @@ def train_head(cache, *, holdout_hands: set[str],
     dev = torch.device(device) if device else torch.device("cpu")
     in_dim = cache.dim
 
+    # `seed` must cover the WEIGHTS too, not just the sampler and the split:
+    # build_head draws from torch's global RNG, so without this two runs of the
+    # same config differ, and results depend on whatever ran earlier in the
+    # process (which is how the test suite caught it — passing alone, failing in
+    # company).
+    torch.manual_seed(seed)
+
     holdout_hands = set(holdout_hands)
     exclude_hands = set(exclude_hands)
     all_hands = {h for h in cache.window_hand if h}

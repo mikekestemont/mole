@@ -24,14 +24,16 @@ from mole.supervised.docmetric import (
 )
 
 
-def _corpus(seed=0, archives=("a", "b", "c"), hands_per=30, docs_per=4,
+def _corpus(seed=0, archives=("a", "b", "c", "d", "e"), hands_per=30, docs_per=4,
             sig=8, noise=60):
     """Writer signal in `sig` shared dims, swamped by high-variance nuisance.
 
-    `hands_per` is deliberately realistic (90 hands => 60 per training fold, 12
-    for validation). An earlier 6-hand version left a 2-hand validation slice, so
-    model selection was noise and the method looked broken — the corpus was, not
-    the method. Sample size is part of the contract here.
+    The size is deliberately realistic (150 hands => 120 per training fold, 24
+    for validation; the real pool has 175 and 140). An earlier 6-hand version left
+    a 2-hand validation slice, so model selection was noise and the method looked
+    broken — the corpus was, not the method. The margin over the whitening control
+    grows with training hands (+0.05 at 60, +0.16 at 140), so sample size is part
+    of the contract, not an incidental detail.
     """
     rng = np.random.default_rng(seed)
     dim = sig + noise
