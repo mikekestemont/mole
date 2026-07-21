@@ -366,6 +366,30 @@ def _load(embeddings: str | Path):
     return X, meta, rows
 
 
+def document_table(embeddings: str | Path):
+    """``(X, meta, rows, names, paths, hands, docs)`` for one embedding file.
+
+    Hands and doc ids are namespaced by dataset folder. Shared with the renderer
+    so the picture and the lists can never disagree about what a row is.
+    """
+    from mole.data.datasets import load_labels
+    from mole.data.docids import doc_id_resolver
+
+    X, meta, rows = _load(embeddings)
+    paths = [Path(r["image"]) for r in rows]
+    names = [p.name for p in paths]
+    cache: dict[Path, tuple] = {}
+    hands, docs = [], []
+    for p in paths:
+        if p.parent not in cache:
+            cache[p.parent] = (load_labels(p.parent), doc_id_resolver(p.parent))
+        table, resolve = cache[p.parent]
+        raw = table.hand_by_filename.get(p.name)
+        hands.append(f"{p.parent.name}/{raw}" if raw else "")
+        docs.append(f"{p.parent.name}/{resolve(p.name)}")
+    return X, meta, rows, names, paths, hands, docs
+
+
 def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
                  limit: int = 100, seed: int = 0) -> ReviewReport:
     """Build every suggestion list for one embedding file.
@@ -375,25 +399,8 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
     exists. ``limit`` caps each list — these are for human review, and a list
     nobody can finish reading is a list nobody reads.
     """
-    from mole.data.datasets import load_labels
-    from mole.data.docids import doc_id_resolver
-
-    X, meta, rows = _load(embeddings)
-    names = [Path(r["image"]).name for r in rows]
-    parents = [Path(r["image"]).parent for r in rows]
-
-    label_cache: dict[Path, object] = {}
-    doc_cache: dict[Path, object] = {}
-    hand_of: list[str] = []
-    doc_ids: list[str] = []
-    for name, parent in zip(names, parents):
-        if parent not in label_cache:
-            label_cache[parent] = load_labels(parent)
-            doc_cache[parent] = doc_id_resolver(parent)
-        hand = label_cache[parent].hand_by_filename.get(name) or ""
-        hand_of.append(hand)
-        # namespaced by folder so two archives never share a doc id
-        doc_ids.append(f"{parent.name}/{doc_cache[parent](name)}")
+    X, meta, rows, names, paths, hand_of, doc_ids = document_table(embeddings)
+    parents = [p.parent for p in paths]
 
     hand_of_arr = np.asarray(hand_of, dtype=object)
     doc_arr = np.asarray(doc_ids, dtype=object)

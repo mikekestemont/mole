@@ -81,24 +81,26 @@ def test_every_list_surfaces_its_planted_case(tmp_path):
     assert r.n_hands == 5                       # A, B, TWIN1, TWIN2, SPLITME
     assert r.n_documents == 28
 
-    # 1. the unlabeled document drawn from A is attributed to A
+    # 1. the unlabeled document drawn from A is attributed to A.
+    # Hands are namespaced by dataset folder, so two archives' hand "A" can never
+    # collide into a false positive (same rule as mole.supervised.datasets).
     top = next(a for a in r.attributions if a["document"] == "UNL_1.png")
-    assert top["hand"] == "A"
+    assert top["hand"] == "arch1/A"
 
     # 2. the two labels sharing one generator top the merge list
     m = r.merges[0]
-    assert {m["hand_a"], m["hand_b"]} == {"TWIN1", "TWIN2"}
+    assert {m["hand_a"], m["hand_b"]} == {"arch1/TWIN1", "arch1/TWIN2"}
     assert m["closeness"] > -0.05               # as alike as each is to itself
 
     # 3. the label spanning two clouds tops the split list
-    assert r.splits[0]["hand"] == "SPLITME"
+    assert r.splits[0]["hand"] == "arch1/SPLITME"
     assert r.splits[0]["percentile"] >= 90      # sharper than 90% of random splits
     groups = (set(r.splits[0]["group_a"]), set(r.splits[0]["group_b"]))
     assert any(g == {"S10_1.png", "S11_1.png", "S12_1.png"} for g in groups)
 
     # 4. the mislabeled document tops the doubts list, pointing at B
     d = r.doubts[0]
-    assert d["document"] == "MIS_1.png" and d["closer_hand"] == "B"
+    assert d["document"] == "MIS_1.png" and d["closer_hand"] == "arch1/B"
 
     # 5. the duplicated charter is found, and known siblings are not
     assert r.duplicates

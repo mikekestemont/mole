@@ -438,6 +438,46 @@ def eval_compare(
             pairs, section=section, n_boot=n_boot, seed=seed)))
 
 
+# ------------------------------------------------------------------------ review
+@app.command()
+def review(
+    embeddings: Path = typer.Argument(..., help="Embeddings .npy (its .mapping.json is read too)."),
+    out: Optional[Path] = typer.Option(None, help="Output HTML (default: <embeddings>.review.html)."),
+    clusters: Optional[Path] = typer.Option(
+        None, "--clusters", help="A `mole cluster` report, for the 'possible new hand' list."),
+    limit: int = typer.Option(25, help="Suggestions per list (drives the file size)."),
+    max_mb: float = typer.Option(
+        10.0, "--max-mb", help="Cap the finished file so it survives an email attachment "
+                               "limit; 0 = no cap. Images are added most-important-first "
+                               "until it is reached."),
+    image_cache: Optional[Path] = typer.Option(
+        None, "--image-cache", help="Reuse encoded pages between builds. A BUILD-TIME "
+                                    "artifact only — it never travels with the report."),
+    image_url: Optional[str] = typer.Option(
+        None, "--image-url", help="Link template for the full-resolution scan, e.g. "
+                                  "'https://archive.example/{filename}'. Defaults to local "
+                                  "file:// links."),
+    images: bool = typer.Option(True, "--images/--no-images", help="Embed the charter images."),
+    method: str = typer.Option("auto", help="2D projection: auto | pca | tsne | umap."),
+    seed: int = typer.Option(0, help="Projection and split seed."),
+) -> None:
+    """Build a self-contained label-review sheet for a partially labeled archive.
+
+    Six ranked lists — attributions, doubtful labels, hands that may merge, hands
+    that may split, possible new hands, duplicates — beside a map of the archive,
+    with the actual handwriting inline. Written for a colleague with no software:
+    one HTML file, no folder beside it, nothing installed. It never writes
+    labels.csv; decisions leave as a CSV the user downloads.
+    """
+    from mole.review.render import render_review
+
+    path, summary = render_review(
+        embeddings, out=out, clusters=clusters, limit=limit, max_mb=max_mb,
+        image_cache=image_cache, image_url=image_url, images=images,
+        method=method, seed=seed)
+    console.print(f"[green]✓ review sheet → {path}[/green]\n  {summary}")
+
+
 # ---------------------------------------------------------------------- sup
 @sup_app.command("cache")
 def sup_cache(
