@@ -134,3 +134,10 @@ def test_load_rejects_mixed_codebooks(tmp_path):
 
     with pytest.raises(ValueError, match="codebook"):
         load_archive_vectors([tmp_path / "x.npy", tmp_path / "y.npy"])
+
+
+def test_missing_sidecar_names_the_likely_cause(tmp_path):
+    """A bare *.npy glob picks up mole embed's codebook artifacts — say so."""
+    np.save(tmp_path / "a.codebook.npy", np.zeros((4, 8), np.float32))
+    with pytest.raises(ValueError, match="codebook"):
+        load_archive_vectors([tmp_path / "a.codebook.npy"])

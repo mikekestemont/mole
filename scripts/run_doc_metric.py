@@ -54,7 +54,17 @@ def main() -> None:
     from mole.supervised.docmetric import (
         PCAWhiten, archive_macro_map, fit_doc_metric, load_archive_vectors)
 
-    X, names, hands, docs, archives = load_archive_vectors(args.embeddings)
+    # `mole embed` drops artifacts beside its output, and a bare *.npy glob picks
+    # them up; they are not embeddings and have no mapping sidecar.
+    ARTIFACTS = (".codebook.npy", ".whiten.npy")
+    paths = [p for p in args.embeddings if not p.name.endswith(ARTIFACTS)]
+    if len(paths) != len(args.embeddings):
+        dropped = [p.name for p in args.embeddings if p.name.endswith(ARTIFACTS)]
+        print(f"  (ignoring {len(dropped)} embed artifact(s): {', '.join(dropped)})")
+    if not paths:
+        sys.exit("no embedding files left after dropping embed artifacts")
+
+    X, names, hands, docs, archives = load_archive_vectors(paths)
     order = sorted(set(archives.tolist()))
     print(f"{len(X):,} documents × {X.shape[1]:,} dims across {len(order)} archives "
           f"({int(sum(1 for h in hands if h)):,} labeled)\n")

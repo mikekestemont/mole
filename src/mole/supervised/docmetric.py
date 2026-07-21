@@ -123,8 +123,15 @@ def load_archive_vectors(paths: list[str | Path]):
     for p in paths:
         npy = Path(p)
         npy = npy if npy.suffix == ".npy" else npy.with_suffix(".npy")
+        sidecar = npy.with_suffix(".mapping.json")
+        if not sidecar.is_file():
+            raise ValueError(
+                f"{npy} has no {sidecar.name} sidecar, so its rows cannot be tied "
+                "to images. If this is a `mole embed` artifact rather than an "
+                "embedding (e.g. *.codebook.npy), drop it from the argument list — "
+                "a bare *.npy glob picks those up too.")
         X = np.load(npy)
-        meta = json.loads(npy.with_suffix(".mapping.json").read_text())
+        meta = json.loads(sidecar.read_text())
         rows = meta["rows"]
         if len(rows) != len(X):
             raise ValueError(f"{npy}: {len(rows)} rows vs {len(X)} vectors")
