@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -354,6 +355,179 @@ def _load_head(head_path: str | Path, model_id: str):
         return (desc @ W.T + b).astype(np.float32)
 
     return project, out_dim, head_id
+
+
+class _Reservoir:
+    """Fixed-memory uniform sample of a descriptor stream (Vitter's Algorithm R).
+
+    The corpus codebook has to be fitted over descriptors that do not fit in RAM:
+    5 charter archives are ~17.8M x 384 float32 = ~27 GB, and ``_assemble`` would
+    hold that twice (the per-page list plus its ``vstack``). A reservoir keeps a
+    uniform sample of exactly ``capacity`` descriptors while the stream is consumed,
+    so peak memory is ``capacity * dim * 4`` bytes REGARDLESS of corpus size — the
+    property the growing index needs.
+
+    Every retained descriptor is uniformly sampled from all descriptors seen, so the
+    fit is unbiased across archives without any per-archive quota. (Blocks are applied
+    vectorised; when two items in one block draw the same slot the later write wins,
+    which leaves the sample uniform.)
+    """
+
+    def __init__(self, capacity: int, dim: int, seed: int = 0):
+        self.capacity = int(capacity)
+        self.buf = np.empty((self.capacity, dim), dtype=np.float32)
+        self.filled = 0
+        self.seen = 0
+        self._rng = np.random.default_rng(seed)
+
+    def add(self, block: np.ndarray) -> None:
+        if block.size == 0:
+            return
+        if self.filled < self.capacity:                  # phase 1: fill the reservoir
+            take = min(len(block), self.capacity - self.filled)
+            self.buf[self.filled:self.filled + take] = block[:take]
+            self.filled += take
+            self.seen += take
+            block = block[take:]
+            if len(block) == 0:
+                return
+        idx = self.seen + np.arange(len(block))           # phase 2: replace with p=cap/(i+1)
+        slot = self._rng.integers(0, idx + 1)
+        hit = slot < self.capacity
+        if hit.any():
+            self.buf[slot[hit]] = block[hit]
+        self.seen += len(block)
+
+    @property
+    def sample(self) -> np.ndarray:
+        return self.buf[:self.filled]
+
+
+def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path],
+                        out: str | Path, *, clusters: int = 100,
+                        max_descriptors: int = 4_000_000,
+                        overrides: list[str] | None = None, batch_size: int = 32,
+                        seed: int = 0, device: str | None = None,
+                        head: str | Path | None = None,
+                        foreground: bool = True, foreground_threshold: float | None = None,
+                        foreground_method: str = "contrast",
+                        window_foreground: bool = False,
+                        window_foreground_threshold: float = 0.025,
+                        invert: bool | None = None) -> dict:
+    """Fit ONE VLAD codebook over several datasets, in bounded memory.
+
+    This is the index primitive: fit a codebook once over a pooled corpus, freeze it,
+    then encode every archive against it with ``mole embed --codebook-from`` so all
+    archives share one comparable space and new documents can be added incrementally.
+
+    Descriptors are streamed page by page into a :class:`_Reservoir`, so RAM is capped
+    by ``max_descriptors`` instead of by corpus size. Geometry/foreground/invert are
+    resolved exactly as in :func:`embed`, so a codebook cannot drift from the
+    descriptors it will be applied to. Writes ``out`` (the ``[K, dim]`` codebook) plus
+    ``<out>.json`` recording the provenance a frozen production codebook needs.
+    """
+    import torch
+
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    dirs = [Path(d) for d in input_dirs]
+    if not dirs:
+        raise ValueError("fit_corpus_codebook needs at least one dataset directory")
+
+    dev = torch.device(device) if device else _pick_device()
+    model, meta = load_backbone(checkpoint, map_location=str(dev))
+
+    if foreground_threshold is None:
+        if foreground_method == "raven":
+            foreground_threshold = 10.0 / float(meta["patch_size"] ** 2)
+        else:
+            foreground_threshold = 0.05 if foreground_method == "contrast" else 0.02
+
+    project_head, head_id = None, None
+    pool_dim = meta["embed_dim"]
+    if head is not None:
+        project_head, pool_dim, head_id = _load_head(head, meta["model_id"])
+
+    settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
+                "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
+                "batch_size": batch_size}
+    if invert is not None:
+        settings["invert"] = invert
+    for ov in overrides or []:
+        if "=" not in ov:
+            raise ValueError(f"--set expects key=value, got {ov!r}")
+        key, raw = ov.split("=", 1)
+        key = key.strip().removeprefix("data.")
+        if key not in _OVERRIDABLE:
+            raise KeyError(f"embed override {key!r} not in {sorted(_OVERRIDABLE)}")
+        settings[key] = _OVERRIDABLE[key](raw)
+
+    pages: list = []
+    per_dataset: dict[str, int] = {}
+    for d in dirs:
+        p = _page_index(d, settings["window_size"], settings["overlap"], settings["use_zones"])
+        per_dataset[d.name] = len(p)
+        pages.extend(p)
+
+    transform = _build_transform(meta["model_size"])
+    nct = meta["num_class_tokens"]
+    reservoir = _Reservoir(max_descriptors, pool_dim, seed=seed)
+
+    fg_note = (f" foreground[{foreground_method}>{foreground_threshold:g}]" if foreground else "")
+    inv_note = " inverted" if settings["invert"] else ""
+    cap_gb = max_descriptors * pool_dim * 4 / 1e9
+    print(f"[mole] codebook fit: model={meta['model_id']} dim={pool_dim}{fg_note}{inv_note} "
+          f"device={dev} | {len(pages)} pages from {len(dirs)} dataset(s)")
+    print(f"[mole] reservoir cap {max_descriptors:,} descriptors (~{cap_gb:.1f} GB peak)")
+
+    for img, wins in track(pages, "Scanning pages", unit="page"):
+        page = load_rgb(img, invert=settings["invert"])
+        crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
+        if window_foreground and crops:
+            keep_win = _window_foreground_mask(crops, window_foreground_threshold,
+                                               method=foreground_method)
+            crops = [c for c, k in zip(crops, keep_win.tolist()) if k]
+        if not crops:
+            continue
+        tokens = _page_tokens(model, crops, dev, settings["batch_size"])
+        patches = patch_descriptors(tokens, nct)
+        if foreground:
+            keep = _foreground_mask(crops, meta["patch_size"], foreground_threshold,
+                                    method=foreground_method)
+            desc = patches[keep].reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
+        else:
+            desc = patches.reshape(-1, meta["embed_dim"]).numpy().astype(np.float32)
+        if project_head is not None:
+            desc = project_head(desc)
+        reservoir.add(desc)
+
+    if reservoir.filled == 0:
+        raise RuntimeError(f"no foreground descriptors found under {[str(d) for d in dirs]}")
+
+    import time
+
+    print(f"[mole] VLAD: fitting {clusters}-cluster codebook on {reservoir.filled:,} of "
+          f"{reservoir.seen:,} descriptors (seed {seed})…", flush=True)
+    t0 = time.perf_counter()
+    codebook = _vlad.fit_codebook(reservoir.sample, n_clusters=clusters, seed=seed)
+    print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    np.save(out, codebook)
+    provenance = {
+        "codebook": str(out), "clusters": int(codebook.shape[0]), "dim": int(codebook.shape[1]),
+        "model_id": meta["model_id"], "checkpoint": str(checkpoint),
+        "datasets": [str(d) for d in dirs], "pages_per_dataset": per_dataset,
+        "n_pages": len(pages), "descriptors_seen": int(reservoir.seen),
+        "descriptors_sampled": int(reservoir.filled), "max_descriptors": int(max_descriptors),
+        "seed": seed, "geometry": {k: settings[k] for k in ("window_size", "overlap", "use_zones")},
+        "invert": bool(settings["invert"]),
+        "foreground": bool(foreground), "foreground_method": foreground_method,
+        "foreground_threshold": float(foreground_threshold),
+        "window_foreground": bool(window_foreground),
+        "head": str(head) if head else None, "head_id": head_id,
+    }
+    Path(str(out) + ".json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
+    return provenance
 
 
 def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,

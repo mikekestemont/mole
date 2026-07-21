@@ -282,6 +282,54 @@ def embed(
            whiten_from=whiten_from)
 
 
+# ----------------------------------------------------------------------- codebook
+@app.command()
+def codebook(
+    checkpoint: Path = typer.Argument(..., help="Model checkpoint the descriptors come from."),
+    datasets: list[Path] = typer.Argument(..., help="One or more dataset dirs to pool over."),
+    out: Path = typer.Option(..., "--out", help="Codebook path (.npy); provenance → <out>.json."),
+    clusters: int = typer.Option(100, "--clusters", help="VLAD codebook size K."),
+    max_descriptors: int = typer.Option(
+        4_000_000, "--max-descriptors",
+        help="Reservoir capacity: caps PEAK RAM (K*dim*4 bytes) regardless of corpus size."),
+    batch_size: int = typer.Option(32, help="Windows per forward pass."),
+    seed: int = typer.Option(0, help="Seed for the reservoir sample and k-means."),
+    device: Optional[str] = typer.Option(None, help="cuda | mps | cpu (default: auto)."),
+    head: Optional[Path] = typer.Option(None, "--head", help="Apply a trained Tier-1 head first."),
+    foreground: bool = typer.Option(True, "--foreground/--no-foreground",
+                                    help="Keep only foreground patch tokens."),
+    foreground_threshold: Optional[float] = typer.Option(None, help="Override the fg threshold."),
+    foreground_method: str = typer.Option("contrast", help="contrast | intensity | raven."),
+    window_foreground: bool = typer.Option(False, "--window-foreground/--no-window-foreground",
+                                           help="Drop near-blank windows before the ViT."),
+    window_foreground_threshold: float = typer.Option(0.025, help="Window foreground floor."),
+    invert: Optional[bool] = typer.Option(None, "--invert/--no-invert",
+                                          help="Override the checkpoint's polarity."),
+    set_: Optional[list[str]] = typer.Option(
+        None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0."),
+) -> None:
+    """Fit ONE VLAD codebook over several datasets, in bounded memory.
+
+    The index primitive: fit once over a pooled corpus, freeze, then encode every
+    archive with `mole embed --codebook-from <out>` so all archives share one
+    comparable space. Descriptors are streamed into a reservoir, so peak RAM is set
+    by --max-descriptors, not by corpus size.
+    """
+    from mole.embed import fit_corpus_codebook
+
+    prov = fit_corpus_codebook(
+        checkpoint, datasets, out, clusters=clusters, max_descriptors=max_descriptors,
+        overrides=set_, batch_size=batch_size, seed=seed, device=device, head=head,
+        foreground=foreground, foreground_threshold=foreground_threshold,
+        foreground_method=foreground_method, window_foreground=window_foreground,
+        window_foreground_threshold=window_foreground_threshold, invert=invert)
+    console.print(
+        f"[green]✓ {prov['clusters']}-cluster codebook → {out}[/green]\n"
+        f"  sampled {prov['descriptors_sampled']:,} of {prov['descriptors_seen']:,} descriptors "
+        f"from {prov['n_pages']} pages / {len(prov['datasets'])} dataset(s)\n"
+        f"  provenance → {out}.json")
+
+
 # ---------------------------------------------------------------------------- viz
 @app.command()
 def viz(

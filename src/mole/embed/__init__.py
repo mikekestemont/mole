@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mole.embed.extract import embed, load_backbone
+from mole.embed.extract import embed, fit_corpus_codebook, load_backbone
 from mole.embed.pooling import Pooling
 
-__all__ = ["Pooling", "embed", "load_backbone"]
+__all__ = ["Pooling", "embed", "fit_corpus_codebook", "load_backbone"]
