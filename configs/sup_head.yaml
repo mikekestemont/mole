@@ -24,3 +24,9 @@ sup:
     docs_per_hand: 2
     windows_per_doc: 4
     same_archive_frac: 0.5   # force within-archive negatives (risk R1)
+    # Batches per epoch. The sampler's own default covers each anchor hand ONCE
+    # (~150 train hands / 16 = ~9 batches), i.e. only ~270 optimiser steps over 30
+    # epochs — too few to fit even a linear head. 100 batches = ~3000 steps ≈ 5
+    # passes over the labeled cache, still seconds/epoch on CPU. Raise `epochs` if
+    # report.json shows best_epoch at the end (still climbing).
+    batches_per_epoch: 100

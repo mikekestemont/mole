@@ -108,6 +108,48 @@ def test_train_head_improves_held_out_hands():
     assert holdout.isdisjoint(report["train_hands"])
 
 
+def test_cache_labeled_only_skips_the_unlabeled_pool(tmp_path):
+    ck = _tiny_checkpoint(tmp_path)
+    ds = tmp_path / "arch1"
+    ds.mkdir()
+    rng = np.random.default_rng(0)
+    for n in ["a_1.png", "a_2.png", "unlabeled_1.png"]:
+        Image.fromarray((rng.random((260, 260, 3)) * 255).astype("uint8")).save(ds / n)
+    (ds / "labels.csv").write_text("filename,hand_id\na_1.png,A\na_2.png,A\n")
+
+    index = load_labeled_pairs(ds)
+    assert len(index.unlabeled) == 1
+    full = build_feature_cache(ck, index, tmp_path / "c_full", window_size=224,
+                               overlap=0.0, invert=False, batch_size=8, progress=False)
+    lean = build_feature_cache(ck, index, tmp_path / "c_lean", window_size=224,
+                               overlap=0.0, invert=False, batch_size=8, progress=False,
+                               include_unlabeled=False)
+    assert "" in full.window_hand                 # the unlabeled window is there
+    assert "" not in lean.window_hand             # ... and skipped when asked
+    assert lean.n_windows < full.n_windows
+    assert lean.meta["include_unlabeled"] is False
+
+
+def test_shipped_config_sampler_keys_reach_the_sampler():
+    """configs/sup_head.yaml `sup.sampler` is splatted into HandBatchSampler.
+
+    A typo there would only raise on the server, AFTER the one GPU cache pass —
+    so check the contract here instead.
+    """
+    import inspect
+    from pathlib import Path
+
+    from mole.config import load_config
+    from mole.supervised.datasets import HandBatchSampler
+    from mole.supervised.metric import _SUP_DEFAULTS
+
+    cfg_path = Path(__file__).resolve().parents[1] / "configs" / "sup_head.yaml"
+    sup = load_config(cfg_path)["sup"]
+    assert set(sup) <= set(_SUP_DEFAULTS), "unknown sup.* key would be silently ignored"
+    accepted = set(inspect.signature(HandBatchSampler.__init__).parameters) - {"self", "cache"}
+    assert set(sup["sampler"]) <= accepted, "sampler key HandBatchSampler would reject"
+
+
 def test_build_head_shapes():
     lin = build_head("linear", 384, 128)
     assert lin(torch.zeros(5, 384)).shape == (5, 128)

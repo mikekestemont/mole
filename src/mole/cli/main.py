@@ -431,6 +431,12 @@ def sup_cache(
     invert: bool = typer.Option(True, help="Invert intensity (raven wants white-on-black)."),
     fg_method: str = typer.Option("contrast", help="Foreground filter: contrast | raven | intensity."),
     batch_size: int = typer.Option(32, help="Window forward batch size."),
+    include_unlabeled: bool = typer.Option(
+        True, "--include-unlabeled/--labeled-only",
+        help="Also cache the unlabeled pool (for the later `suggest` path). "
+             "--labeled-only skips it: roughly halves this GPU pass and costs the "
+             "head trainer nothing (unlabeled windows are never sampled)."),
+    device: Optional[str] = typer.Option(None, help="cuda | mps | cpu (default: auto)."),
 ) -> None:
     """Cache one frozen-backbone descriptor per window (the one GPU pass)."""
     from mole.supervised.datasets import build_feature_cache, load_labeled_pairs
@@ -439,7 +445,8 @@ def sup_cache(
     console.print(f"[cyan]{index.stats()}[/cyan]")
     build_feature_cache(checkpoint, index, cache_dir, window_size=window_size,
                         overlap=overlap, invert=invert, fg_method=fg_method,
-                        batch_size=batch_size)
+                        batch_size=batch_size, device=device,
+                        include_unlabeled=include_unlabeled)
 
 
 @sup_app.command("train")

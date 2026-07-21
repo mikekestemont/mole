@@ -407,6 +407,7 @@ def build_feature_cache(checkpoint: str | Path, index: SupervisedIndex,
                         overlap: float = 0.0, invert: bool = True,
                         fg_method: str = "contrast", fg_threshold: float | None = None,
                         batch_size: int = 32, device: str | None = None,
+                        include_unlabeled: bool = True,
                         progress: bool = True) -> FeatureCache:
     """Cache one frozen-backbone descriptor per window for every image in ``index``.
 
@@ -415,8 +416,11 @@ def build_feature_cache(checkpoint: str | Path, index: SupervisedIndex,
     only new step is collapsing each window's foreground patch tokens to their
     mean (:func:`window_descriptors`). Labeled items carry their namespaced
     hand/doc; the unlabeled pool is cached too (hand/doc ``""``) for the later
-    ``suggest`` path. Writes ``cache.npy`` + ``cache.index.json`` under ``out_dir``.
-    This is the one GPU pass of the supervised pipeline; everything after is CPU.
+    ``suggest`` path — set ``include_unlabeled=False`` to skip it, which on a
+    partially-labeled pool roughly halves this pass and costs the head trainer
+    nothing (:class:`HandBatchSampler` never draws unlabeled windows). Writes
+    ``cache.npy`` + ``cache.index.json`` under ``out_dir``. This is the one GPU
+    pass of the supervised pipeline; everything after is CPU.
     """
     import torch
     from PIL import Image, ImageFile
@@ -437,7 +441,8 @@ def build_feature_cache(checkpoint: str | Path, index: SupervisedIndex,
     transform = _build_transform(meta["model_size"])
 
     entries = [(it.path, it.archive, it.hand, it.doc) for it in index.items]
-    entries += [(p, a, "", "") for (a, p) in index.unlabeled]
+    if include_unlabeled:
+        entries += [(p, a, "", "") for (a, p) in index.unlabeled]
 
     descs: list[np.ndarray] = []
     w_hand: list[str] = []
@@ -472,6 +477,7 @@ def build_feature_cache(checkpoint: str | Path, index: SupervisedIndex,
               "window_size": int(window_size), "overlap": float(overlap),
               "invert": bool(invert), "fg_method": fg_method,
               "fg_threshold": float(fg_threshold),
+              "include_unlabeled": bool(include_unlabeled),
               "base_checkpoint": str(checkpoint)})
     cache.save(out_dir)
     print(f"[mole] ✓ feature cache: {cache.n_windows:,} windows × {dim} → {out_dir}")

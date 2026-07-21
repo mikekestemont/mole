@@ -152,7 +152,7 @@ def train_head(cache, *, holdout_hands: set[str], out_dim: int = 128,
     X = torch.from_numpy(train_cache.descriptors).to(dev)
     sampler = HandBatchSampler(train_cache, seed=seed, **(sampler_cfg or {}))
 
-    best_macro, best_state, history = -1.0, None, []
+    best_macro, best_epoch, best_state, history = -1.0, -1, None, []
     from mole.progress import track
     for ep in track(range(epochs), "Training head", unit="epoch", disable=not progress):
         head.train()
@@ -172,13 +172,15 @@ def train_head(cache, *, holdout_hands: set[str], out_dim: int = 128,
         history.append({"epoch": ep, "loss": float(np.mean(losses)) if losses else 0.0,
                         "holdout_macro": macro})
         if macro > best_macro:
-            best_macro = macro
+            best_macro, best_epoch = macro, ep
             best_state = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
 
     if best_state is not None:
         head.load_state_dict(best_state)
     report = {
-        "best_holdout_macro": best_macro, "in_dim": in_dim, "out_dim": out_dim,
+        # best_epoch near the last epoch = still climbing, raise `epochs`.
+        "best_holdout_macro": best_macro, "best_epoch": best_epoch,
+        "steps_per_epoch": len(sampler), "in_dim": in_dim, "out_dim": out_dim,
         "kind": kind, "temperature": temperature, "epochs": epochs, "seed": seed,
         "base_model_id": cache.meta.get("model_id"),
         "n_train_hands": len(train_hands), "n_holdout_hands": len(holdout_hands),
@@ -227,7 +229,11 @@ def train_metric(config_path: str | Path, base_checkpoint: str | Path,
         cache = FeatureCache.load(cache_dir)
         print(f"[mole] reusing feature cache at {cache_dir} ({cache.n_windows:,} windows)")
     else:
-        cache = build_feature_cache(base_checkpoint, index, cache_dir)
+        # training never draws unlabeled windows, so don't pay for them here;
+        # `mole sup cache --include-unlabeled` builds the fuller cache the
+        # `suggest` path will want.
+        cache = build_feature_cache(base_checkpoint, index, cache_dir,
+                                    include_unlabeled=False)
 
     # freeze the split so every tier / rerun uses the identical held-out hands.
     _, hold = index.write_holdout_split(out / "split.json",
