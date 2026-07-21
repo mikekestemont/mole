@@ -5,6 +5,51 @@ executable plan; the handoff is the ground truth on findings and constraints.*
 
 ---
 
+## 0a. RESULTS — Phase 2 executed 2026-07-21 (read this before the plan below)
+
+Tier-1 v0 was built, run end-to-end on all five archives, and **fails in the deployed
+configuration**. Three negative results and one positive finding, all by leave-one-archive-out:
+
+| # | finding | evidence |
+|---|---|---|
+| **F1** | **Supervision DOES transfer across collections.** A head that never saw an archive — not its script, not its scribes, not its digitization — improves it. | LOAO, **mean pooling**: mean Δmacro **+0.0661**, CI [+0.0453, +0.0882], all 5 archives positive. Flanders **+0.105**, Leroy +0.081, Antwerp +0.077, Utrecht +0.038, Brackley +0.030. |
+| **F2** | **The aggregator destroys it.** Same heads, same folds, same documents — only the readout differs. | LOAO, **VLAD**: mean Δmacro **−0.0131**, CI [−0.0263, −0.0010], guardrail failed (Flanders −0.030, Utrecht −0.027). |
+| **F3** | **It cannot be recovered by a linear map on the aggregated descriptor.** Post-aggregation masked-SupCon on the VLAD document vector adds nothing over PCA-whitening. | `scripts/run_doc_metric.py` on `outputs/universal_full`: **Δ vs pca +0.0023**, beat the raw descriptor on 2 of 5 archives, mean Δ vs raw −0.0289. Whitening alone: −0.0313. |
+| **F4** | **The Tier-1 gain measured within an archive was archive-specific adaptation, not new geometry.** | Antwerp, same base checkpoint: **+0.0258** when the head had seen 10 other Antwerp hands; **−0.0039** when it had not. |
+
+**Mechanism (the explanation F1+F2 force).** The head is trained on *window descriptors* — the mean
+of a window's foreground tokens — which is exactly what mean pooling reads out and exactly what VLAD
+discards in favour of residuals to K centroids. The head is therefore free to collapse token-level
+mode structure in service of a better window mean, and under VLAD that is a net loss. Quantitatively
+it recovers a consistent **~40% of each archive's mean→VLAD gap** (Utrecht 17% the outlier): it
+reconstructs *part* of the multimodal information into the mean, and the rest is structure no single
+128-d average can hold. ⚠ Note that head+mean remains **below plain VLAD in absolute terms
+everywhere** (Antwerp 0.698 vs 0.817; Flanders 0.345 vs 0.511) — F1 is a finding, not a deployable
+configuration.
+
+**Consequence for the tier ladder.** F3 closes the cheap route. Together the three say the writer
+information VLAD retains is not linearly recoverable at document level, while what the head learns
+lives at a granularity VLAD discards before retrieval sees it ⇒ **the loss has to reach inside the
+aggregation**. That is a sharper argument for Tier 2 (differentiable VLAD) than §1's original
+trigger, which was about codebook *quality* — see §1. Cost is the obstacle: it needs a token-level
+cache (~17.8M descriptors, ~27 GB) and GPU training, so **Tier 3 remains the cheaper next shot** at
+the same target, and the backbone is where the leverage has always been (pooled SSL moved these
+archives +0.09..+0.13, an order of magnitude more than anything downstream of it).
+
+**Method changes that came out of this (both now in the code):**
+- **The §4.2 within-archive hand split is RETIRED in favour of leave-one-archive-out** — see §4.2.
+- `mole eval-compare A B [A2 B2 …]` takes N pairs and applies the §4.2 decision rule directly.
+- Three bugs worth remembering, each found by a check that nearly wasn't run: `train_head`'s `seed`
+  never covered the weights (results depended on execution order); `PCAWhiten`'s safe truncation
+  direction *flips* with the sample/dimension ratio, and a default derived from a fixture with
+  documents ≫ dimensions was catastrophic on real data with dimensions ≫ documents; and a
+  fit-once-slice-many sweep silently capped itself at the fitted rank.
+
+Companion deliverable, independent of any of the above: **`mole review`** (`REVIEW_PLAN.md`) — a
+self-contained review sheet for partially labeled archives.
+
+---
+
 ## 0. Recommended approach (summary)
 
 Build **Tier 1 first**: a frozen-backbone, **masked-SupCon projection head** trained at the
@@ -41,6 +86,14 @@ Trigger to un-park Tier 2 (Phase 6): after T1+T3, if VLAD-over-projected-descrip
 mean-over-projected by ≥0.05 macro (multimodality still doing heavy lifting) *and* the frozen pooled
 codebook loses ≥0.03 macro vs transductive on ≥2 archives — then learnable aggregation has headroom.
 Otherwise NetVLAD is complexity without a target.
+
+> **The trigger fired 2026-07-21, on a different criterion than the one written above.** This clause
+> asks whether the *codebook* is the bottleneck; the measured problem is that supervision cannot
+> reach the aggregation at all (§0a F1–F3). Learnable aggregation now has a target — the loss would
+> run through the soft assignment, so what is optimised is what retrieval ranks. It stays parked
+> anyway on **cost**, not merit: it needs a token-level cache (~17.8M descriptors / ~27 GB) and GPU
+> training, whereas Tier 3 attacks the same target with infrastructure that already exists. Revisit
+> if Tier 3 also plateaus.
 
 They compose: the Phase-5 deliverable is explicitly *Tier-3 backbone → re-cache features → retrain
 the Tier-1 head on top*. The head is ~minutes to retrain, so it rides along with every backbone.
@@ -289,6 +342,21 @@ archive; it is also the cleanest Tier-1-vs-baseline product comparison (same tes
    (10k resamples) CI on Δmacro + sign test. A lift is "real" iff CI excludes 0.
 
 ### 4.2 Protocol for every label-trained model
+
+> ⚠ **SUPERSEDED 2026-07-21 — the 80/20 within-archive hand split is retired.** Stratified over the
+> real pool it leaves **3 / 2 / 2 / 13 / 15 held-out hands** per archive (Antwerp / Brackley /
+> Flanders / Utrecht / Leroy), so a per-archive bootstrap CI is built from 2–3 numbers and cannot
+> exclude zero except by accident. It also selects the model on the very hands it then evaluates.
+>
+> **The primary protocol is now LEAVE-ONE-ARCHIVE-OUT** (`scripts/run_loao.sh`): the held-out
+> archive contributes nothing to training *or* model selection (selection uses a hand-slice of the
+> remaining archives, so train / select / test are disjoint), every one of its hands is therefore an
+> unseen class, and the result is read against that archive's familiar full-gallery macro-mAP with
+> no `--holdout-hands` restriction. Queries go from 69 to 450 on Antwerp, 11 to 266 on Flanders;
+> per-archive hand counts go from 2–15 to 9–75. It also answers the better question — *a new
+> collection arrives with no labels, does supervision help?* — which is the actual product claim.
+> The decision rule below is unchanged and is applied by `mole eval-compare` over the five folds.
+
 - Train on **train-hands only** (80%); the 20% held-out hands are *unseen classes*.
 - Report, per archive (own gallery, never pooled):
   (a) **held-out-hand macro-mAP** — queries = held-out-hand docs, gallery = full archive. The
@@ -304,6 +372,7 @@ archive; it is also the cleanest Tier-1-vs-baseline product comparison (same tes
 | tier | success | kill / rethink |
 |---|---|---|
 | Tier 1 v0 | mean held-out Δmacro ≥ +0.03 with CI>0; Flanders (most headroom, 0.385 base) ≥ +0.05; self-test precision@1 ≥ 0.6 at 50% coverage | Δ ≤ +0.01 everywhere → try v1 MLP@window; if that also flatlines, frozen features are the ceiling → weight shifts to Tier 3 |
+| ↳ **OUTCOME 2026-07-21** | **NOT MET — the kill condition is met and exceeded.** LOAO under VLAD: **−0.0131** (CI excludes 0), guardrail failed on Flanders and Utrecht. Not flat but negative. | Diagnosis went further than the plan anticipated: the ceiling is not "frozen features" but the train/deploy statistic mismatch (§0a). v1 MLP@window is **not** worth trying — it shapes the same discarded statistic. Weight shifts to Tier 3, with Tier 2 as the precise-but-expensive alternative. |
 | Tier 3 | mean held-out Δmacro ≥ +0.05 over the pooled-SSL baseline (same splits), guardrail: no archive regresses | supcon term collapses held-out macro while train-hand macro climbs → λ too big / over-collapse; halve λ, or stop at Tier 1 |
 | Tier 2 (if triggered) | ≥ +0.02 over the T3-backbone + frozen-pooled-codebook stack | anything less: discard, keep hard k-means |
 
@@ -327,11 +396,17 @@ first per-hand tables + Leroy thresholded-vs-full comparison; eyeball Flanders p
 `index.stats()` printout reviewed (retrievable hands per archive, N=2 census, positive/negative
 pair counts, same-archive fraction achieved).
 
-**Phase 2 — Tier-1 v0 end-to-end** *(GPU: one cache pass ~ embed-time; train: minutes, CPU/MPS ok)*
+**Phase 2 — Tier-1 v0 end-to-end** ✅ **DONE 2026-07-21 — NO-GO, see §0a**
 `mole sup cache` on the pooled dir (pinned base ckpt) → `mole sup train` (linear head, d=128) →
 `mole embed --head` on Antwerp + Flanders → §4.2 protocol. **Checkpoint:** held-out-hand Δmacro on
 Antwerp (sanity: strong base, expect small +) and Flanders (headroom: the real test), via
 `eval-compare`. Go/no-go against §4.3 before touching the other archives.
+> Executed on all five archives, not two, because the within-archive split could not support a
+> readable CI (§4.2). Cache: 79,139 labeled windows from 1,574 documents, one GPU pass
+> (`--labeled-only` skips the 1,818 unlabeled images nothing consumes). Head trains in ~20 s on CPU
+> and converges (best_epoch 21/30). Result: **−0.0131 under VLAD, +0.0661 under mean pooling.**
+> `scripts/sup_probe.py` gives the same read with no GPU at all, straight from the cache — run it
+> before paying for any embed pass.
 
 **Phase 3 — `mole suggest` + calibration + self-test** *(CPU)*
 §3 complete, including review.html. **Checkpoint:** masked-label recovery numbers on all 5 archives
@@ -339,8 +414,11 @@ Antwerp (sanity: strong base, expect small +) and Flanders (headroom: the real t
 Flanders suggestions in review.html. This phase is valuable even if Phase 2's Δ is modest — it
 ships the product on whatever the best current space is.
 
-**Phase 4 — Tier-1 v1 (conditional)** *(CPU)*
-Only if v0 plateaus: MLP head at window granularity; compare mean-of-projected-windows vs
+**Phase 4 — Tier-1 v1 (conditional)** ❌ **DO NOT BUILD — the premise is dead (§0a).**
+The condition was "v0 plateaus", i.e. frozen features are the ceiling. v0 did not plateau, it
+*regressed*, and the cause is the statistic it optimises rather than the capacity of the head. An MLP
+at window granularity shapes the same window-mean that VLAD discards, so it inherits the defect.
+~~Only if v0 plateaus: MLP head at window granularity;~~ compare mean-of-projected-windows vs
 VLAD-over-projected-windows. **Checkpoint:** same harness as Phase 2; also records the
 Tier-2-trigger measurement (§1).
 
