@@ -339,14 +339,39 @@ def viz(
     pca_dim: int = typer.Option(150, help="PCA pre-reduction dims before UMAP/t-SNE."),
     color: str = typer.Option("dataset", help="Colour points by: dataset|hand|none."),
     color_regex: Optional[str] = typer.Option(None, help=r"Colour by a filename capture group, e.g. '_(\d{4})-' for year."),
+    clusters: Optional[Path] = typer.Option(
+        None, "--clusters",
+        help="A `mole cluster` report (.clusters.json): adds a switchable colour scheme per FINCH level."),
     seed: int = typer.Option(0, help="Projection seed (reproducible)."),
 ) -> None:
     """Project an embeddings file to 2D and write an interactive HTML scatter."""
     from mole.viz import plot_embeddings
 
     out_path, used = plot_embeddings(embeddings, out=out, method=method, color=color,
-                                     color_regex=color_regex, seed=seed, pca_dim=pca_dim)
+                                     color_regex=color_regex, seed=seed, pca_dim=pca_dim,
+                                     clusters=clusters)
     console.print(f"[green]✓ {used} scatter → {out_path}[/green]")
+
+
+# ------------------------------------------------------------------------ cluster
+@app.command()
+def cluster(
+    embeddings: Path = typer.Argument(..., help="Embeddings .npy (its .mapping.json is read too)."),
+    metric: str = typer.Option("cosine", help="Neighbour metric: cosine | euclidean."),
+    out: Optional[Path] = typer.Option(None, help="Report path (default: <embeddings>.clusters.json)."),
+) -> None:
+    """Cluster documents with FINCH — parameter-free, no K to choose.
+
+    Returns a hierarchy of partitions (fine → coarse) and, where a labels.csv exists,
+    scores each level against that partial ground truth (purity / NMI / ARI over
+    labeled documents only). Feed the report to `mole viz --clusters` to flip between
+    discovered clusters and known hands on the same projection.
+    """
+    from mole.cluster.run import cluster_embeddings, format_report
+
+    report = cluster_embeddings(embeddings, out=out, metric=metric)
+    console.print(format_report(report))
+    console.print(f"[green]✓ report → {report['_path']}[/green]")
 
 
 # --------------------------------------------------------------------------- eval

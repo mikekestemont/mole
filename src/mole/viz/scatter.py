@@ -151,7 +151,36 @@ def _palette(n: int) -> list[str]:
 
 
 # -------------------------------------------------------------------------- html
-def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
+def _scheme_payload(cats: list[str]) -> dict:
+    """Colours + legend for one colouring of the points.
+
+    Unlabeled always takes grey so the categorical palette is spent on real
+    categories; the legend is capped because a FINCH level can have hundreds of
+    clusters and an uncapped legend would dwarf the plot.
+    """
+    uniq = sorted(set(cats), key=lambda c: (-cats.count(c), c))
+    labeled_uniq = [c for c in uniq if not _is_unlabeled(c)]
+    cmap = dict(zip(labeled_uniq, _palette(len(labeled_uniq))))
+    cmap.update({c: _UNLABELED_GREY for c in uniq if _is_unlabeled(c)})
+    show = uniq[:60]
+    legend = "".join(
+        f'<span class="lg{" unl" if _is_unlabeled(c) else ""}">'
+        f'<i class="{"xm" if _is_unlabeled(c) else ""}" style="background:{cmap[c]}"></i>'
+        f'{escape(str(c))} <b>{cats.count(c)}</b></span>' for c in show)
+    if len(uniq) > len(show):
+        legend += f'<span class="lg more">+{len(uniq) - len(show)} more…</span>'
+    return {"colors": [cmap[c] for c in cats], "cats": [str(c) for c in cats],
+            "legend": legend, "n_cats": len(uniq)}
+
+
+def _build_html(coords, schemes, rows, meta, method) -> str:
+    """``schemes`` is ``[(name, cats), ...]``; the first is shown initially.
+
+    Extra schemes (e.g. one per FINCH level) are switchable in the browser: the
+    circles' fill is repainted from a per-scheme colour array, so ground truth and
+    discovered clusters can be flipped in place on the SAME projection — which is the
+    only honest way to ask "do the clusters recover the known hands?".
+    """
     xs, ys = coords[:, 0].astype(float), coords[:, 1].astype(float)
 
     def norm(a):
@@ -162,46 +191,47 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
     pad = 44
     nx = norm(xs) * (W - 2 * pad) + pad
     ny = (1.0 - norm(ys)) * (H - 2 * pad) + pad          # SVG y grows downward
-    uniq = sorted(set(cats), key=lambda c: (-cats.count(c), c))
-    # Spend the categorical palette on real hands only; unlabeled always gets grey.
-    labeled_uniq = [c for c in uniq if not _is_unlabeled(c)]
-    cmap = dict(zip(labeled_uniq, _palette(len(labeled_uniq))))
-    cmap.update({c: _UNLABELED_GREY for c in uniq if _is_unlabeled(c)})
+
+    names = [n for n, _ in schemes]
+    payloads = {n: _scheme_payload(c) for n, c in schemes}
+    first = payloads[names[0]]
+    # "No ground truth" is a property of the DOCUMENT, not of the active colouring, so
+    # the cross marker is fixed to the hand labels (scheme 0) and stays put while the
+    # fill changes — under a cluster scheme an unlabeled point is still coloured by its
+    # cluster, which is exactly the attribution question ("which cluster did it join?").
+    base_cats = schemes[0][1]
 
     dots = []
-    for x, y, c, r in zip(nx, ny, cats, rows):
+    for i, (x, y, r) in enumerate(zip(nx, ny, rows)):
         name = escape(Path(r["image"]).name, quote=True)
-        dot = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{cmap[c]}" '
-               f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
-               f'data-name="{name}" data-cat="{escape(str(c), quote=True)}"/>')
-        if _is_unlabeled(c):
-            # Cross drawn over the disc; pointer-events:none so the circle stays the
-            # hover target. Wrapped in a <g> so the toggle hides disc + cross together.
+        dot = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{first["colors"][i]}" '
+               f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" data-i="{i}" '
+               f'data-name="{name}"/>')
+        if _is_unlabeled(base_cats[i]):
             a = 2.2
             dot = (f'<g data-unl="1">{dot}<path d="M{x - a:.1f} {y - a:.1f}L{x + a:.1f} {y + a:.1f}'
                    f'M{x - a:.1f} {y + a:.1f}L{x + a:.1f} {y - a:.1f}" stroke="{_UNLABELED_CROSS}" '
                    f'stroke-width="1.1" stroke-linecap="round" pointer-events="none"/></g>')
         dots.append(dot)
 
-    n_unlabeled = sum(1 for c in cats if _is_unlabeled(c))
-    show = uniq[:60]
-    legend = "".join(
-        f'<span class="lg{" unl" if _is_unlabeled(c) else ""}">'
-        f'<i class="{"xm" if _is_unlabeled(c) else ""}" style="background:{cmap[c]}"></i>'
-        f'{escape(str(c))} <b>{cats.count(c)}</b></span>' for c in show)
-    if len(uniq) > len(show):
-        legend += f'<span class="lg more">+{len(uniq) - len(show)} more…</span>'
+    n_unlabeled = sum(1 for c in base_cats if _is_unlabeled(c))
+    legend = first["legend"]
 
-    # Unlabeled documents usually dominate (e.g. 200/300 on brackley-set) and swamp the
-    # labelled structure, so offer to hide them. Only render the control if any exist.
     toggle = (f'<label class="tgl"><input type="checkbox" id="unl" checked> '
               f'show unlabeled <b>{n_unlabeled}</b></label>') if n_unlabeled else ""
+    picker = ""
+    if len(schemes) > 1:
+        opts = "".join(f'<option value="{escape(n, quote=True)}">{escape(n)} '
+                       f'({payloads[n]["n_cats"]})</option>' for n in names)
+        picker = (f'<label class="tgl">colour by <select id="scheme">{opts}</select></label>')
 
     mid = meta.get("model_id", "?")
     pooling = meta.get("pooling", "?")
     subtitle = (f"{len(rows)} documents · pooling <b>{escape(pooling)}</b> · "
-                f"projection <b>{method}</b> · colour by <b>{escape(color_desc)}</b> · "
+                f"projection <b>{method}</b> · colour by <b id=\"cdesc\">{escape(names[0])}</b> · "
                 f"model <code>{escape(str(mid))}</code>")
+    schemes_json = json.dumps({n: {"colors": p["colors"], "cats": p["cats"],
+                                   "legend": p["legend"]} for n, p in payloads.items()})
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>mole embedding scatter</title>
@@ -237,23 +267,43 @@ def _build_html(coords, cats, rows, meta, method, color_desc) -> str:
 </style></head><body>
 <h1>Document embedding scatter</h1>
 <div class="sub">{subtitle}</div>
-{toggle}
+{toggle}{picker}
 <div class="wrap">
   <svg viewBox="0 0 {W} {H}" width="{W}" height="{H}">{''.join(dots)}</svg>
   <div class="legend">{legend}</div>
 </div>
 <div id="tt"></div>
 <p class="sub">Hover a point for its filename. Same-hand / same-scribe documents
-should form neighbourhoods as the model learns.</p>
+should form neighbourhoods as the model learns. Where a FINCH level is available,
+switch the colouring to compare discovered clusters against the known hands —
+crosses mark documents with no ground truth, whichever colouring is active.</p>
 <script>
 (function() {{
   var svg = document.querySelector('svg'), tt = document.getElementById('tt');
+  var SCHEMES = {schemes_json};
+  var active = {json.dumps(names[0])};
+  var dots = svg.querySelectorAll('circle');
+  function paint(name) {{
+    var s = SCHEMES[name];
+    if (!s) return;
+    active = name;
+    for (var i = 0; i < dots.length; i++) {{
+      var k = +dots[i].getAttribute('data-i');
+      dots[i].setAttribute('fill', s.colors[k]);
+    }}
+    document.querySelector('.legend').innerHTML = s.legend;
+    document.getElementById('cdesc').textContent = name;
+    tt.style.display = 'none';
+  }}
+  var picker = document.getElementById('scheme');
+  if (picker) picker.addEventListener('change', function() {{ paint(picker.value); }});
   svg.addEventListener('mouseover', function(e) {{
     var t = e.target;
     if (t.tagName === 'circle') {{
       tt.innerHTML = '<b></b><br><span></span>';
       tt.querySelector('b').textContent = t.getAttribute('data-name');
-      tt.querySelector('span').textContent = '[' + t.getAttribute('data-cat') + ']';
+      tt.querySelector('span').textContent =
+        '[' + SCHEMES[active].cats[+t.getAttribute('data-i')] + ']';
       tt.style.display = 'block';
     }}
   }});
@@ -281,23 +331,49 @@ should form neighbourhoods as the model learns.</p>
 
 
 # -------------------------------------------------------------------------- api
+def _cluster_schemes(clusters: str | Path, rows: list[dict]) -> list[tuple[str, list[str]]]:
+    """Colour schemes from a ``mole cluster`` report, one per FINCH level.
+
+    Alignment is checked against the embedding rows: a clusters file produced from a
+    different embedding would silently mis-colour every point, so a mismatch raises
+    rather than rendering something plausible-looking and wrong.
+    """
+    report = json.loads(Path(clusters).read_text())
+    imgs = report.get("images", [])
+    if len(imgs) != len(rows) or any(a != str(b["image"]) for a, b in zip(imgs, rows)):
+        raise ValueError(
+            f"{clusters} was computed from a different embedding "
+            f"({len(imgs)} rows vs {len(rows)}) — regenerate it with `mole cluster`")
+    schemes = []
+    for lv in report["levels"]:
+        name = f"FINCH L{lv['level']} ({lv['n_clusters']} clusters)"
+        schemes.append((name, [f"c{v}" for v in lv["labels"]]))
+    return schemes
+
+
 def plot_embeddings(embeddings: str | Path, out: str | Path | None = None,
                     method: str = "auto", color: str = "dataset",
                     color_regex: str | None = None, seed: int = 0,
-                    pca_dim: int = 150) -> tuple[Path, str]:
+                    pca_dim: int = 150,
+                    clusters: str | Path | None = None) -> tuple[Path, str]:
     """Project an embeddings file to 2D and write an interactive HTML scatter.
 
     Returns ``(output_path, method_used)``. Default projection is PCA(``pca_dim``)
     → UMAP. ``color`` is ``dataset`` | ``hand`` | ``none``; ``color_regex`` overrides
     it, colouring by a capture group extracted from each filename (e.g. ``r'_(\\d{4})-'``
-    to colour by year).
+    to colour by year). ``clusters`` adds one switchable colour scheme per FINCH level
+    from a ``mole cluster`` report, so discovered clusters can be flipped against the
+    ground-truth colouring on the same projection.
     """
     embeddings = Path(embeddings)
     X, meta, rows = _load_embeddings(embeddings)
     coords, used = reduce_2d(X, method, seed, pca_dim=pca_dim)
     cats = _categories(rows, color, color_regex)
     color_desc = f"regex {color_regex}" if color_regex else color
-    html = _build_html(coords, cats, rows, meta, used, color_desc)
+    schemes = [(color_desc, cats)]
+    if clusters:
+        schemes.extend(_cluster_schemes(clusters, rows))
+    html = _build_html(coords, schemes, rows, meta, used)
     out = Path(out) if out else embeddings.with_suffix(".viz.html")
     out.write_text(html, encoding="utf-8")
     return out, used
