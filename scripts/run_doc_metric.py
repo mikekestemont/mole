@@ -84,7 +84,11 @@ def main() -> None:
                   f"(every labeled hand is a single charter)")
             continue
 
-        full = PCAWhiten().fit(X[archives != archive])       # one SVD per fold
+        # fit to the LARGEST requested dim: truncated() can only slice DOWN, so
+        # fitting at the default would silently cap the sweep (it did — a
+        # --whiten-dim 512 request came back as 256 without a word).
+        want = [d for d in args.whiten_dim if d]
+        full = PCAWhiten(dim=max(want) if want else None).fit(X[archives != archive])
         pca_macro, _ = archive_macro_map(
             full.truncated(args.out_dim).transform(X), hands, docs, keep)
 
@@ -96,6 +100,10 @@ def main() -> None:
                 lr=args.lr, seed=args.seed, pca=full)
             macro, _ = archive_macro_map(transform(X), hands, docs, keep)
             tag = report["whiten_dim"]
+            if wd not in (None, tag):
+                print(f"      whiten_dim={wd:<5} UNAVAILABLE — only {tag} components "
+                      f"exist (rank limit); skipped")
+                continue
             if len(args.whiten_dim) > 1:
                 print(f"      whiten_dim={tag:<5} supervised {macro:.4f}")
             if best is None or macro > best[0]:
