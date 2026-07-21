@@ -52,19 +52,30 @@ class PCAWhiten:
     the loss — otherwise the "a new collection arrives" claim is contaminated by
     the new collection.
 
-    ⚠ **Truncation is the dangerous knob, not the whitening.** Writer identity is
-    a LOW-variance property: nuisance factors (layout, ink density, page size)
-    dominate the variance, so the discriminative directions sit far down the
-    spectrum — on the synthetic corpus in ``tests/test_doc_metric.py`` they are
-    components 40-43 of 44. Keeping the top-k by variance therefore *discards the
-    signal*, which is precisely backwards. Whitening then rescues what survives by
-    equalising variance. So keep ``dim`` generous (default: as close to full rank
-    as the training set allows) and treat any reduction as a hyper-parameter to
-    sweep, never a default to trust. :meth:`truncated` makes a sweep nearly free.
+    ⚠ **``dim`` cuts both ways, and which way depends on the sample/dimension
+    ratio.** Get this wrong and the transform is worse than doing nothing.
+
+    *When documents ≫ dimensions* (the synthetic corpus in
+    ``tests/test_doc_metric.py``: 600 docs, 68 dims) truncation is the danger.
+    Writer identity is a LOW-variance property — layout, ink density and page size
+    dominate — so the discriminative directions sit far down the spectrum
+    (components 40-43 of 44 there), and keeping the top-k by variance discards
+    exactly the signal.
+
+    *When dimensions ≫ documents* — the REAL case here: VLAD is 38,400-d and the
+    pool has 3,392 documents — the opposite is true and truncation is mandatory.
+    Near full rank the smallest eigenvalues are estimation noise, and whitening
+    divides by them; measured on the real archives (2026-07-21), full-rank
+    whitening cost −0.031 macro on its own and a supervised layer on top of it
+    −0.104. Truncation is the regularizer, not the enemy.
+
+    Default ``dim=256`` reflects the real regime. Sweep it (:meth:`truncated`
+    slices one fitted SVD, so a sweep is nearly free) rather than trusting any
+    single value — and check which regime you are in first.
     """
 
-    def __init__(self, dim: int | None = None, eps: float = 1e-6):
-        self.dim = dim                 # None = keep as much rank as there is
+    def __init__(self, dim: int | None = 256, eps: float = 1e-6):
+        self.dim = dim                 # None = full rank (see the warning above)
         self.eps = eps
         self.mean_: np.ndarray | None = None
         self.components_: np.ndarray | None = None
@@ -186,7 +197,7 @@ def archive_macro_map(X: np.ndarray, hands: np.ndarray, docs: np.ndarray,
 # ------------------------------------------------------------------- the fitter
 def fit_doc_metric(X: np.ndarray, hands: np.ndarray, docs: np.ndarray,
                    archives: np.ndarray, *, holdout_archive: str,
-                   whiten_dim: int | None = None, out_dim: int = 128,
+                   whiten_dim: int | None = 256, out_dim: int = 128,
                    epochs: int = 60, lr: float = 1e-3, temperature: float = 0.07,
                    holdout_frac: float = 0.2, seed: int = 0,
                    batches_per_epoch: int = 100, progress: bool = False,

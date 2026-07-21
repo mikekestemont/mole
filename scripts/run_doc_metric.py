@@ -13,11 +13,14 @@ Three spaces are compared on every held-out archive, all evaluated identically
 unsupervised trick on its own, so the supervised column only earns credit for
 `supervised - pca`, measured at the same output dimensionality.
 
---whiten-dim takes a LIST and sweeps it, because truncation is the one knob that
-can silently destroy the experiment: writer identity is low-variance, so keeping
-the top-k components by variance can discard exactly the directions that carry
-it (on the synthetic corpus the signal lives in components 40-43 of 44). The
-sweep costs almost nothing — one SVD per fold is sliced for every candidate.
+--whiten-dim is the knob that decides whether this works at all, and its safe
+direction FLIPS with the sample/dimension ratio. VLAD is 38,400-d and the pool
+has 3,392 documents, so near full rank the smallest eigenvalues are estimation
+noise and whitening divides by them: measured on the real archives, full-rank
+whitening cost -0.031 macro alone and -0.104 with a supervised layer on top.
+Truncation regularises here. (On a corpus with far more documents than
+dimensions the opposite holds — truncation discards low-variance writer signal.)
+Sweep it; one SVD per fold is sliced for every candidate, so it is nearly free.
 
     python scripts/run_doc_metric.py outputs/universal_full/*.npy
 
@@ -41,9 +44,9 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("embeddings", nargs="+", type=Path,
                     help="One .npy per archive, ALL from the same codebook.")
-    ap.add_argument("--whiten-dim", type=int, nargs="+", default=[None],
+    ap.add_argument("--whiten-dim", type=int, nargs="+", default=[256],
                     help="Components kept before the supervised layer; repeat to "
-                         "sweep. Default: full rank (recommended — see above).")
+                         "sweep (e.g. --whiten-dim 64 128 256 512).")
     ap.add_argument("--out-dim", type=int, default=128)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--lr", type=float, default=1e-3)

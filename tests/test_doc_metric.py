@@ -82,11 +82,13 @@ def test_supervision_transfers_to_a_completely_unseen_archive():
 
 
 def test_truncating_by_variance_discards_low_variance_writer_signal():
-    """The documented trap, pinned: keeping the top-k components loses the signal.
+    """Truncation loses signal — IN THIS REGIME ONLY (600 docs, 68 dims).
 
-    Writer identity is low-variance here (as it is in real descriptors), so a
-    generous whiten_dim must beat an aggressive one. If this ever inverts, the
-    default in fit_doc_metric should be revisited.
+    Writer identity is low-variance, so with far more documents than dimensions a
+    generous whiten_dim beats an aggressive one. ⚠ This does NOT generalise to the
+    real data, where 38,400 dims over 3,392 documents makes near-full-rank
+    whitening a noise amplifier (measured: -0.031 macro alone). The regime, not
+    the rule, is what transfers — which is why fit_doc_metric defaults to 256.
     """
     X, hands, docs, archives = _corpus()
     keep = archives == "c"
