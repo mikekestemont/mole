@@ -26,6 +26,16 @@ RUNS="${RUNS:-runs/sup_loao}"                       # one head per fold
 OUT="${OUT:-outputs/sup_loao}"
 BASE="${BASE:-outputs/pooled_final}"                # existing baseline embeddings
 ARCHIVES="${ARCHIVES:-antwerp-bin brackley-2350 flanders-set-bin leroy-bin utrecht-bin}"
+POOLING="${POOLING:-vlad}"                          # must match how BASE was pooled
+TRAIN="${TRAIN:-1}"                                 # 0 = reuse the heads in $RUNS
+#
+# The head is TRAINED on window descriptors (the mean of a window's foreground
+# tokens), so `POOLING=mean` reads out the very statistic the loss optimised,
+# while vlad deliberately discards the mean in favour of residuals to K
+# centroids. Comparing the two isolates aggregation from supervision — but only
+# if BASE was pooled the same way as the candidate:
+#   POOLING=vlad BASE=outputs/pooled_final ...     (deployed configuration)
+#   POOLING=mean BASE=outputs/mean_pool    ...     (matched to training)
 
 if [ ! -f "$CACHE/cache.npy" ]; then
   echo "error: no feature cache at $CACHE" >&2
@@ -35,17 +45,22 @@ fi
 
 mkdir -p "$RUNS" "$OUT"
 
-echo "== 1/3  training one head per fold (CPU, shared cache) =="
-for A in $ARCHIVES; do
-  echo "-- fold: $A held out"
-  mole sup train "$CONFIG" "$CKPT" "$POOL" --out "$RUNS/$A" \
-      --holdout-archive "$A" --cache "$CACHE"
-done
+if [ "$TRAIN" = "1" ]; then
+  echo "== 1/3  training one head per fold (CPU, shared cache) =="
+  for A in $ARCHIVES; do
+    echo "-- fold: $A held out"
+    mole sup train "$CONFIG" "$CKPT" "$POOL" --out "$RUNS/$A" \
+        --holdout-archive "$A" --cache "$CACHE"
+  done
+else
+  echo "== 1/3  SKIPPED (TRAIN=0) — reusing the heads in $RUNS =="
+fi
 
 echo "== 2/3  embedding each archive with the head that never saw it (GPU) =="
 for A in $ARCHIVES; do
-  echo "-- embed: $A"
+  echo "-- embed: $A  (pooling=$POOLING)"
   mole embed "$CKPT" "$DATA/$A" "$OUT/$A.head.npy" --head "$RUNS/$A/head.pt" \
+      --pooling "$POOLING" \
       --set window_size=224 --set overlap=0 --set use_zones=false
   mole eval "$OUT/$A.head.npy" "$DATA/$A" --topk 1,5 --cross-doc-only --per-hand \
       --out "$OUT/$A.head.eval.json"
