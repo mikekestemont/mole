@@ -9,11 +9,16 @@ mean — is precisely what hard-assignment VLAD discards. NetVLAD replaces the
 optimised is what retrieval ranks.
 
 The design property that makes the experiment readable is
-:meth:`NetVLAD.from_codebook`. Initialised from a k-means codebook ``C`` with
-``w = 2αC`` and ``b = −α‖C‖²``, the softmax assignment converges to the hard
-nearest-centre assignment as ``α → ∞``::
+:meth:`NetVLAD.from_codebook`. Logits are ``α(2·c_k·x − ‖c_k‖² + b_k)``; started
+from a k-means codebook ``C`` with ``b = 0``, the softmax assignment converges to
+the hard nearest-centre assignment as ``α → ∞``::
 
-    argmax_k (2α·c_k·x − α‖c_k‖²) = argmin_k ‖x − c_k‖²   (‖x‖² is common to all k)
+    argmax_k (2·c_k·x − ‖c_k‖²) = argmin_k ‖x − c_k‖²   (‖x‖² is common to all k)
+
+α is folded into the forward pass rather than into the weights (NetVLAD's usual
+``w = 2αC``) so that BOTH parameter groups stay at codebook scale — see
+``__init__``. With Adam that is what lets one learning rate move them at
+comparable relative rates; the textbook form left the assignment frozen.
 
 so a sufficiently sharp untrained NetVLAD reproduces the frozen-codebook
 baseline (asserted in ``tests/test_netvlad.py``) and Δ measures learning rather
@@ -34,8 +39,10 @@ so ``trained − init`` stays confound-free at any α.
 The α trade-off is real and is the crux of the experiment: high α keeps the
 aggregator faithful but nearly saturates the softmax, so the assignment gradient
 shrinks while the centroids — which enter the residual linearly — keep training.
-``grad_assign`` / ``grad_centroids`` are logged per epoch for exactly this
-reason, and the ``learn`` ablation separates the two effects.
+``grad_assign`` / ``grad_centroids`` are logged per epoch for exactly this reason
+— **relative to parameter norm**, since absolute gradient norms say nothing about
+how far a group actually moves — and the ``learn`` ablation separates the two
+effects.
 
 Output dim is unchanged (``K*dim`` = 38,400 at K=100), power-norm + global L2,
 ``intra_norm`` off — i.e. deployed Raven-plain VLAD — so every existing
@@ -149,11 +156,19 @@ class NetVLAD(nn.Module):
         self.num_clusters, self.dim = int(num_clusters), int(dim)
         self.alpha, self.intra_norm, self.powernorm = float(alpha), intra_norm, powernorm
         self.learn = learn
+        # BOTH parameter groups are kept at CODEBOOK scale. The textbook
+        # parameterisation stores the assignment as w = 2αC, which is ~2α times
+        # the scale of `centroids`; since Adam's step is ~lr regardless of
+        # gradient size, one learning rate then moves the two groups at wildly
+        # different *relative* rates and the assignment is effectively frozen.
+        # Folding α into the forward pass instead leaves both groups O(‖c‖), so a
+        # single lr means the same thing to both. `assign_b` is a free bias in
+        # units of α, init 0.
         self.centroids = nn.Parameter(torch.zeros(num_clusters, dim))
-        self.assign_w = nn.Parameter(torch.zeros(num_clusters, dim))
+        self.assign_c = nn.Parameter(torch.zeros(num_clusters, dim))
         self.assign_b = nn.Parameter(torch.zeros(num_clusters))
         self.centroids.requires_grad_(learn in ("both", "centroids"))
-        self.assign_w.requires_grad_(learn in ("both", "assign"))
+        self.assign_c.requires_grad_(learn in ("both", "assign"))
         self.assign_b.requires_grad_(learn in ("both", "assign"))
 
     # ----------------------------------------------------------------- init
@@ -162,16 +177,18 @@ class NetVLAD(nn.Module):
                       powernorm: bool = True, learn: str = "both") -> "NetVLAD":
         """Initialise so that soft assignment ≈ hard assignment against ``codebook``.
 
-        ``w = 2αC``, ``b = −α‖C‖²`` ⇒ ``argmax_k (w_k·x + b_k) = argmin_k ‖x−c_k‖²``.
-        At large α the module therefore *is* the frozen-codebook baseline.
+        Logits are ``α(2·c_k·x − ‖c_k‖² + b_k)``, so with ``assign_c = C`` and
+        ``b = 0`` the argmax is ``argmin_k ‖x−c_k‖²`` (‖x‖² is common to all k).
+        At large α the module therefore *is* the frozen-codebook baseline —
+        algebraically the same as NetVLAD's ``w = 2αC`` init, but with the
+        parameter left at codebook scale.
         """
         c = torch.as_tensor(np.asarray(codebook, dtype=np.float32))
         k, d = c.shape
         m = cls(k, d, alpha=alpha, intra_norm=intra_norm, powernorm=powernorm, learn=learn)
         with torch.no_grad():
             m.centroids.copy_(c)
-            m.assign_w.copy_(2.0 * alpha * c)
-            m.assign_b.copy_(-alpha * (c * c).sum(dim=1))
+            m.assign_c.copy_(c)
         return m
 
     def codebook(self) -> np.ndarray:
@@ -180,7 +197,10 @@ class NetVLAD(nn.Module):
 
     # -------------------------------------------------------------- forward
     def assignments(self, x):
-        return torch.softmax(x @ self.assign_w.t() + self.assign_b, dim=-1)
+        logits = (2.0 * (x @ self.assign_c.t())
+                  - (self.assign_c * self.assign_c).sum(dim=1)
+                  + self.assign_b)
+        return torch.softmax(self.alpha * logits, dim=-1)
 
     def forward(self, x):
         single = x.dim() == 2
@@ -212,7 +232,17 @@ class NetVLAD(nn.Module):
 
 
 def _grad_norm(p) -> float:
-    return float(p.grad.norm()) if p.grad is not None else 0.0
+    """Gradient norm RELATIVE to parameter norm.
+
+    The absolute norm is not comparable across the two groups even now that they
+    share a scale, and it was actively misleading before: equal absolute
+    gradients on parameters differing 2α in scale means the larger one is 2α less
+    mobile. Relative gradient is what predicts how far Adam actually moves a
+    group, so it is what gets logged.
+    """
+    if p.grad is None:
+        return 0.0
+    return float(p.grad.norm()) / max(float(p.detach().norm()), 1e-12)
 
 
 # ------------------------------------------------------------- page vectors
@@ -402,12 +432,12 @@ def train_netvlad(cache: TokenCache, codebook: np.ndarray, *,
                                  torch.from_numpy(neg).to(dev), temperature)
             opt.zero_grad()
             loss.backward()
-            # Which half of the module is actually moving? At the α that keeps the
-            # aggregator faithful the softmax is nearly one-hot, so the assignment
-            # gradient can vanish while the centroids (which enter the residual
-            # linearly) keep training. Recording both makes a null result
-            # attributable instead of ambiguous.
-            grads.append((_grad_norm(model.assign_w), _grad_norm(model.centroids)))
+            # Which half of the module is actually moving? At the α that keeps
+            # the aggregator faithful the softmax is nearly one-hot, so the
+            # assignment gradient can vanish while the centroids (which enter the
+            # residual linearly) keep training. Recorded RELATIVE to parameter
+            # norm, so a null result is attributable instead of ambiguous.
+            grads.append((_grad_norm(model.assign_c), _grad_norm(model.centroids)))
             opt.step()
             losses.append(float(loss.item()))
             ents.append(model.assignment_entropy(x))

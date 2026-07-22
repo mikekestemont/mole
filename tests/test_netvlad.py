@@ -122,12 +122,27 @@ def test_learn_flag_freezes_the_right_parameters():
     codebook = fit_codebook(_clustered()[0], n_clusters=6, seed=0)
     assign = NetVLAD.from_codebook(codebook, 2.0, learn="assign")
     assert not assign.centroids.requires_grad
-    assert assign.assign_w.requires_grad
+    assert assign.assign_c.requires_grad
     centres = NetVLAD.from_codebook(codebook, 2.0, learn="centroids")
     assert centres.centroids.requires_grad
-    assert not centres.assign_w.requires_grad
+    assert not centres.assign_c.requires_grad
     with pytest.raises(ValueError):
         NetVLAD.from_codebook(codebook, 2.0, learn="nonsense")
+
+
+def test_parameter_groups_share_a_scale():
+    """Both groups sit at codebook scale, so ONE learning rate serves both.
+
+    The textbook w = 2*alpha*C init puts the assignment ~2*alpha above the
+    centroids; with Adam stepping ~lr regardless of gradient size, that leaves
+    the assignment effectively frozen. Measured on the first real fold: loss
+    1.229 -> 1.225 over 20 epochs, i.e. no training at all.
+    """
+    x, _ = _clustered()
+    codebook = fit_codebook(x, n_clusters=6, seed=0)
+    model = NetVLAD.from_codebook(codebook, 50.0)
+    cen, asg = model.centroids.norm().item(), model.assign_c.norm().item()
+    assert 0.5 < asg / cen < 2.0, f"scale mismatch: assign {asg:.3g} vs centroids {cen:.3g}"
 
 
 def test_gradients_reach_both_parameter_groups():
@@ -136,7 +151,7 @@ def test_gradients_reach_both_parameter_groups():
     model = NetVLAD.from_codebook(codebook, 2.0)
     model(torch.from_numpy(x)).sum().backward()
     assert model.centroids.grad is not None and model.centroids.grad.abs().sum() > 0
-    assert model.assign_w.grad is not None and model.assign_w.grad.abs().sum() > 0
+    assert model.assign_c.grad is not None and model.assign_c.grad.abs().sum() > 0
 
 
 # ---------------------------------------------------------------- token cache
