@@ -486,9 +486,73 @@ restriction (shared codebook −0.093, K=256 −0.005) — its rare different-mo
 redundancy to spare. Brackley and Leroy barely move.
 
 Two consequences. (1) **Build the cache uncapped**; the cap bought disk, not speed, because training
-subsamples to `tokens_per_page` per batch anyway. (2) Side observation worth its own experiment:
-this is evidence *for* the parked "denser test windows" idea — ~+0.011 macro sits in test-time token
-density alone, no retraining, and the ceiling is above the natural density of a 224/overlap-0 grid.
+subsamples to `tokens_per_page` per batch anyway. (2) ⚠ **This is NOT evidence for the parked "denser
+test windows" idea, and an earlier draft of this section wrongly said it was.** F5 measures
+*restoring* density (2,048 → ~5,250 = +0.011); "denser windows" would *exceed* natural density, and
+on that question the HWI saturation result (8,800 → 2,900 = +0.0006) is the relevant prior and it is
+discouraging. Both findings are consistent with a knee around 2,500–3,000 tokens/page: HWI's low
+point stayed above it, the 2,048 cap fell below it. **Never sample below natural density; whether
+going above it helps is a separate, open question.** Overlapping windows are not purely a
+token-count intervention either — they add positional diversity (the same stroke at a different
+offset inside the 224px window sees different ViT context), which is closer to test-time
+augmentation. Worth one cheap run, with a modest prior.
+
+### ▶ OUTCOME 2026-07-22 — TIER 2 CLOSED, NEGATIVE
+
+Run leave-one-archive-out on Antwerp over a grid of every knob that plausibly mattered. **Every
+configuration lands within a ±0.006 band, and nothing moves it out.** Held-out Δmacro vs the frozen
+codebook (Antwerp `frozen` = 0.7826):
+
+| config | seen-hand | held-out Δ | best epoch |
+|---|---|---|---|
+| frac 0.5, lr 1e-3 | −0.0001 | +0.0002 | 0/20 |
+| frac 0.5, lr 1e-2 | +0.0055 | +0.0011 | 0/20 |
+| frac 0.5, lr 1e-1 | −0.0155 | **−0.0115** | 0/20 |
+| frac 0.5, lr 1e-2, α×0.25 | +0.0064 | +0.0008 | 0/20 |
+| frac 1.0, lr 1e-2 | +0.0094 | +0.0024 | 5/20 |
+| frac 1.0, lr 1e-2, α×0.25 | +0.0110 | +0.0032 | 4/20 |
+| **frac 1.0, lr 3e-2** | **+0.0151** | **+0.0064** | 19/20 |
+| frac 1.0, lr 3e-2, 80 ep | +0.0114 | +0.0020 | 0/80 |
+| frac 1.0, lr 1e-1, 80 ep | −0.0059 | −0.0042 | 0/80 |
+
+What the grid establishes:
+- **The control held throughout.** `frozen 0.7826 → init 0.7827` at fidelity 0.9993 on real data, in
+  every single run, so every Δ above is attributable to training and nothing else.
+- **Cross-archive easy negatives were a real confound** — `same_archive_frac` 0.5→1.0 roughly doubled
+  every signal, and moved model selection off epoch 0 for the first time. Collections differ in
+  parchment, binarisation and scan pipeline, so separating *archives* is the cheapest way to cut
+  SupCon loss and it is worth nothing at eval, where every gallery is a single archive.
+- **α was a red herring.** α×0.25 buys ~+0.0008; the best config runs at default sharpness. Two
+  rounds were spent theorising about softmax saturation and the binding constraints turned out to be
+  the negatives and the learning rate.
+- **More training does not help.** 80 epochs is *worse* than 20 (+0.0020 vs +0.0064) while the loss
+  falls much further (1.349 → 0.770). The loss descends; retrieval does not follow. (Caveat: the
+  80-epoch runs used `--select-max-tokens 1024`, which changes the epoch picker and the seen-hand
+  baseline, so the two batches are not strictly comparable — but everything is inside the same band.)
+
+**Verdict: NOT MET, by a wide margin** — the bar was ≥ +0.02 vs `init` with CI>0. Only Antwerp was
+run; Flanders (the designated headroom archive) was never reached, because no configuration produced
+a signal worth carrying there.
+
+**Scope of the claim (important — the literature disagrees with the broader reading).** The
+published writer-retrieval recipes that DO succeed with NetVLAD train it **jointly with the backbone
+from random initialisation** — Peer, Kleber & Sablatnig (ICDAR 2023, arXiv:2305.05358) drop the
+k-means init, drop α_init entirely, drop pre/intra-normalisation ("NetRVLAD"), and train on 32×32
+SIFT-keypoint patches. So this result is specifically that **NetVLAD as a post-hoc refinement of a
+frozen backbone and a frozen codebook does not help** — not that NetVLAD is useless for writer
+retrieval. Co-adaptation is the ingredient we did not have.
+
+**And a caution about the whole supervised programme.** Those same SOTA pipelines train on
+**pseudo-labels from clustering SIFT descriptors into 5000 surrogate classes — no writer labels at
+all**. The field's best results come from self-supervised training plus good aggregation, which is
+also exactly what mole's own evidence says (pooled SSL +0.09..+0.13 versus ~0.005 from four separate
+supervised routes: post-hoc linear map F3, window-level head F2, differentiable aggregator, and this
+grid). The labels' value on this project looks like it lies in **evaluation and in the `mole review`
+/ `suggest` product**, not in the loss.
+
+**Tier 3 remains the one untested rung** (a SupCon term inside the backbone finetune, ~1 GPU-day).
+Given that the field's SOTA does not use writer labels for training either, the prior is low; run it
+for completeness in a write-up, not in expectation of a win.
 
 *Open tension, measured on synthetic data and to be re-read on real:* fidelity and trainability pull
 against each other. At the calibrated α the assignment gradient is ~4 orders of magnitude below the
