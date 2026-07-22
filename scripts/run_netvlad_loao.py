@@ -71,7 +71,19 @@ def main() -> None:
     ap.add_argument("--learn", default="both", choices=["both", "assign", "centroids"],
                     help="Ablation: train the assignment, the centres, or both.")
     ap.add_argument("--alpha", type=float, default=None,
-                    help="Softmax sharpness; default = derived from the data.")
+                    help="Softmax sharpness, absolute. Default = calibrated so the "
+                         "UNTRAINED module reproduces hard VLAD.")
+    ap.add_argument("--alpha-scale", type=float, default=1.0,
+                    help="Multiply the calibrated alpha. Values BELOW 1 trade "
+                         "fidelity for capacity, and that trade is the experiment: "
+                         "at the calibrated alpha the softmax is a hard argmax, so "
+                         "assign_c is piecewise constant (no gradient) and the "
+                         "centroids can only apply an occupancy-scaled offset -- the "
+                         "module is pinned to the baseline it was initialised from. "
+                         "Softening alpha buys capacity and costs init fidelity, "
+                         "which is exactly why the driver evaluates @init separately: "
+                         "netvlad-vs-init stays valid, while netvlad-vs-frozen says "
+                         "whether the capacity paid for the fidelity.")
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--tokens-per-page", type=int, default=512)
     ap.add_argument("--select-max-tokens", type=int, default=0,
@@ -151,9 +163,18 @@ def main() -> None:
                     if p["archive"] == A and p["hand"]}
         select_hands = _select_hands(cache, exclude=excluded,
                                      frac=args.holdout_frac, seed=args.seed)
+        alpha = args.alpha
+        if alpha is None and args.alpha_scale != 1.0:
+            from mole.supervised.netvlad import alpha_for_codebook
+            rng = np.random.default_rng(args.seed)
+            probe = [cache.sample_tokens(i, 256, rng)
+                     for i in [r for r in train_rows if cache.pages[r]["hand"]][:32]]
+            alpha = alpha_for_codebook(codebook, probe) * args.alpha_scale
+            print(f"[mole] alpha = {alpha:.4g} "
+                  f"({args.alpha_scale}x the fidelity-calibrated value)")
         model, report = train_netvlad(
             cache, codebook, holdout_hands=select_hands, exclude_hands=excluded,
-            alpha=args.alpha, learn=args.learn, epochs=args.epochs,
+            alpha=alpha, learn=args.learn, epochs=args.epochs,
             tokens_per_page=args.tokens_per_page, lr=args.lr, seed=args.seed,
             select_max_tokens=args.select_max_tokens, device=args.device,
             sampler_cfg={"hands_per_batch": args.hands_per_batch,

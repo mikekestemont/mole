@@ -304,3 +304,40 @@ def test_descriptor_pool_uncapped_is_exact(tmp_path):
     pool = descriptor_pool(cache, max_descriptors=0)
     assert len(pool) == cache.n_tokens == 4 * 2 * 25
     np.testing.assert_allclose(pool, np.asarray(cache.tokens, dtype=np.float32))
+
+
+def test_saturated_alpha_pins_the_module_to_its_baseline():
+    """At the fidelity-calibrated α the module has almost no capacity.
+
+    With a one-hot assignment V_k = S_k − N_k·c_k: `assign_c` is piecewise
+    constant (perturbing it changes nothing except at decision boundaries) and
+    the centroids can only apply an occupancy-scaled offset. Measured on the
+    first real fold — assign entropy 0.002 vs ln K 4.605, seen-hand macro
+    −0.0001, i.e. the model could not fit data it was looking at.
+
+    So fidelity and capacity are in direct conflict, and the experiment has to be
+    run at a softened α, reading Δ against @init rather than against hard VLAD.
+    This test pins the mechanism: perturbing the assignment at a sharp α is a
+    no-op, while at a moderate α it is not. Note capacity is NON-MONOTONIC in α —
+    too sharp is piecewise constant, too soft is uniform and equally inert — so
+    the usable setting is a middle band, not "as small as possible".
+    """
+    x, _ = _clustered(spread=0.15)
+    codebook = fit_codebook(x, n_clusters=6, seed=0)
+    xt = torch.from_numpy(x)
+
+    def shift(alpha):
+        m = NetVLAD.from_codebook(codebook, alpha)
+        before = m(xt).detach().numpy()
+        with torch.no_grad():                      # nudge the routing only
+            m.assign_c.add_(torch.randn_like(m.assign_c) * 0.05)
+        after = m(xt).detach().numpy()
+        return 1.0 - float(before @ after / (np.linalg.norm(before) * np.linalg.norm(after)))
+
+    calibrated = alpha_for_codebook(codebook, [x])
+    sharp = shift(calibrated)
+    soft = shift(calibrated * 0.25)            # the responsive middle band
+    inert = shift(calibrated * 0.005)          # softened past the peak, inert again
+    assert sharp < 1e-4, f"sharp α should be inert to routing changes, moved {sharp:.2e}"
+    assert soft > 10 * max(sharp, 1e-9), f"soft α should respond ({soft:.2e} vs {sharp:.2e})"
+    assert inert < soft, f"α below the band should go inert again ({inert:.2e})"
