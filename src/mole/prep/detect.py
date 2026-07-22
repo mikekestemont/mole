@@ -218,8 +218,20 @@ class YoloTextZoneDetector:
 
         # A local .pt (a detector fine-tuned on this corpus, see
         # scripts/train_zone_detector.py) short-circuits the hub download.
+        # `weights` is ambiguous by design: DEFAULT_YOLO_WEIGHTS is the bare hub
+        # filename "best.pt", and a local checkpoint is *also* usually named
+        # best.pt. So a missing file must NOT quietly become a hub lookup — that
+        # turns a typo into a 404 about someone else's repository.
         local = Path(weights)
-        if local.suffix == ".pt" and local.is_file():
+        looks_local = local.is_absolute() or os.sep in str(weights) or local.is_file()
+        if looks_local:
+            if not local.is_file():
+                raise FileNotFoundError(
+                    f"--yolo-weights {weights!r} looks like a local checkpoint but "
+                    f"does not exist (resolved: {local.resolve()}). If a training "
+                    f"run is still going, its best.pt appears only after the first "
+                    f"validation; check <project>/<name>/weights/. To use the "
+                    f"off-the-shelf model instead, omit the weights argument.")
             weight_path = str(local)
             self.model_id = f"local:{local}"
         else:

@@ -171,3 +171,19 @@ def test_val_split_is_stable_across_calls(tmp_path):
     # a different seed must give a different split (the shuffle is real)
     c = val_split(imgs, tmp_path / "page", val_frac=0.25, seed=8)
     assert {x[0].name for x in a} != {x[0].name for x in c}
+
+
+def test_missing_local_weights_fails_loudly_not_as_a_404(tmp_path, monkeypatch):
+    """REGRESSION: a wrong --yolo-weights path must not become a hub download.
+
+    `weights` is ambiguous — DEFAULT_YOLO_WEIGHTS is the bare hub filename
+    "best.pt" and a local checkpoint is usually also called best.pt. The first
+    version silently fell through to hf_hub_download on a missing file, so a
+    typo surfaced as a 404 against magistermilitum/YOLO_manuscripts with the
+    local path pasted into the URL. Unreadable, and it hid the real cause.
+    """
+    pytest.importorskip("ultralytics")
+    from mole.prep.detect import YoloTextZoneDetector
+
+    with pytest.raises(FileNotFoundError, match="looks like a local checkpoint"):
+        YoloTextZoneDetector(weights=str(tmp_path / "runs" / "nope" / "best.pt"))
