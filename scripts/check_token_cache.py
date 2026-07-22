@@ -51,6 +51,14 @@ def main() -> None:
                          "matching `mole embed`'s default; anything else adds a "
                          "subsample confound on top of the cap being tested.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--noise-floor", type=int, nargs="*", default=None,
+                    metavar="SEED",
+                    help="Extra codebook seeds to refit the SAME cache at, e.g. "
+                         "--noise-floor 1 2 3. MiniBatchKMeans is order- and "
+                         "seed-sensitive, so two honest fits of identical data give "
+                         "different centres; this measures how much macro-mAP moves "
+                         "for that reason alone. Any Δ smaller than this spread — "
+                         "here or in the LOAO experiment — is not a result.")
     ap.add_argument("--cross-doc-only", action="store_true", default=True)
     ap.add_argument("--json", type=Path, default=None)
     args = ap.parse_args()
@@ -67,6 +75,24 @@ def main() -> None:
     print(f"[mole] cap = {cap} tokens/page\n")
     args.out.mkdir(parents=True, exist_ok=True)
 
+    seeds = [args.seed] + list(args.noise_floor or [])
+
+    def encode_at(A, page_rows, seed, tag):
+        """Fit this archive's own codebook from the cache at `seed`, encode, eval."""
+        pool = descriptor_pool(cache, page_rows,
+                               max_descriptors=args.codebook_descriptors, seed=seed)
+        codebook = fit_codebook(pool, n_clusters=args.clusters, seed=seed)
+        npy = args.out / f"{A}.{tag}.npy"
+        write_embeddings(npy, vlad_page_vectors(cache, codebook, page_rows),
+                         cache, page_rows,
+                         {"pooling": "vlad", "aggregator": "hard-kmeans",
+                          "vlad_clusters": int(codebook.shape[0]), "vlad_seed": seed,
+                          "note": "transductive, refit from the token cache"},
+                         dataset_dir=args.data / A)
+        return evaluate(npy, args.data / A, topk=(1, 5),
+                        cross_doc_only=args.cross_doc_only,
+                        out=args.out / f"{A}.{tag}.eval.json").overall.macro_map
+
     pairs, rows = [], []
     for A in (args.archives or cache.archives):
         ref = args.reference / f"{A}.npy"
@@ -75,33 +101,27 @@ def main() -> None:
             continue
         print(f"\n== {A}")
         page_rows = cache.rows_for(archive=A)
-        # each archive's OWN codebook, exactly as the transductive deploy does
-        pool = descriptor_pool(cache, page_rows,
-                               max_descriptors=args.codebook_descriptors,
-                               seed=args.seed)
-        codebook = fit_codebook(pool, n_clusters=args.clusters, seed=args.seed)
-        mat = vlad_page_vectors(cache, codebook, page_rows)
-
-        npy = args.out / f"{A}.cache.npy"
-        write_embeddings(npy, mat, cache, page_rows,
-                         {"pooling": "vlad", "aggregator": "hard-kmeans",
-                          "vlad_clusters": int(codebook.shape[0]),
-                          "note": "transductive, from the capped token cache"},
-                         dataset_dir=args.data / A)
-        got = evaluate(npy, args.data / A, topk=(1, 5),
-                       cross_doc_only=args.cross_doc_only,
-                       out=args.out / f"{A}.cache.eval.json")
         want = evaluate(ref, args.data / A, topk=(1, 5),
                         cross_doc_only=args.cross_doc_only,
                         out=args.out / f"{A}.reference.eval.json")
+
+        macros = [encode_at(A, page_rows, s, "cache" if s == args.seed else f"seed{s}")
+                  for s in seeds]
         pairs.append((args.out / f"{A}.reference.eval.json",
                       args.out / f"{A}.cache.eval.json"))
-        rows.append({"archive": A, "reference": want.overall.macro_map,
-                     "from_cache": got.overall.macro_map,
-                     "delta": got.overall.macro_map - want.overall.macro_map,
-                     "tokens": sum(cache.pages[i]["count"] for i in page_rows)})
+        row = {"archive": A, "reference": want.overall.macro_map,
+               "from_cache": macros[0],
+               "delta": macros[0] - want.overall.macro_map,
+               "seed_macros": macros,
+               "tokens": sum(cache.pages[i]["count"] for i in page_rows)}
+        if len(macros) > 1:
+            row["seed_spread"] = max(macros) - min(macros)
+        rows.append(row)
+        note = (f"  |  across {len(macros)} codebook seeds: "
+                f"{min(macros):.4f}–{max(macros):.4f} (spread {row['seed_spread']:.4f})"
+                if len(macros) > 1 else "")
         print(f"[mole] {A}: reference {want.overall.macro_map:.4f} → from cache "
-              f"{got.overall.macro_map:.4f} ({rows[-1]['delta']:+.4f})")
+              f"{macros[0]:.4f} ({row['delta']:+.4f}){note}")
 
     if not pairs:
         print("\n[mole] nothing to compare — check --reference")
@@ -111,17 +131,44 @@ def main() -> None:
           f"   (same backbone/geometry/K; only the visible tokens differ)\n{'=' * 72}")
     r = compare_evals_multi(pairs, seed=args.seed)
     print(format_multi_compare(r))
-    verdict = ("HARMLESS — the capped cache reproduces the deployed space"
-               if abs(r.mean_delta) <= 0.005 else
-               "⚠ NOT harmless — rebuild with a larger --max-tokens-per-page "
-               "before trusting any NetVLAD result")
+    spreads = [x["seed_spread"] for x in rows if "seed_spread" in x]
+    if spreads:
+        print(f"\n{'=' * 72}\n== Noise floor — the SAME cache refit at "
+              f"{len(seeds)} codebook seeds\n"
+              f"   (identical data; only k-means initialisation differs)\n{'=' * 72}")
+        w = max(len(x["archive"]) for x in rows)
+        print(f"  {'archive':<{w}}  {'spread':>8}  {'|Δ vs ref|':>10}  verdict")
+        for x in rows:
+            sp = x.get("seed_spread", 0.0)
+            flag = ("within noise" if abs(x["delta"]) <= sp
+                    else "EXCEEDS noise floor")
+            print(f"  {x['archive']:<{w}}  {sp:>8.4f}  {abs(x['delta']):>10.4f}  {flag}")
+        worst = max(spreads)
+        print(f"\n  Largest per-archive seed spread: {worst:.4f} — no Δ below this, "
+              f"here or in\n  the LOAO experiment, is a result.")
+
+    # The mean can look fine while one archive quietly fails the guardrail, which
+    # is exactly the case this check exists to catch — so BOTH have to pass.
+    mean_ok = abs(r.mean_delta) <= 0.005
+    verdict = ("HARMLESS — the cache reproduces the deployed space"
+               if mean_ok and r.guardrail_ok else
+               f"⚠ mean Δ {r.mean_delta:+.4f} "
+               f"({'ok' if mean_ok else 'too large'}), guardrail "
+               f"{'ok' if r.guardrail_ok else f'FAILED on {r.worst_label} {r.worst_delta:+.4f}'}"
+               + ("\n   → compare against the noise floor above before rebuilding: a "
+                  "single-archive\n     miss inside the seed spread is k-means "
+                  "initialisation, not lost information."
+                  if spreads else
+                  "\n   → re-run with --noise-floor 1 2 to see whether that is real "
+                  "or k-means noise."))
     print(f"\n   {verdict}")
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(
-            {"cap": cap, "per_archive": rows, "mean_delta": r.mean_delta,
-             "ci": [r.ci_low, r.ci_high]}, indent=2))
+            {"cap": cap, "seeds": seeds, "per_archive": rows,
+             "mean_delta": r.mean_delta, "ci": [r.ci_low, r.ci_high],
+             "guardrail_ok": r.guardrail_ok}, indent=2))
         print(f"[mole] ✓ {args.json}")
 
 
