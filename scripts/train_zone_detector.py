@@ -240,11 +240,18 @@ def main() -> None:
 
     print(f"[mole] training {args.base} for {args.epochs} epochs at imgsz={args.imgsz}")
     model = YOLO(args.base)
+    # `project` MUST be absolute: ultralytics resolves a relative project under
+    # its own runs dir, so "runs/zones/antwerp" silently becomes
+    # "runs/detect/runs/zones/antwerp" and every path we print afterwards is wrong.
     model.train(data=str(yaml), epochs=args.epochs, imgsz=args.imgsz,
                 batch=args.batch, seed=args.seed, device=args.device,
-                project=str(args.out), name="train", exist_ok=True)
-    best = args.out / "train" / "weights" / "best.pt"
+                project=str(args.out.resolve()), name="train", exist_ok=True)
+    # …and take the location from the trainer rather than reconstructing it.
+    save_dir = Path(getattr(model.trainer, "save_dir", args.out.resolve() / "train"))
+    best = save_dir / "weights" / "best.pt"
     print(f"[mole] ✓ weights → {best}")
+    if not best.is_file():
+        print(f"[mole] WARNING: no best.pt under {save_dir} — check the run directory")
 
     from mole.prep.detect import YoloTextZoneDetector
 
