@@ -452,9 +452,8 @@ page-vector + eval-compatible writers), `mole sup tokens`, `scripts/run_netvlad_
 1. **Token cache, not window means.** `FeatureCache` stores the statistic VLAD discards, which is
    the whole §0a defect. `TokenCache` stores a seeded, bounded (`--max-tokens-per-page 2048`) sample
    of each page's foreground tokens as a float16 memmap — ~5 GB for the 3,392-page pool. Unlabeled
-   pages included, because an eval gallery is the whole archive. Justified by the saturation finding
-   (3× fewer tokens/page ≈ +0.0006), and *checkable*: `vlad_page_vectors` with an archive's own
-   transductive codebook must reproduce `outputs/pooled_final` — run that before trusting anything.
+   pages included, because an eval gallery is the whole archive. ❌ **The 2048 cap was WRONG and the
+   check caught it** — see F5 below; run uncapped (`--max-tokens-per-page 0`, ~13.7 GB).
 2. **The training unit is a PAGE, not a window.** Retrieval ranks pages, so a sample must be one.
    This is the correction Tier 1 needed. `_PageView` re-uses `HandBatchSampler` verbatim (one entry
    per page, `windows_per_doc=1`), so the negative rule and `same_archive_frac` carry over unchanged.
@@ -472,6 +471,24 @@ page-vector + eval-compatible writers), `mole sup tokens`, `scripts/run_netvlad_
 5. **The LOAO driver evaluates three spaces, not two** — `frozen` (hard VLAD), `init` (untrained
    NetVLAD), `netvlad` (trained). `netvlad − init` isolates training at *any* α; `init − frozen` is
    the sanity check that the aggregator itself did not move. Costs one extra CPU pass per fold.
+
+**F5 — VLAD is NOT saturated at 2,048 tokens/page on these archives** *(2026-07-22,
+`scripts/check_token_cache.py`, the first thing the new cache was used for)*. Refitting each
+archive's own transductive codebook from the capped cache and comparing to `outputs/pooled_final`:
+mean Δmacro **−0.0107**, CI [−0.0221, −0.0006], guardrail FAILED — Flanders **−0.0259**, Utrecht
+−0.0127, Antwerp −0.0115, Brackley −0.0012, Leroy −0.0024.
+
+The cap was extrapolated from the HWI saturation result (8,800 → 2,900 tokens/page = +0.0006), but
+**that experiment never tested below ~2,900**, and these pages average ~5,250 foreground tokens
+(17.8M / 3,392), so 2,048 sits past the end of the evidence. The knee is somewhere in
+2,048–5,250. Flanders is hit hardest, the same archive that pays most for every other capacity
+restriction (shared codebook −0.093, K=256 −0.005) — its rare different-mode hands have the least
+redundancy to spare. Brackley and Leroy barely move.
+
+Two consequences. (1) **Build the cache uncapped**; the cap bought disk, not speed, because training
+subsamples to `tokens_per_page` per batch anyway. (2) Side observation worth its own experiment:
+this is evidence *for* the parked "denser test windows" idea — ~+0.011 macro sits in test-time token
+density alone, no retraining, and the ceiling is above the natural density of a 224/overlap-0 grid.
 
 *Open tension, measured on synthetic data and to be re-read on real:* fidelity and trainability pull
 against each other. At the calibrated α the assignment gradient is ~4 orders of magnitude below the

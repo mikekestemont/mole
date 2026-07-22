@@ -155,13 +155,18 @@ def descriptor_pool(cache: TokenCache, rows: list[int] | None = None, *,
     Sampling is proportional to page token counts (a flat draw over the pooled
     stream), matching what `mole codebook`'s reservoir does, so a codebook fit
     here is comparable to one fit by the GPU path.
+
+    ``max_descriptors=0`` means ALL of them — the same convention as
+    ``mole embed --vlad-max-descriptors`` and the same default that produced the
+    deployed embeddings. Use it whenever a fit here has to be compared against
+    one from the GPU path, or the subsample becomes a confound in its own right.
     """
     rows = list(range(cache.n_pages)) if rows is None else rows
     total = sum(cache.pages[i]["count"] for i in rows)
     if total == 0:
         raise ValueError("no tokens in the requested pages")
     rng = np.random.default_rng(seed)
-    keep = min(max_descriptors, total)
+    keep = total if max_descriptors <= 0 else min(max_descriptors, total)
     frac = keep / total
     out: list[np.ndarray] = []
     for i in rows:

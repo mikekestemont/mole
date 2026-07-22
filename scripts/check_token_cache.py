@@ -16,9 +16,17 @@ difference is which tokens the aggregation and the codebook fit got to see.
     python scripts/check_token_cache.py runs/sup_tokens
 
 A mean Δmacro within about ±0.005 says the cap is harmless and the LOAO
-experiment can be trusted. A systematic loss says lower `--max-tokens-per-page`
-was too aggressive — rebuild the cache with a larger cap (or 0 for all tokens)
+experiment can be trusted. A systematic loss says `--max-tokens-per-page` was
+too aggressive — rebuild the cache with a larger cap (or 0 for all tokens)
 before reading anything into a trained aggregator.
+
+MEASURED 2026-07-22, cap 2048: mean Δmacro **-0.0107**, CI [-0.0221, -0.0006],
+guardrail failed on Flanders (-0.0259), Utrecht -0.0127, Antwerp -0.0115. So the
+cap was NOT free on these archives. The saturation result it was extrapolated
+from (HWI: 8,800 -> 2,900 tokens/page = +0.0006) never tested below ~2,900,
+while these pages average ~5,250 foreground tokens — 2,048 sits past the end of
+the evidence. Run uncapped; the check then doubles as the float16 fidelity test,
+since the cap was the only other discrepancy from the deployed embeddings.
 """
 
 from __future__ import annotations
@@ -38,6 +46,10 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("outputs/cache_check"))
     ap.add_argument("--archives", nargs="*", default=None)
     ap.add_argument("--clusters", type=int, default=100)
+    ap.add_argument("--codebook-descriptors", type=int, default=0,
+                    help="Descriptors used to fit each archive's codebook. 0 = ALL, "
+                         "matching `mole embed`'s default; anything else adds a "
+                         "subsample confound on top of the cap being tested.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cross-doc-only", action="store_true", default=True)
     ap.add_argument("--json", type=Path, default=None)
@@ -64,7 +76,8 @@ def main() -> None:
         print(f"\n== {A}")
         page_rows = cache.rows_for(archive=A)
         # each archive's OWN codebook, exactly as the transductive deploy does
-        pool = descriptor_pool(cache, page_rows, max_descriptors=4_000_000,
+        pool = descriptor_pool(cache, page_rows,
+                               max_descriptors=args.codebook_descriptors,
                                seed=args.seed)
         codebook = fit_codebook(pool, n_clusters=args.clusters, seed=args.seed)
         mat = vlad_page_vectors(cache, codebook, page_rows)
