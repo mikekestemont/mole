@@ -45,8 +45,11 @@ def _is_bilevel(img) -> bool:
 
 
 def encode_page(path: str | Path, *, max_width: int = 1600,
-                binarize: bool = True) -> tuple[bytes, str]:
-    """Encode one page as compact lossless bytes; returns ``(data, mime)``.
+                binarize: bool = True) -> tuple[bytes, str, int, int]:
+    """Encode one page; returns ``(data, mime, width, height)``.
+
+    The size is returned because the viewer places the page in data space and
+    needs its aspect ratio to avoid stretching the script.
 
     Downscaling is capped rather than aggressive: ``max_width`` only bites on
     scans wider than it, because resolution is exactly what makes the script
@@ -90,7 +93,7 @@ def encode_page(path: str | Path, *, max_width: int = 1600,
             img.save(buf, fmt, **kw)
         except (OSError, KeyError, ValueError):
             continue                                # e.g. Pillow built without WebP
-        return buf.getvalue(), f"image/{fmt.lower()}"
+        return buf.getvalue(), f"image/{fmt.lower()}", img.width, img.height
     raise RuntimeError(f"could not encode {path}")
 
 
@@ -121,6 +124,7 @@ class ImageBudget:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.used = 0
         self.uris: dict[str, str] = {}
+        self.dims: dict[str, tuple[int, int]] = {}
         self.skipped = 0
         self.failed = 0
         self.full = False       # candidates arrive most-important-first: once one
@@ -145,22 +149,25 @@ class ImageBudget:
         path = Path(path)
         cp = self._cache_path(path)
         blob = mime = None
+        w = h = 0
         if cp is not None and cp.is_file():
             raw = cp.read_bytes()
             sep = raw.index(b"\0")
-            mime, blob = raw[:sep].decode(), raw[sep + 1:]
+            head, blob = raw[:sep].decode(), raw[sep + 1:]
+            mime, _, wh = head.partition("|")
+            w, h = (int(v) for v in wh.split("x")) if "x" in wh else (0, 0)
         else:
             if not path.is_file():
                 self.failed += 1
                 return False
             try:
-                blob, mime = encode_page(path, max_width=self.max_width,
-                                         binarize=self.binarize)
+                blob, mime, w, h = encode_page(path, max_width=self.max_width,
+                                               binarize=self.binarize)
             except Exception:                       # a broken scan must not kill the report
                 self.failed += 1
                 return False
             if cp is not None:
-                cp.write_bytes(mime.encode() + b"\0" + blob)
+                cp.write_bytes(f"{mime}|{w}x{h}".encode() + b"\0" + blob)
 
         cost = int(len(blob) * 4 / 3) + 64          # base64 inflation + the attribute
         if self.max_bytes and self.used + cost > self.max_bytes:
@@ -169,6 +176,7 @@ class ImageBudget:
             return False
         self.used += cost
         self.uris[key] = data_uri(blob, mime)
+        self.dims[key] = (w, h)
         return True
 
     def summary(self) -> str:
