@@ -29,12 +29,20 @@ A BASELINE IS ALWAYS REPORTED. The fine-tuned model is scored against the
 off-the-shelf detector on the same held-out pages, because "we trained a model"
 is not a result — "it beats what we already had" is.
 
-CEILING NOTE. mole's zone consumer is an axis-aligned bbox, and this trains an
-axis-aligned detector. The Antwerp crops were made by POLYGON-masking the page
-(everything outside the quadrilateral set to white) and then cropping to the
-bbox, so a detector can reproduce the crop but not the masking. If that gap
-turns out to matter, ultralytics supports an OBB task and the existing
-YoloTextZoneDetector already reads OBB output.
+WHY AXIS-ALIGNED AND NOT OBB, MEASURED. The Antwerp crops were made by
+POLYGON-masking the page (everything outside the quadrilateral set to white)
+before cropping to the bbox, so an axis-aligned detector cannot reproduce the
+masking. That gap is negligible on this data: over 471 ground-truth regions the
+bbox over-covers the polygon by a median of **1.021x** (90th pct 1.074, max
+1.199), because these are flatbed scans and the quads are near-axis-aligned. OBB
+would buy ~2% of area and cost a task conversion, so `detect` it is.
+
+That is also why the base weights are COCO yolo11n rather than
+magistermilitum/YOLO_manuscripts: the manuscript model is an OBB net, a
+different ultralytics task with a different head, and it cannot be fine-tuned on
+a detect-format dataset. On a single large high-contrast region per page, generic
+pretraining is plenty; --base yolo11s.pt is the knob if more capacity is wanted,
+though nano may well be the better size at 400 images.
 """
 
 from __future__ import annotations
