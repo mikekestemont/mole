@@ -275,3 +275,17 @@ def test_netvlad_page_vectors_are_l2_normalised(tmp_path):
     model = NetVLAD.from_codebook(codebook, 2.0)
     emb = netvlad_page_vectors(model, cache, [0, 1, 2], progress=False)
     np.testing.assert_allclose(np.linalg.norm(emb, axis=1), 1.0, atol=1e-5)
+
+
+def test_descriptor_pool_uncapped_is_exact(tmp_path):
+    """max_descriptors=0 returns EVERY token, in order — no sampling, no loss.
+
+    This is the setting the cache check runs at, because reproducing
+    `outputs/pooled_final` means fitting on all descriptors the way
+    `mole embed` does. Also guards the in-place fill: an uncapped pool on a real
+    archive is ~8 GB, so accumulate-then-vstack would double peak RAM.
+    """
+    cache = _fake_cache(tmp_path, n_hands=4, docs_per_hand=2, tokens=25)
+    pool = descriptor_pool(cache, max_descriptors=0)
+    assert len(pool) == cache.n_tokens == 4 * 2 * 25
+    np.testing.assert_allclose(pool, np.asarray(cache.tokens, dtype=np.float32))

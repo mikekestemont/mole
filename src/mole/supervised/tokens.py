@@ -160,6 +160,11 @@ def descriptor_pool(cache: TokenCache, rows: list[int] | None = None, *,
     ``mole embed --vlad-max-descriptors`` and the same default that produced the
     deployed embeddings. Use it whenever a fit here has to be compared against
     one from the GPU path, or the subsample becomes a confound in its own right.
+
+    The result is sized up front and filled in place rather than accumulated and
+    stacked: on an uncapped cache the pool is the archive (Utrecht ≈ 5.4M
+    descriptors ≈ 8.3 GB as float32), and collecting blocks first would hold two
+    copies at the moment of the stack.
     """
     rows = list(range(cache.n_pages)) if rows is None else rows
     total = sum(cache.pages[i]["count"] for i in rows)
@@ -168,18 +173,19 @@ def descriptor_pool(cache: TokenCache, rows: list[int] | None = None, *,
     rng = np.random.default_rng(seed)
     keep = total if max_descriptors <= 0 else min(max_descriptors, total)
     frac = keep / total
-    out: list[np.ndarray] = []
-    for i in rows:
-        block = cache.page_tokens(i)
-        if len(block) == 0:
-            continue
-        take = int(round(len(block) * frac))
+    takes = [min(int(round(cache.pages[i]["count"] * frac)), cache.pages[i]["count"])
+             for i in rows]
+    out = np.empty((sum(takes), cache.dim), dtype=np.float32)
+    pos = 0
+    for i, take in zip(rows, takes):
         if take <= 0:
             continue
-        if take < len(block):
-            block = block[rng.choice(len(block), take, replace=False)]
-        out.append(block)
-    return np.vstack(out) if out else np.zeros((0, cache.dim), np.float32)
+        block = cache.page_tokens(i)
+        if take < len(block):                      # frac == 1 ⇒ no draw, exact copy
+            block = block[np.sort(rng.choice(len(block), take, replace=False))]
+        out[pos:pos + len(block)] = block
+        pos += len(block)
+    return out[:pos]
 
 
 def build_token_cache(checkpoint: str | Path, index, out_dir: str | Path, *,
