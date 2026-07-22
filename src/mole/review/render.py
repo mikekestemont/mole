@@ -218,6 +218,8 @@ def _picker(schemes, scheme_data, hands) -> str:
     if n_unl:
         bits.append(f'<label><input type="checkbox" id="unl" checked> '
                     f'show unattributed <b>{n_unl}</b></label>')
+    bits.append('<label title="Hide the suggestion lists and just browse the map">'
+                '<input type="checkbox" id="expert"> expert view</label>')
     return "".join(bits)
 
 
@@ -225,6 +227,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   clusters: str | Path | None = None, limit: int = DEFAULT_LIMIT,
                   max_mb: float = DEFAULT_MAX_MB, image_cache: str | Path | None = None,
                   image_url: str | None = None, images: bool = True,
+                  image_scope: str = "listed",
                   method: str = "auto", seed: int = 0) -> tuple[Path, str]:
     """Build the review sheet. Returns ``(path, summary_line)``."""
     from mole.review.images import ImageBudget
@@ -264,6 +267,10 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
         for _kind, _h, _b, rws in sections:
             for r in rws:
                 wanted.extend(r.get("docs", [])[:4])
+        if image_scope == "all":
+            # expert mode clicks arbitrary dots, so every document needs a page —
+            # still budget-capped, and still listed-documents-first.
+            wanted.extend(range(len(names)))
         seen = set()
         for i in wanted:
             if i in seen:
@@ -326,7 +333,18 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  svg.dim .dot{fill-opacity:.06}
  svg.dim .dot.hot{fill-opacity:1;fill:#d1495b}
  svg.dim .dot.warm{fill-opacity:.85;fill:#2a9d8f}
- .panel{flex:1;min-width:380px;max-width:720px}
+ .right{flex:1;min-width:380px;max-width:720px}
+ .panel{margin-top:12px}
+ body.expert .panel{display:none}
+ body.expert .bar{display:none}
+ .inspect{position:sticky;top:12px;background:#fff;border:1px solid #0001;
+   border-radius:10px;padding:12px;z-index:2}
+ .inspect .ph{opacity:.6;font-size:13px}
+ .inspect img{width:100%;border:1px solid #0002;border-radius:6px;background:#fff;
+   max-height:70vh;object-fit:contain}
+ .inspect h2{font-size:15px;margin:0 0 2px;word-break:break-all}
+ .inspect .meta{font-size:13px;opacity:.75;margin-bottom:8px}
+ .dot.sel{stroke:#111;stroke-width:2}
  details.sec{border:1px solid #0001;border-radius:10px;background:#fff;margin-bottom:10px}
  details.sec>summary{cursor:pointer;padding:11px 14px;font-weight:600;list-style:none}
  details.sec>summary::-webkit-details-marker{display:none}
@@ -354,6 +372,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  @media (prefers-color-scheme:dark){
   body{background:#16150f;color:#eee} #map,details.sec,.imgs img{background:#000;border-color:#fff2}
   .row:hover{background:#ffffff0d} .count{background:#ffffff1a}
+  .inspect{background:#111;border-color:#fff2} .dot.sel{stroke:#fff}
   .dec button,.bar button,.dec input{background:#1c1c1c;color:#eee;border-color:#fff3}
   .dec button.on{background:#eee;color:#111}}
 </style></head><body>
@@ -370,7 +389,12 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     __SVG__
     <div class="legend" id="legend">__LEGEND__</div>
   </div>
-  <div class="panel" id="panel"></div>
+  <div class="right">
+    <div class="inspect" id="inspect">
+      <div class="ph">Click any point on the map to see that charter.</div>
+    </div>
+    <div class="panel" id="panel"></div>
+  </div>
 </div>
 <p class="sub">Hover a suggestion to see which charters it is about. Click it to
 open the handwriting and record what you think. Nothing here changes your files —
@@ -399,6 +423,33 @@ function syncUnl(){
   for(var j=0;j<keys.length;j++) keys[j].classList.toggle('off', !vis);
 }
 if(unl) unl.addEventListener('change', syncUnl);
+var expert = document.getElementById('expert');
+if(expert) expert.addEventListener('change', function(){
+  document.body.classList.toggle('expert', expert.checked);
+});
+
+// --- click a point: show that charter in the sticky inspector
+var box = document.getElementById('inspect'), selected = null;
+function inspect(i){
+  if(selected !== null && dots[selected]) dots[selected].classList.remove('sel');
+  for(var k=0;k<dots.length;k++){
+    if(+dots[k].getAttribute('data-i') === i){ dots[k].classList.add('sel'); selected = k; }
+  }
+  var uri = D.images[i], url = D.urls[i] || '', cat = D.schemes[active].cats[i];
+  var head = '<h2>' + esc(D.names[i]) + '</h2><div class="meta">' +
+    (D.hands[i] ? esc(D.hands[i]) : 'not attributed') +
+    (cat && cat !== D.hands[i] ? ' · ' + esc(active) + ': ' + esc(cat) : '') +
+    (url ? ' · <a class="orig" href="' + esc(url) + '" target="_blank">open original</a>' : '') +
+    '</div>';
+  box.innerHTML = head + (uri
+    ? '<img src="' + uri + '">'
+    : '<div class="ph">No image was embedded for this charter — rebuild with ' +
+      '<code>--image-scope all</code> (and <code>--max-mb 0</code>) to include every page.</div>');
+}
+svg.addEventListener('click', function(e){
+  var c = e.target.closest ? e.target.closest('circle') : null;
+  if(c) inspect(+c.getAttribute('data-i'));
+});
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function light(row){
   svg.classList.add('dim');

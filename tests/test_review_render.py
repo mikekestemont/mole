@@ -130,3 +130,26 @@ def test_colour_schemes_and_the_unlabeled_toggle_survive(tmp_path):
     # unlabeled keeps the neutral grey, so the palette is spent on real hands
     from mole.viz.scatter import _UNLABELED_GREY
     assert _UNLABELED_GREY in json.dumps(payload["schemes"]["hand"]["colors"])
+
+
+def test_clicking_a_point_has_an_inspector_to_fill(tmp_path):
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "i.html", method="pca", images=False)
+    html = out.read_text()
+    assert 'id="inspect"' in html                 # the sticky side panel
+    assert "svg.addEventListener('click'" in html  # ... fed by map clicks
+    assert 'id="expert"' in html                   # expert view switch
+    assert "body.expert .panel{display:none}" in html   # ... which hides the lists
+    assert "body.expert .bar{display:none}" in html     # ... and the decisions bar
+
+
+def test_image_scope_all_covers_every_document(tmp_path):
+    """Expert mode clicks arbitrary points, so every page must be embedded."""
+    npy = _corpus(tmp_path, n_hands=4, docs=4)          # 16 documents
+    listed, _ = render_review(npy, out=tmp_path / "l.html", method="pca", max_mb=0)
+    every, _ = render_review(npy, out=tmp_path / "a.html", method="pca", max_mb=0,
+                             image_scope="all")
+    n_listed = listed.read_text().count("data:image/")
+    n_all = every.read_text().count("data:image/")
+    assert n_all == 16
+    assert n_all >= n_listed
