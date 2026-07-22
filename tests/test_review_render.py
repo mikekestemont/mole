@@ -214,3 +214,57 @@ def test_both_map_backends_expose_the_same_interface(tmp_path):
     bhtml = bk.read_text()
     assert all(c in bhtml for c in calls) and "window.MOLE" in bhtml
     assert bk.stat().st_size > svg.stat().st_size    # ~4 MB of inlined BokehJS
+
+
+def test_no_bokeh_warning_from_the_empty_page_source(tmp_path):
+    """The viewer's source starts empty — all columns, or Bokeh warns."""
+    pytest.importorskip("bokeh")
+    import warnings
+
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")              # any BokehUserWarning fails
+        render_review(npy, out=tmp_path / "w.html", method="pca", images=False,
+                      map_backend="bokeh", max_mb=0)
+
+
+def test_wide_pages_are_cropped_not_squashed(tmp_path):
+    """A very wide charter is cropped to its middle; the aspect never changes."""
+    from PIL import Image
+
+    from mole.review.images import encode_page
+
+    wide = tmp_path / "wide.png"
+    Image.new("L", (4000, 900), 255).save(wide)
+    _, _, w, h = encode_page(wide, max_aspect=1.7)
+    assert abs(w / h - 1.7) < 0.02                  # clipped to the cap
+    assert h == 900                                 # height untouched: no shrinking
+
+    tall = tmp_path / "tall.png"
+    Image.new("L", (800, 1200), 255).save(tall)
+    _, _, w2, h2 = encode_page(tall, max_aspect=1.7)
+    assert (w2, h2) == (800, 1200)                  # portrait pages are left alone
+
+
+def test_finch_levels_are_offered_with_silhouettes(tmp_path):
+    npy = _corpus(tmp_path, n_hands=6, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "f.html", method="pca", images=False,
+                           map_backend="svg")
+    schemes = list(_payload(out)["schemes"])
+    finch = [n for n in schemes if n.startswith("FINCH")]
+    assert finch, schemes
+    # a level colouring everything the same says nothing and must not be offered
+    assert not any("· 1 clusters" in n for n in finch)
+    if len([n for n in finch if "silhouette" in n]) > 1:
+        assert sum("★" in n for n in finch) == 1     # exactly one best level marked
+
+
+def test_expert_flag_opens_in_expert_view(tmp_path):
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    plain, _ = render_review(npy, out=tmp_path / "p.html", method="pca", images=False,
+                             map_backend="svg")
+    exp, _ = render_review(npy, out=tmp_path / "e.html", method="pca", images=False,
+                           map_backend="svg", expert=True)
+    assert '<body class="">' in plain.read_text()
+    assert '<body class="expert">' in exp.read_text()
+    assert 'id="expert" checked' in exp.read_text()   # the toggle agrees

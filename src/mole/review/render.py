@@ -184,27 +184,31 @@ def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
 
 def _schemes(report, hands: list[str], paths, clusters) -> list[tuple[str, list[str]]]:
     """Colour schemes offered in the picker: hand, dataset, then FINCH levels."""
-    import json as _json
-
     out: list[tuple[str, list[str]]] = [
         ("hand", [_short(h) if h else "unlabeled" for h in hands])]
     datasets = [p.parent.name or "root" for p in paths]
     if len(set(datasets)) > 1:
         out.append(("dataset", datasets))
-    if clusters:                       # a full mole cluster report: every level
-        rep = _json.loads(Path(clusters).read_text())
-        for lv in rep.get("levels", []):
-            if len(lv["labels"]) == len(hands):
-                out.append((f"FINCH L{lv['level']} ({lv['n_clusters']} clusters)",
-                            [f"c{v}" for v in lv["labels"]]))
-    elif report.cluster_labels and len(report.cluster_labels) == len(hands):
-        n = len(set(report.cluster_labels))
-        out.append((f"discovered clusters ({n})",
-                    [f"c{v}" for v in report.cluster_labels]))
+    # One scheme per FINCH level, so the hierarchy can be walked from fine to
+    # coarse against the recorded hands. Levels with a single cluster are dropped
+    # (they colour everything identically and say nothing), and the level with the
+    # best silhouette is marked — a principled default rather than a guess.
+    levels = [lv for lv in getattr(report, "cluster_levels", [])
+              if lv["n_clusters"] > 1 and len(lv["labels"]) == len(hands)]
+    sils = [lv["silhouette"] for lv in levels if lv["silhouette"] is not None]
+    best = max(sils) if sils else None
+    for lv in levels:
+        sil = lv["silhouette"]
+        tag = f"FINCH L{lv['level']} · {lv['n_clusters']} clusters"
+        if sil is not None:
+            tag += f" · silhouette {sil:.3f}"
+            if best is not None and sil == best:
+                tag += " ★"
+        out.append((tag, [f"c{v}" for v in lv["labels"]]))
     return out
 
 
-def _picker(schemes, scheme_data, hands) -> str:
+def _picker(schemes, scheme_data, hands, expert: bool = False) -> str:
     """Scheme dropdown + the show/hide-unlabeled toggle (both from `mole viz`)."""
     from mole.viz.scatter import _is_unlabeled
 
@@ -218,8 +222,9 @@ def _picker(schemes, scheme_data, hands) -> str:
     if n_unl:
         bits.append(f'<label><input type="checkbox" id="unl" checked> '
                     f'show unattributed <b>{n_unl}</b></label>')
+    checked = " checked" if expert else ""
     bits.append('<label title="Hide the suggestion lists and just browse the map">'
-                '<input type="checkbox" id="expert"> expert view</label>')
+                f'<input type="checkbox" id="expert"{checked}> expert view</label>')
     return "".join(bits)
 
 
@@ -228,6 +233,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   max_mb: float = DEFAULT_MAX_MB, image_cache: str | Path | None = None,
                   image_url: str | None = None, images: bool = True,
                   image_scope: str = "listed", map_backend: str = "auto",
+                  expert: bool = False,
                   method: str = "auto", seed: int = 0) -> tuple[Path, str]:
     """Build the review sheet. Returns ``(path, summary_line)``."""
     from mole.review.images import ImageBudget
@@ -322,12 +328,13 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
         map_div = _svg(coords, first["colors"], schemes[0][1], names)
         glue = _svg_glue_js()
         viewer_html = '<img id="pageimg" style="display:none">' 
-    html = _HTML.replace("__TITLE__", escape(", ".join(report.datasets) or "archive")) \
+    html = _HTML.replace("__BODYCLASS__", "expert" if expert else "") \
+                .replace("__TITLE__", escape(", ".join(report.datasets) or "archive")) \
                 .replace("__SUBTITLE__", subtitle) \
                 .replace("__BOKEH_CSS__", bk_css) \
                 .replace("__MAP__", map_div) \
                 .replace("__VIEWER__", viewer_html) \
-                .replace("__PICKER__", _picker(schemes, scheme_data, hands)) \
+                .replace("__PICKER__", _picker(schemes, scheme_data, hands, expert)) \
                 .replace("__LEGEND__", first["legend"]) \
                 .replace("__PAYLOAD__", json.dumps(payload)) \
                 .replace("__BOKEH_JS__", bk_js) \
@@ -452,7 +459,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  svg#map{background:#12131a;border:1px solid var(--line);border-radius:10px;width:100%;height:auto}
  @media(max-width:900px){.wrap{flex-direction:column;gap:12px}
    .mapcol,.right{flex:1 1 auto !important;width:100%}.split{display:none}}
-</style></head><body>
+</style></head><body class="__BODYCLASS__">
 <h1>Scribe review — __TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
 <div class="bar">

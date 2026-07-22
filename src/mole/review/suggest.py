@@ -58,9 +58,16 @@ class ReviewReport:
     duplicates: list[dict] = field(default_factory=list)
     isolated: list[dict] = field(default_factory=list)
     calibration: dict = field(default_factory=dict)
-    # FINCH's finest partition, kept so the renderer can offer "colour by
-    # discovered cluster" without paying for the clustering a second time.
-    cluster_labels: list[int] = field(default_factory=list)
+    # FINCH's whole hierarchy, kept so the renderer can offer one colour scheme
+    # per level without paying for the clustering a second time. Each entry is
+    # {level, n_clusters, labels, silhouette}; `silhouette` is None where it is
+    # undefined (fewer than 2 clusters, or one cluster per document).
+    cluster_levels: list[dict] = field(default_factory=list)
+
+    @property
+    def cluster_labels(self) -> list[int]:
+        """The finest partition — what the 'possible new hand' list is built on."""
+        return self.cluster_levels[0]["labels"] if self.cluster_levels else []
 
     def to_json(self, path: str | Path) -> Path:
         p = Path(path)
@@ -356,6 +363,24 @@ def _apply_calibration(cal, score: float) -> float | None:
     return float(np.interp(score, cal["grid"], cal["precision"]))
 
 
+def _silhouette(Xn: np.ndarray, labels: np.ndarray) -> float | None:
+    """Mean silhouette of one partition (cosine), or None where it is undefined.
+
+    A partition needs at least 2 clusters and at least one cluster with more than
+    one member; FINCH's coarsest levels often fail both. Reported per level so the
+    reader has a principled way to pick one instead of guessing.
+    """
+    n_lab = len(set(labels.tolist()))
+    if n_lab < 2 or n_lab >= len(labels):
+        return None
+    try:
+        from sklearn.metrics import silhouette_score
+
+        return float(silhouette_score(Xn, labels, metric="cosine"))
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------- the driver
 def _load(embeddings: str | Path):
     path = Path(embeddings)
@@ -439,12 +464,25 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
 
     if clusters is not None:
         rep = json.loads(Path(clusters).read_text())
-        cl = np.asarray(rep["levels"][0]["labels"], dtype=int)
+        levels = [(lv["level"], np.asarray(lv["labels"], dtype=int))
+                  for lv in rep.get("levels", [])]
     else:
         from mole.cluster.finch import finch
-        cl = np.asarray(finch(Xn, metric="cosine").partitions[0], dtype=int)
+        res = finch(Xn, metric="cosine")
+        levels = [(i, np.asarray(lab, dtype=int))
+                  for i, lab in enumerate(res.partitions)]
+
+    report.cluster_levels = [
+        {"level": int(i), "n_clusters": int(len(set(lab.tolist()))),
+         "labels": [int(v) for v in lab],
+         "silhouette": _silhouette(Xn, lab)}
+        for i, lab in levels
+        if len(lab) == len(rows) and len(set(lab.tolist())) > 1
+    ]
+
+    cl = np.asarray(report.cluster_labels, dtype=int) if report.cluster_levels \
+        else np.zeros(0, dtype=int)
     if len(cl) == len(rows):
-        report.cluster_labels = [int(v) for v in cl]
         cohesions = [_cohesion(sim, idx, doc_arr) for idx in members.values()]
         report.new_hands = _new_hands(sim, cl, is_labeled, scores, doc_arr, names,
                                       [c for c in cohesions if np.isfinite(c)], limit)

@@ -45,11 +45,19 @@ def _is_bilevel(img) -> bool:
 
 
 def encode_page(path: str | Path, *, max_width: int = 1600,
-                binarize: bool = True) -> tuple[bytes, str, int, int]:
+                binarize: bool = True,
+                max_aspect: float = 1.7) -> tuple[bytes, str, int, int]:
     """Encode one page; returns ``(data, mime, width, height)``.
 
     The size is returned because the viewer places the page in data space and
     needs its aspect ratio to avoid stretching the script.
+
+    A charter far wider than it is tall would have to be shrunk to fit the viewer,
+    making the script unreadable — the one thing this whole path exists to avoid.
+    Above ``max_aspect`` (width/height) the page is therefore CROPPED to its
+    central column rather than scaled down: the letterforms keep their size, and
+    the full page is always one click away via "open original". Aspect ratio is
+    never altered.
 
     Downscaling is capped rather than aggressive: ``max_width`` only bites on
     scans wider than it, because resolution is exactly what makes the script
@@ -69,6 +77,11 @@ def encode_page(path: str | Path, *, max_width: int = 1600,
                 best, area = i, img.size[0] * img.size[1]
         img.seek(best)
     img = img.convert("L")
+
+    if max_aspect and img.height and img.width / img.height > max_aspect:
+        keep = int(img.height * max_aspect)
+        left = (img.width - keep) // 2
+        img = img.crop((left, 0, left + keep, img.height))
 
     bilevel = _is_bilevel(img)
     if binarize and not bilevel:
@@ -115,9 +128,11 @@ class ImageBudget:
     """
 
     def __init__(self, max_bytes: int, *, max_width: int = 1600,
-                 cache_dir: str | Path | None = None, binarize: bool = True):
+                 cache_dir: str | Path | None = None, binarize: bool = True,
+                 max_aspect: float = 1.7):
         self.max_bytes = max_bytes
         self.max_width = max_width
+        self.max_aspect = max_aspect
         self.binarize = binarize
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir:
@@ -134,7 +149,8 @@ class ImageBudget:
         if not self.cache_dir:
             return None
         try:
-            stamp = f"{path.resolve()}|{path.stat().st_mtime_ns}|{self.max_width}"
+            stamp = (f"{path.resolve()}|{path.stat().st_mtime_ns}|"
+                     f"{self.max_width}|{self.max_aspect}")
         except OSError:
             return None
         return self.cache_dir / (hashlib.sha256(stamp.encode()).hexdigest()[:16] + ".bin")
@@ -162,7 +178,8 @@ class ImageBudget:
                 return False
             try:
                 blob, mime, w, h = encode_page(path, max_width=self.max_width,
-                                               binarize=self.binarize)
+                                               binarize=self.binarize,
+                                               max_aspect=self.max_aspect)
             except Exception:                       # a broken scan must not kill the report
                 self.failed += 1
                 return False

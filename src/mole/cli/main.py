@@ -463,6 +463,10 @@ def review(
         help="Which charters get an embedded page: 'listed' (only those appearing in "
              "a suggestion, the emailable default) or 'all' (every document, so any "
              "point on the map can be clicked — pair with --max-mb 0 for local use)."),
+    expert: bool = typer.Option(
+        False, "--expert",
+        help="Open in expert view: map + charter viewer only, suggestion lists "
+             "hidden (still toggleable in the page)."),
     map_backend: str = typer.Option(
         "auto", "--map",
         help="Map backend: 'bokeh' (dark, zoom/pan/box-zoom tools, and the same "
@@ -484,7 +488,8 @@ def review(
     path, summary = render_review(
         embeddings, out=out, clusters=clusters, limit=limit, max_mb=max_mb,
         image_cache=image_cache, image_url=image_url, images=images,
-        image_scope=image_scope, map_backend=map_backend, method=method, seed=seed)
+        image_scope=image_scope, map_backend=map_backend, expert=expert,
+        method=method, seed=seed)
     console.print(f"[green]✓ review sheet → {path}[/green]\n  {summary}")
 
 

@@ -73,7 +73,8 @@ def build(coords, names, hands, colors):
     p.select(TapTool)                      # tap selection drives the viewer
 
     # the viewer: an image in data space, so zoom/pan behave like the map
-    img = ColumnDataSource(dict(url=[], x=[0], y=[0], w=[1], h=[1]), name="page")
+    # every column must start empty: a url=[] beside x=[0] trips a BokehUserWarning
+    img = ColumnDataSource(dict(url=[], x=[], y=[], w=[], h=[]), name="page")
     v = figure(name="viewer", sizing_mode="stretch_both",
                tools="pan,wheel_zoom,box_zoom,reset,save",
                active_scroll="wheel_zoom", toolbar_location="above",
