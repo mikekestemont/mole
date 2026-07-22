@@ -74,6 +74,12 @@ def main() -> None:
                     help="Softmax sharpness; default = derived from the data.")
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--tokens-per-page", type=int, default=512)
+    ap.add_argument("--select-max-tokens", type=int, default=0,
+                    help="Cap tokens per page in the PER-EPOCH model-selection pass "
+                         "(0 = all). This runs every epoch over the holdout pages and "
+                         "is the dominant training cost; it only picks the best epoch, "
+                         "so capping it trades a slightly noisier stopping rule for a "
+                         "much shorter run. The reported numbers always use all tokens.")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--holdout-frac", type=float, default=0.2)
     ap.add_argument("--batches-per-epoch", type=int, default=100)
@@ -149,7 +155,7 @@ def main() -> None:
             cache, codebook, holdout_hands=select_hands, exclude_hands=excluded,
             alpha=args.alpha, learn=args.learn, epochs=args.epochs,
             tokens_per_page=args.tokens_per_page, lr=args.lr, seed=args.seed,
-            device=args.device,
+            select_max_tokens=args.select_max_tokens, device=args.device,
             sampler_cfg={"hands_per_batch": args.hands_per_batch,
                          "docs_per_hand": args.docs_per_hand,
                          "same_archive_frac": args.same_archive_frac,
