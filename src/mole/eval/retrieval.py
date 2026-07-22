@@ -201,7 +201,7 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
              min_confidence: float | None = None, cross_doc_only: bool = False,
              holdout_hands: set[str] | None = None,
              rerank: str | None = None, rerank_k: int = 2,
-             rerank_layers: int = 1, rerank_gamma: float = 0.4,
+             rerank_layers: int = 1, rerank_gamma: float = 0.1,
              out: str | Path | None = None) -> EvalResult:
     """Run the retrieval benchmark and write a JSON report sidecar.
 

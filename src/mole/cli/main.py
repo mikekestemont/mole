@@ -400,7 +400,11 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
              "improvement — report it beside the plain number, not instead of it."),
     rerank_k: int = typer.Option(2, "--rerank-k", help="Neighbours aggregated (sgr)."),
     rerank_layers: int = typer.Option(1, "--rerank-layers", help="Propagation rounds (sgr)."),
-    rerank_gamma: float = typer.Option(0.4, "--rerank-gamma", help="Edge-weight decay (sgr)."),
+    rerank_gamma: float = typer.Option(
+        0.1, "--rerank-gamma",
+        help="Edge-weight decay (sgr). Lower = trust only close neighbours. Default "
+             "0.1, not the paper's 0.4: the useful value tracks the archive's Top-1, "
+             "and on a low-precision gallery reranking can hurt. Tune per archive."),
     out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
 ) -> None:
     """Retrieval benchmark from partial labels: mAP, Top-k, cross-dataset breakdown."""
