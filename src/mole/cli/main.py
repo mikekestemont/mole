@@ -527,6 +527,45 @@ def sup_cache(
                         include_unlabeled=include_unlabeled)
 
 
+@sup_app.command("tokens")
+def sup_tokens(
+    checkpoint: Path = typer.Argument(..., help="Base backbone checkpoint (frozen)."),
+    labels_root: Path = typer.Argument(..., help="Dataset dir or pooled root with labels.csv."),
+    cache_dir: Path = typer.Argument(..., help="Output dir for tokens.f16 + tokens.index.json."),
+    max_tokens_per_page: int = typer.Option(
+        2048, "--max-tokens-per-page",
+        help="Seeded cap on foreground tokens kept per page — this sets the cache "
+             "size (n_pages * cap * dim * 2 bytes). VLAD is saturated in token "
+             "count, so 2048 is far past the point where more tokens move mAP; "
+             "verify on your data by reproducing an archive's transductive VLAD "
+             "from the cache. 0 = keep everything."),
+    window_size: int = typer.Option(224, help="Window size (px)."),
+    overlap: float = typer.Option(0.0, help="Window overlap fraction."),
+    invert: bool = typer.Option(True, help="Invert intensity (raven wants white-on-black)."),
+    fg_method: str = typer.Option("contrast", help="Foreground filter: contrast | raven | intensity."),
+    batch_size: int = typer.Option(32, help="Window forward batch size."),
+    seed: int = typer.Option(0, help="Seed for the per-page token subsample."),
+    device: Optional[str] = typer.Option(None, help="cuda | mps | cpu (default: auto)."),
+) -> None:
+    """Cache foreground patch TOKENS per page — the GPU pass Tier 2 needs.
+
+    `mole sup cache` stores one mean descriptor per window, which is the very
+    statistic VLAD discards; a trainable aggregator needs the tokens themselves.
+    Labeled and unlabeled pages are both cached, because a retrieval gallery is
+    the whole archive. Afterwards, codebook fitting, NetVLAD training and page
+    embeddings are all CPU over this one file.
+    """
+    from mole.supervised.datasets import load_labeled_pairs
+    from mole.supervised.tokens import build_token_cache
+
+    index = load_labeled_pairs(labels_root)
+    console.print(f"[cyan]{index.stats()}[/cyan]")
+    build_token_cache(checkpoint, index, cache_dir, window_size=window_size,
+                      overlap=overlap, invert=invert, fg_method=fg_method,
+                      max_tokens_per_page=max_tokens_per_page,
+                      batch_size=batch_size, device=device, seed=seed)
+
+
 @sup_app.command("train")
 def sup_train(
     config: Path = typer.Argument(..., help="Config YAML with a `sup:` section."),

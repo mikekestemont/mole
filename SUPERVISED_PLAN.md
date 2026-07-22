@@ -94,6 +94,14 @@ Otherwise NetVLAD is complexity without a target.
 > anyway on **cost**, not merit: it needs a token-level cache (~17.8M descriptors / ~27 GB) and GPU
 > training, whereas Tier 3 attacks the same target with infrastructure that already exists. Revisit
 > if Tier 3 also plateaus.
+>
+> **UN-PARKED 2026-07-22 — the cost objection was answered, not waived.** A *bounded* token cache
+> (2048 tokens/page, float16 ≈ 5 GB) costs ONE GPU pass, after which codebook fitting, training,
+> page embedding and every ablation are CPU over the same frozen descriptors — so an aggregator A/B
+> is a controlled comparison rather than two GPU passes differing in more than the thing under test.
+> The cap is licensed by the saturation finding and is verifiable against `outputs/pooled_final`.
+> Tier 3 remains the bigger lever and is unaffected; this now runs beside it, not instead of it.
+> Built in Phase 6 below.
 
 They compose: the Phase-5 deliverable is explicitly *Tier-3 backbone → re-cache features → retrain
 the Tier-1 head on top*. The head is ~minutes to retrain, so it rides along with every backbone.
@@ -430,8 +438,61 @@ overshoot). **Checkpoint:** the standard per-archive guardrail loop + §4.2 prot
 Phase-2/3 (re-cache → retrain head → suggest self-test) on the new backbone — the composed stack is
 the final deliverable.
 
-**Phase 6 — NetVLAD (parked)**
-Only on the §1 trigger. Design sketch is in the handoff; not planned further here on purpose.
+**Phase 6 — NetVLAD / trainable aggregation** ✅ **BUILT 2026-07-22 — awaiting the GPU pass**
+Un-parked on the §0a argument (F1–F3: the loss has to reach *inside* the aggregation), not the §1
+codebook-quality trigger, which remains unfired. The cost objection was answered by moving the
+experiment off the GPU entirely — see the token cache below.
+
+*What exists:* `mole/supervised/tokens.py` (`TokenCache`, `build_token_cache`, `descriptor_pool`),
+`mole/supervised/netvlad.py` (`NetVLAD`, `alpha_for_codebook`, `vlad_fidelity`, `train_netvlad`,
+page-vector + eval-compatible writers), `mole sup tokens`, `scripts/run_netvlad_loao.py`,
+`tests/test_netvlad.py` (17 tests). Everything after one GPU pass is CPU.
+
+*Design decisions (and why):*
+1. **Token cache, not window means.** `FeatureCache` stores the statistic VLAD discards, which is
+   the whole §0a defect. `TokenCache` stores a seeded, bounded (`--max-tokens-per-page 2048`) sample
+   of each page's foreground tokens as a float16 memmap — ~5 GB for the 3,392-page pool. Unlabeled
+   pages included, because an eval gallery is the whole archive. Justified by the saturation finding
+   (3× fewer tokens/page ≈ +0.0006), and *checkable*: `vlad_page_vectors` with an archive's own
+   transductive codebook must reproduce `outputs/pooled_final` — run that before trusting anything.
+2. **The training unit is a PAGE, not a window.** Retrieval ranks pages, so a sample must be one.
+   This is the correction Tier 1 needed. `_PageView` re-uses `HandBatchSampler` verbatim (one entry
+   per page, `windows_per_doc=1`), so the negative rule and `same_archive_frac` carry over unchanged.
+   Power-norm + L2 make the descriptor invariant to token count, so training on a 512-token subsample
+   and deploying on all of them is sampling noise, not a train/deploy mismatch (asserted in tests).
+3. **Init = the baseline.** `from_codebook` sets `w = 2αC`, `b = −α‖C‖²`, so at sharp α the untrained
+   module *is* frozen-codebook VLAD and Δ measures learning alone.
+4. **α is calibrated on descriptor fidelity, never on assignment mass.** ⚠ The intuitive rule ("pick
+   α so the runner-up centre carries ~1% of the softmax") is **wrong here and fails silently**:
+   measured, it gives assignment entropy ≈ 0 (looks decisively one-hot) while the descriptor's cosine
+   to hard VLAD is **0.01**. The residual to a *distant* centre is large and coherent, whereas the
+   correct cluster's residuals mostly cancel — so a sub-1% assignment leak outweighs the entire
+   correct cluster. `alpha_for_codebook` therefore searches α against `vlad_fidelity` (cosine to hard
+   VLAD, target 0.999). Pinned by `test_entropy_is_not_a_sufficient_fidelity_proxy`.
+5. **The LOAO driver evaluates three spaces, not two** — `frozen` (hard VLAD), `init` (untrained
+   NetVLAD), `netvlad` (trained). `netvlad − init` isolates training at *any* α; `init − frozen` is
+   the sanity check that the aggregator itself did not move. Costs one extra CPU pass per fold.
+
+*Open tension, measured on synthetic data and to be re-read on real:* fidelity and trainability pull
+against each other. At the calibrated α the assignment gradient is ~4 orders of magnitude below the
+centroid gradient (`grad_assign` 8e-4 vs `grad_centroids` ~7–13), i.e. **NetVLAD here is mostly
+"learn the codebook by backprop", not "learn the routing"**. A synthetic probe with real headroom
+found a non-empty window (Δ +0.022 at the calibrated α, collapsing to ~0 at 4×), so the machinery
+trains — but it predicts nothing about the archives. Both gradient norms and the entropy are logged
+every epoch, so a null result is attributable rather than ambiguous. Prediction to check against the
+outcome: `--learn centroids` ≈ `--learn both`, and `--learn assign` ≈ a no-op.
+
+*Success criteria (two bars, both reported):*
+| comparison | question | bar |
+|---|---|---|
+| vs `init` (its own initialisation) | does learning the aggregator help? | mean Δmacro ≥ **+0.02**, CI excludes 0, no archive < −0.01 |
+| vs `outputs/pooled_final` (transductive) | is it deployable? | mean Δmacro ≥ **0** — a learned codebook is frozen by construction, so this is where the ~0.032 frozen-codebook tax gets paid back |
+
+Kill condition: Δ vs `init` ≤ +0.01 with the centroid gradient healthy ⇒ aggregation-level
+supervision does not transfer either, and the remaining lever is Tier 3 (backbone), consistent with
+"the backbone has always been the big lever" (+0.09..+0.13 vs anything downstream of it).
+Also record the **training-archive** Δ per fold: large-train / flat-test = overfitting, flat-both =
+the aggregator is not the bottleneck. F4 is the reason that distinction is collected up front.
 
 Fits the working protocol: every GPU step is a command you run on the server; my side is code +
 CPU-verifiable tests; sign-off between phases.
