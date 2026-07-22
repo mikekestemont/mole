@@ -268,3 +268,51 @@ def test_expert_flag_opens_in_expert_view(tmp_path):
     assert '<body class="">' in plain.read_text()
     assert '<body class="expert">' in exp.read_text()
     assert 'id="expert" checked' in exp.read_text()   # the toggle agrees
+
+
+def test_hdbscan_schemes_mark_noise_as_unclustered(tmp_path):
+    """HDBSCAN's -1 must read as 'joined nothing', not as a discovered hand."""
+    pytest.importorskip("sklearn.cluster", reason="needs scikit-learn >= 1.3")
+    npy = _corpus(tmp_path, n_hands=6, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "h.html", method="pca", images=False,
+                           map_backend="svg", cluster_method="both")
+    payload = _payload(out)
+    names = list(payload["schemes"])
+    hdb = [n for n in names if n.startswith("HDBSCAN")]
+    assert hdb, names
+    from mole.viz.scatter import _UNLABELED_GREY
+    for n in hdb:
+        sc = payload["schemes"][n]
+        if "-1" in sc["cats"]:
+            i = sc["cats"].index("-1")
+            assert sc["colors"][i] == _UNLABELED_GREY   # neutral, not a hand colour
+    # the star ranks within a method, never across them
+    for family in ("FINCH", "HDBSCAN"):
+        fam = [n for n in names if n.startswith(family) and "silhouette" in n]
+        if len(fam) > 1:
+            assert sum("★" in n for n in fam) == 1
+
+
+def test_cluster_method_selects_which_families_appear(tmp_path):
+    pytest.importorskip("sklearn.cluster")
+    npy = _corpus(tmp_path, n_hands=6, docs=4)
+    only_finch, _ = render_review(npy, out=tmp_path / "f2.html", method="pca",
+                                  images=False, map_backend="svg",
+                                  cluster_method="finch")
+    names = list(_payload(only_finch)["schemes"])
+    assert not any(n.startswith("HDBSCAN") for n in names)
+    assert any(n.startswith("FINCH") for n in names)
+
+
+def test_noise_is_never_proposed_as_a_new_hand(tmp_path):
+    """The unclustered bag is not a discovery."""
+    from mole.review.suggest import NOISE, _new_hands
+    import numpy as np
+
+    sim = np.full((6, 6), 0.9, dtype=np.float32)
+    labels = np.array([NOISE] * 4 + [7, 7])
+    docs = np.asarray([f"a/{i}" for i in range(6)], dtype=object)
+    names = [f"d{i}.png" for i in range(6)]
+    out = _new_hands(sim, labels, np.zeros(6, bool), np.zeros((6, 1), np.float32),
+                     docs, names, [0.5], 10)
+    assert all(c["cluster"] != NOISE for c in out)

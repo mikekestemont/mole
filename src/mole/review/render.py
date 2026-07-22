@@ -195,16 +195,36 @@ def _schemes(report, hands: list[str], paths, clusters) -> list[tuple[str, list[
     # best silhouette is marked — a principled default rather than a guess.
     levels = [lv for lv in getattr(report, "cluster_levels", [])
               if lv["n_clusters"] > 1 and len(lv["labels"]) == len(hands)]
-    sils = [lv["silhouette"] for lv in levels if lv["silhouette"] is not None]
-    best = max(sils) if sils else None
+    # compare like with like: FINCH's silhouette counts every document, HDBSCAN's
+    # excludes noise, so a method that discards more looks better for free. The
+    # star therefore ranks WITHIN a method, never across them.
+    def _family(name):
+        return name.split()[0]
+
+    best_by: dict[str, float] = {}
+    for lv in levels:
+        if lv["silhouette"] is None:
+            continue
+        fam = _family(lv["level"])
+        best_by[fam] = max(best_by.get(fam, -2.0), lv["silhouette"])
+    # exactly one star per family: ties go to the FINER partition, which is the
+    # one that can still represent a two-document hand
+    starred: set[str] = set()
     for lv in levels:
         sil = lv["silhouette"]
-        tag = f"FINCH L{lv['level']} · {lv['n_clusters']} clusters"
+        tag = f"{lv['level']} · {lv['n_clusters']} clusters"
+        if lv.get("n_noise"):
+            tag += f" · {lv['n_noise']} unclustered"
         if sil is not None:
             tag += f" · silhouette {sil:.3f}"
-            if best is not None and sil == best:
+            fam = _family(lv["level"])
+            if sil == best_by.get(fam) and fam not in starred:
+                starred.add(fam)
                 tag += " ★"
-        out.append((tag, [f"c{v}" for v in lv["labels"]]))
+        # HDBSCAN's noise label is -1, which viz/scatter already treats as
+        # "no ground truth": those points stay neutral grey instead of being
+        # coloured as if they were a discovered hand.
+        out.append((tag, ["-1" if v == -1 else f"c{v}" for v in lv["labels"]]))
     return out
 
 
@@ -233,7 +253,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   max_mb: float = DEFAULT_MAX_MB, image_cache: str | Path | None = None,
                   image_url: str | None = None, images: bool = True,
                   image_scope: str = "listed", map_backend: str = "auto",
-                  expert: bool = False,
+                  expert: bool = False, cluster_method: str = "both",
                   method: str = "auto", seed: int = 0) -> tuple[Path, str]:
     """Build the review sheet. Returns ``(path, summary_line)``."""
     from mole.review.images import ImageBudget
@@ -241,7 +261,8 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
     from mole.viz.scatter import reduce_2d
 
     embeddings = Path(embeddings)
-    report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed)
+    report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed,
+                          cluster_method=cluster_method)
     X, meta, rows_meta, names, paths, hands, _docs = document_table(embeddings)
     coords, used_method = reduce_2d(X, method, seed)
     schemes = _schemes(report, hands, paths, clusters)

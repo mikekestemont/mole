@@ -272,7 +272,7 @@ def _new_hands(sim, cluster_labels, is_labeled, scores, doc_ids, names,
     """Tight clusters of mostly-unlabeled documents that match no known hand."""
     ref = float(np.nanmedian(hand_cohesions)) if len(hand_cohesions) else 0.0
     out = []
-    for c in sorted(set(int(v) for v in cluster_labels)):
+    for c in sorted(set(int(v) for v in cluster_labels) - {NOISE}):
         idx = np.where(cluster_labels == c)[0]
         if len(idx) < 3:
             continue
@@ -363,22 +363,58 @@ def _apply_calibration(cal, score: float) -> float | None:
     return float(np.interp(score, cal["grid"], cal["precision"]))
 
 
+NOISE = -1          # HDBSCAN's "belongs to no cluster" label
+
+
 def _silhouette(Xn: np.ndarray, labels: np.ndarray) -> float | None:
     """Mean silhouette of one partition (cosine), or None where it is undefined.
 
-    A partition needs at least 2 clusters and at least one cluster with more than
-    one member; FINCH's coarsest levels often fail both. Reported per level so the
-    reader has a principled way to pick one instead of guessing.
+    Noise points are EXCLUDED. Scoring them as if they were a cluster would
+    reward a method for dumping every awkward charter into one bag — the opposite
+    of what we want to know. A partition also needs at least 2 clusters and fewer
+    clusters than documents.
     """
-    n_lab = len(set(labels.tolist()))
-    if n_lab < 2 or n_lab >= len(labels):
+    keep = labels != NOISE
+    lab = labels[keep]
+    n_lab = len(set(lab.tolist()))
+    if n_lab < 2 or n_lab >= len(lab):
         return None
     try:
         from sklearn.metrics import silhouette_score
 
-        return float(silhouette_score(Xn, labels, metric="cosine"))
+        return float(silhouette_score(Xn[keep], lab, metric="cosine"))
     except Exception:
         return None
+
+
+def _hdbscan_levels(Xn: np.ndarray, sizes=(2, 3, 5)) -> list[tuple[str, np.ndarray]]:
+    """Density clustering at a few minimum cluster sizes.
+
+    Run on a PCA-reduced space, not the raw descriptor: density estimation in
+    38,400 dimensions is close to meaningless, and reducing first is the standard
+    remedy. ``min_cluster_size=2`` is included deliberately — this corpus has 69
+    two-document hands, and a floor of 5 cannot represent them at all — with the
+    understanding that it is also the noisiest setting.
+    """
+    try:
+        from sklearn.cluster import HDBSCAN
+    except ImportError:                      # scikit-learn < 1.3
+        return []
+
+    from mole.viz.scatter import _pca
+
+    Z = _pca(Xn, min(50, max(2, min(Xn.shape) - 1)))
+    out = []
+    for mcs in sizes:
+        if mcs > len(Z):
+            continue
+        try:
+            lab = HDBSCAN(min_cluster_size=int(mcs)).fit_predict(Z)
+        except Exception:
+            continue
+        if len(set(lab.tolist()) - {NOISE}) > 1:
+            out.append((f"HDBSCAN min-size {mcs}", np.asarray(lab, dtype=int)))
+    return out
 
 
 # ------------------------------------------------------------------- the driver
@@ -419,7 +455,8 @@ def document_table(embeddings: str | Path):
 
 
 def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
-                 limit: int = 100, seed: int = 0) -> ReviewReport:
+                 limit: int = 100, seed: int = 0,
+                 cluster_method: str = "both") -> ReviewReport:
     """Build every suggestion list for one embedding file.
 
     ``clusters`` is an optional ``mole cluster`` report; without one, FINCH's
@@ -462,22 +499,27 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
     report.duplicates = _duplicates(sim, doc_arr, names, limit)
     report.isolated = _isolated(sim, doc_arr, names, limit)
 
+    levels: list[tuple[str, np.ndarray]] = []
     if clusters is not None:
         rep = json.loads(Path(clusters).read_text())
-        levels = [(lv["level"], np.asarray(lv["labels"], dtype=int))
-                  for lv in rep.get("levels", [])]
-    else:
+        levels += [(f"FINCH L{lv['level']}", np.asarray(lv["labels"], dtype=int))
+                   for lv in rep.get("levels", [])]
+    elif cluster_method in ("finch", "both"):
         from mole.cluster.finch import finch
         res = finch(Xn, metric="cosine")
-        levels = [(i, np.asarray(lab, dtype=int))
-                  for i, lab in enumerate(res.partitions)]
+        levels += [(f"FINCH L{i}", np.asarray(lab, dtype=int))
+                   for i, lab in enumerate(res.partitions)]
+    if cluster_method in ("hdbscan", "both"):
+        levels += _hdbscan_levels(Xn)
 
     report.cluster_levels = [
-        {"level": int(i), "n_clusters": int(len(set(lab.tolist()))),
+        {"level": name,
+         "n_clusters": int(len(set(lab.tolist()) - {NOISE})),
+         "n_noise": int((lab == NOISE).sum()),
          "labels": [int(v) for v in lab],
          "silhouette": _silhouette(Xn, lab)}
-        for i, lab in levels
-        if len(lab) == len(rows) and len(set(lab.tolist())) > 1
+        for name, lab in levels
+        if len(lab) == len(rows) and len(set(lab.tolist()) - {NOISE}) > 1
     ]
 
     cl = np.asarray(report.cluster_labels, dtype=int) if report.cluster_levels \

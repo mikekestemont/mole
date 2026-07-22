@@ -463,6 +463,11 @@ def review(
         help="Which charters get an embedded page: 'listed' (only those appearing in "
              "a suggestion, the emailable default) or 'all' (every document, so any "
              "point on the map can be clicked — pair with --max-mb 0 for local use)."),
+    cluster_method: str = typer.Option(
+        "both", "--cluster-method",
+        help="Discovered-cluster colour schemes: 'finch' (parameter-free hierarchy) "
+             "| 'hdbscan' (density-based, marks unclusterable charters as noise and "
+             "copes better with very uneven hand sizes) | 'both'."),
     expert: bool = typer.Option(
         False, "--expert",
         help="Open in expert view: map + charter viewer only, suggestion lists "
@@ -489,7 +494,7 @@ def review(
         embeddings, out=out, clusters=clusters, limit=limit, max_mb=max_mb,
         image_cache=image_cache, image_url=image_url, images=images,
         image_scope=image_scope, map_backend=map_backend, expert=expert,
-        method=method, seed=seed)
+        cluster_method=cluster_method, method=method, seed=seed)
     console.print(f"[green]✓ review sheet → {path}[/green]\n  {summary}")
 
 
