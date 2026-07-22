@@ -392,6 +392,15 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
         help="Split file (JSON) of held-out hands; restricts queries to them (gallery stays full)."),
     per_hand: bool = typer.Option(
         False, "--per-hand", help="Print the worst-first per-hand AP table."),
+    rerank: Optional[str] = typer.Option(
+        None, "--rerank",
+        help="Post-hoc retrieval stage over the descriptors: 'sgr' (similarity-graph "
+             "reranking, Peer et al. ICDAR 2023). Reads the .npy as-is and changes "
+             "nothing on disk. NB this is a GALLERY-dependent trick, not an embedding "
+             "improvement — report it beside the plain number, not instead of it."),
+    rerank_k: int = typer.Option(2, "--rerank-k", help="Neighbours aggregated (sgr)."),
+    rerank_layers: int = typer.Option(1, "--rerank-layers", help="Propagation rounds (sgr)."),
+    rerank_gamma: float = typer.Option(0.4, "--rerank-gamma", help="Edge-weight decay (sgr)."),
     out: Optional[Path] = typer.Option(None, help="JSON report path (default: <embeddings>.eval.json)."),
 ) -> None:
     """Retrieval benchmark from partial labels: mAP, Top-k, cross-dataset breakdown."""
@@ -401,7 +410,8 @@ def eval(  # noqa: A001 - deliberately mirrors the subcommand name
     hold = load_hand_set(holdout_hands) if holdout_hands else None
     result = evaluate(embeddings, datasets_root, metric=metric, topk=ks,
                       min_confidence=min_confidence, cross_doc_only=cross_doc_only,
-                      holdout_hands=hold, out=out)
+                      holdout_hands=hold, rerank=rerank, rerank_k=rerank_k,
+                      rerank_layers=rerank_layers, rerank_gamma=rerank_gamma, out=out)
     console.print(format_report(result, per_hand=per_hand))
 
 

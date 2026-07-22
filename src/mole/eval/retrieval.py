@@ -57,6 +57,7 @@ class EvalResult:
     overall: RetrievalScores
     min_confidence: float | None = None
     cross_doc_only: bool = False
+    rerank: str | None = None           # gallery-dependent post-hoc stage, if any
     n_holdout_hands: int | None = None  # queries restricted to N held-out hands
     within_dataset: RetrievalScores | None = None
     cross_dataset: RetrievalScores | None = None
@@ -199,6 +200,8 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
              *, metric: str = "cosine", topk: tuple[int, ...] = (1, 5, 10),
              min_confidence: float | None = None, cross_doc_only: bool = False,
              holdout_hands: set[str] | None = None,
+             rerank: str | None = None, rerank_k: int = 2,
+             rerank_layers: int = 1, rerank_gamma: float = 0.4,
              out: str | Path | None = None) -> EvalResult:
     """Run the retrieval benchmark and write a JSON report sidecar.
 
@@ -218,6 +221,13 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
     label-trained claim. For archives that are one-image-per-charter it is a
     no-op (every doc id is unique).
 
+    ``rerank`` applies a post-hoc retrieval stage to the descriptors before
+    scoring (currently ``sgr``). This is a GALLERY-dependent trick, not an
+    embedding improvement: report it alongside the plain number, never instead of
+    it. Diffusion runs over the WHOLE index — unlabeled pages included, since
+    they sit in a real gallery too — and sibling scans are excluded from the
+    neighbour graph so no credit comes from the scan shortcut.
+
     ``holdout_hands`` (a set of hand ids, possibly namespaced ``archive/hand``)
     restricts which docs may act as *queries* — the gallery stays the full
     archive. This is the §4.2 held-out-hand protocol: it measures whether the
@@ -230,7 +240,23 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
             "patch-level embedding; eval needs page-level (mean/cls/vlad) output")
 
     tables = _label_tables(datasets_root)
-    resolvers = _doc_resolvers(datasets_root) if cross_doc_only else {}
+    # doc ids are needed for cross-doc relevance AND to keep sibling scans out of
+    # the rerank graph, so resolve them whenever either is asked for.
+    resolvers = (_doc_resolvers(datasets_root)
+                 if (cross_doc_only or rerank) else {})
+
+    if rerank:
+        from mole.eval.rerank import apply_rerank
+        groups = np.asarray(
+            [f"{Path(p).parent.name}/"
+             f"{resolvers[Path(p).parent.name](Path(p).name)}"
+             if Path(p).parent.name in resolvers else str(p)
+             for p in images], dtype=object)
+        X = apply_rerank(X, rerank, groups=groups, k=rerank_k,
+                         layers=rerank_layers, gamma=rerank_gamma)
+        print(f"[mole] rerank={rerank} (k={rerank_k}, layers={rerank_layers}, "
+              f"gamma={rerank_gamma}) over {len(X)} indexed pages, "
+              f"{len(set(groups))} distinct documents")
     # When only one dataset carries labels, attribute every embedding to it even
     # if the mapping's folder name differs (embedded elsewhere, evaluated here).
     # With several datasets we key on the image's parent-folder name so shared
@@ -306,6 +332,7 @@ def evaluate(embeddings_path: str | Path, datasets_root: str | Path,
         model_id=model_id, metric=metric, n_embeddings=len(X), n_labeled=n,
         n_hands=len(set(hands)), coverage=n / len(X), datasets=dataset_names,
         overall=overall, min_confidence=min_confidence, cross_doc_only=cross_doc_only,
+        rerank=rerank,
         n_holdout_hands=n_holdout,
     )
 
