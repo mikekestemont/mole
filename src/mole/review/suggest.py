@@ -432,8 +432,16 @@ def _hdbscan_levels(Xn: np.ndarray, sizes=(2, 3, 5)) -> list[tuple[str, np.ndarr
     for mcs in sizes:
         if mcs > len(Z):
             continue
+        # sklearn 1.10 flips the default of `copy`; set it explicitly so the
+        # FutureWarning stays out of the user's terminal, but only if this version
+        # actually accepts the argument.
+        import inspect
+
+        kw = {"min_cluster_size": int(mcs)}
+        if "copy" in inspect.signature(HDBSCAN.__init__).parameters:
+            kw["copy"] = True
         try:
-            lab = HDBSCAN(min_cluster_size=int(mcs)).fit_predict(Z)
+            lab = HDBSCAN(**kw).fit_predict(Z)
         except Exception:
             continue
         if len(set(lab.tolist()) - {NOISE}) > 1:

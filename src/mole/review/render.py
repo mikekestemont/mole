@@ -247,9 +247,12 @@ def _picker(schemes, scheme_data, hands, expert: bool = False) -> str:
     if n_unl:
         bits.append(f'<label><input type="checkbox" id="unl" checked> '
                     f'show unattributed <b>{n_unl}</b></label>')
-    checked = " checked" if expert else ""
-    bits.append('<label title="Hide the suggestion lists and just browse the map">'
-                f'<input type="checkbox" id="expert"{checked}> expert view</label>')
+    # Reversed sense: ticking ADDS the review apparatus. Unticked is the bare
+    # map + charter viewer, which is what an expert wants by default.
+    checked = "" if expert else " checked"
+    bits.append('<label title="Show the suggestion lists below the map">'
+                f'<input type="checkbox" id="showlists"{checked}> '
+                'review suggestions</label>')
     return "".join(bits)
 
 
@@ -434,9 +437,11 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  .ctl label,.bar label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
  button,select,input[type=text]{background:#1e2130;color:var(--fg);border:1px solid var(--line);
    border-radius:7px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
+ /* top row: map | draggable divider | charter viewer, across the FULL width.
+    The suggestion lists sit underneath it, so both panes keep the whole window. */
  .wrap{display:flex;gap:0;align-items:flex-start;width:100%}
- .mapcol{flex:1 1 58%;min-width:260px}
- .right{flex:1 1 42%;min-width:260px;display:flex;flex-direction:column;gap:12px}
+ .mapcol{flex:1 1 55%;min-width:260px}
+ .viewcol{flex:1 1 45%;min-width:260px;display:flex;flex-direction:column}
  /* draggable divider: grab anywhere in the 14px gutter */
  .split{flex:0 0 14px;height:74vh;cursor:col-resize;position:relative;
    align-self:flex-start;touch-action:none}
@@ -464,11 +469,13 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  .inspect h2{font-size:14px;margin:0 0 2px;word-break:break-all}
  .inspect .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
  .inspect .ph{color:var(--dim);font-size:13px;padding:6px 0}
+ /* no flex:1 here — its flex-basis:0% beats height:66vh in a column container
+    and collapses the viewer to min-height */
  .inspect .figwrap{height:66vh;min-height:320px}
  .inspect .figwrap>div{width:100%;height:100%}
  body.expert .inspect .figwrap{height:76vh}
  #pageimg{width:100%;max-height:70vh;object-fit:contain;border-radius:6px;background:#000}
- .panel{display:flex;flex-direction:column;gap:9px}
+ .panel{display:flex;flex-direction:column;gap:9px;width:100%;margin-top:14px}
  body.expert .panel,body.expert .bar{display:none}
  details.sec{border:1px solid var(--line);border-radius:10px;background:var(--panel)}
  details.sec>summary{cursor:pointer;padding:10px 13px;font-weight:600;list-style:none}
@@ -489,7 +496,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  a{color:#8ab4f8} .dot{stroke:#0006;stroke-width:.5} .dot.sel{stroke:#fff;stroke-width:2}
  svg#map{background:#12131a;border:1px solid var(--line);border-radius:10px;width:100%;height:auto}
  @media(max-width:900px){.wrap{flex-direction:column;gap:12px}
-   .mapcol,.right{flex:1 1 auto !important;width:100%}.split{display:none}}
+   .mapcol,.viewcol{flex:1 1 auto !important;width:100%}.split{display:none}}
 </style></head><body class="__BODYCLASS__">
 <h1>Scribe review — __TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
@@ -498,21 +505,21 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   <label><input type="checkbox" id="nums"> show the numbers</label>
   <span class="sub" id="tally"></span>
 </div>
+<div class="ctl">__PICKER__</div>
 <div class="wrap">
   <div class="mapcol">
-    <div class="ctl">__PICKER__</div>
     <div class="card figbox">__MAP__</div>
     <div class="legend" id="legend">__LEGEND__</div>
   </div>
   <div class="split" id="split" title="Drag to resize"></div>
-  <div class="right">
+  <div class="viewcol">
     <div class="card inspect" id="inspect">
       <div id="ihead" class="ph">Click any point on the map to open that charter.</div>
       <div class="figwrap">__VIEWER__</div>
     </div>
-    <div class="panel" id="panel"></div>
   </div>
 </div>
+<div class="panel" id="panel"></div>
 <script>__BOKEH_JS__</script>
 __BOKEH_SCRIPT__
 <script>__MOLE_JS__</script>
@@ -565,7 +572,7 @@ paint(active);
   var split = document.getElementById('split'),
       wrap = document.querySelector('.wrap'),
       mapcol = document.querySelector('.mapcol'),
-      right = document.querySelector('.right');
+      right = document.querySelector('.viewcol');
   if(!split) return;
   var dragging = false;
   function move(e){
@@ -614,9 +621,10 @@ function syncUnl(){
   for(var j=0;j<keys.length;j++) keys[j].classList.toggle('off', !vis);
 }
 if(unl) unl.addEventListener('change', syncUnl);
-var expert = document.getElementById('expert');
-if(expert) expert.addEventListener('change', function(){
-  document.body.classList.toggle('expert', expert.checked);
+var showLists = document.getElementById('showlists');
+if(showLists) showLists.addEventListener('change', function(){
+  document.body.classList.toggle('expert', !showLists.checked);
+  window.dispatchEvent(new Event('resize'));   // the figures grow/shrink with it
 });
 
 var panel = document.getElementById('panel');

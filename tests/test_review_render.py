@@ -168,7 +168,7 @@ def test_inspector_and_expert_view_exist(tmp_path):
     html = out.read_text()
     assert 'id="inspect"' in html                    # the side panel
     assert "MOLE.onTap(showDoc)" in html             # ... fed by map taps
-    assert 'id="expert"' in html
+    assert 'id="showlists"' in html                  # reversed: ticking ADDS them
     assert "body.expert .panel,body.expert .bar{display:none}" in html
 
 
@@ -259,15 +259,31 @@ def test_finch_levels_are_offered_with_silhouettes(tmp_path):
         assert sum("★" in n for n in finch) == 1     # exactly one best level marked
 
 
-def test_expert_flag_opens_in_expert_view(tmp_path):
+def test_expert_flag_opens_without_the_suggestion_lists(tmp_path):
+    """The toggle is reversed: ticked = show suggestions, so --expert unticks it."""
     npy = _corpus(tmp_path, n_hands=4, docs=4)
     plain, _ = render_review(npy, out=tmp_path / "p.html", method="pca", images=False,
                              map_backend="svg")
     exp, _ = render_review(npy, out=tmp_path / "e.html", method="pca", images=False,
                            map_backend="svg", expert=True)
     assert '<body class="">' in plain.read_text()
+    assert 'id="showlists" checked' in plain.read_text()      # lists on by default
     assert '<body class="expert">' in exp.read_text()
-    assert 'id="expert" checked' in exp.read_text()   # the toggle agrees
+    assert 'id="showlists" checked' not in exp.read_text()    # ... off with --expert
+
+
+def test_suggestions_sit_below_the_two_panes(tmp_path):
+    """Map and viewer share the full width; the lists go underneath."""
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "l.html", method="pca", images=False,
+                           map_backend="svg")
+    html = out.read_text()
+    wrap = html.index('<div class="wrap">')
+    panel = html.index('<div class="panel" id="panel">')
+    assert html.index('class="viewcol"') > wrap
+    assert panel > html.index("</div>\n<div class=\"panel\"") - 1  # after the row
+    assert panel > wrap                                # lists come AFTER the panes
+    assert 'id="split"' in html and "col-resize" in html
 
 
 def test_hdbscan_schemes_mark_noise_as_unclustered(tmp_path):
