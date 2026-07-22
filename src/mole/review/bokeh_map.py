@@ -67,7 +67,12 @@ def build(coords, names, hands, colors):
                outline_line_color="#2a2c39")
     p.grid.grid_line_color = "#20222e"
     r = p.scatter("x", "y", source=src, size="size", color="color",
-                  fill_alpha="alpha", line_color="#0008", line_width=0.5)
+                  fill_alpha="alpha", line_color="#0008", line_width=0.5,
+                  # Bokeh's default non-selection alpha (0.2) is invisible on a dark
+                  # background: selecting one charter must not erase the context it
+                  # is being judged against.
+                  nonselection_fill_alpha=0.55, nonselection_line_alpha=0.25,
+                  selection_line_color="#ffffff", selection_line_width=2.0)
     p.add_tools(HoverTool(renderers=[r], tooltips=[("charter", "@name"),
                                                    ("hand", "@hand")]))
     p.select(TapTool)                      # tap selection drives the viewer
@@ -75,10 +80,13 @@ def build(coords, names, hands, colors):
     # the viewer: an image in data space, so zoom/pan behave like the map
     # every column must start empty: a url=[] beside x=[0] trips a BokehUserWarning
     img = ColumnDataSource(dict(url=[], x=[], y=[], w=[], h=[]), name="page")
+    # match_aspect governs AUTO-ranging only; these ranges are set explicitly from
+    # the frame's pixel size in glue_js (`fit`), which is the only way to letterbox
+    # a page of arbitrary shape without distorting it.
     v = figure(name="viewer", sizing_mode="stretch_both",
                tools="pan,wheel_zoom,box_zoom,reset,save",
                active_scroll="wheel_zoom", toolbar_location="above",
-               x_axis_location=None, y_axis_location=None, match_aspect=True,
+               x_axis_location=None, y_axis_location=None,
                background_fill_color="#12131a", border_fill_color="#12131a",
                outline_line_color="#2a2c39")
     v.grid.grid_line_color = None
@@ -112,10 +120,18 @@ window.MOLE = (function(){
     viewer  = doc.get_model_by_name('viewer');
     if(!scatter) return false;
     ready = true;
+    watchFrame();
     while(queue.length) queue.shift()();
     return true;
   }
   (function wait(n){ if(grab()||n>200) return; setTimeout(function(){wait(n+1)}, 50); })(0);
+  // the pane is resizable (the divider) — re-letterbox whenever the frame changes
+  function watchFrame(){
+    if(!viewer) return;
+    ['inner_width','inner_height'].forEach(function(prop){
+      viewer.properties[prop].change.connect(function(){ fit(); });
+    });
+  }
   function later(fn){ ready ? fn() : queue.push(fn); }
 
   function setColors(cols){
@@ -138,16 +154,31 @@ window.MOLE = (function(){
   function select(i){
     later(function(){ scatter.selected.indices = [i]; });
   }
+  var shownAspect = 1.0;
+  function fit(){
+    // The page occupies x 0..1 and y 0..ar in data space. To show it undistorted
+    // the DATA aspect must equal the FRAME's pixel aspect, so letterbox along
+    // whichever axis has room instead of stretching the image to the ranges.
+    if(!viewer) return;
+    var W = viewer.inner_width || 0, H = viewer.inner_height || 0;
+    if(!W || !H) return;
+    var P = H / W, ar = shownAspect;
+    if(ar > P){                       // page relatively taller: fit its height
+      var half = (ar / P) / 2;
+      viewer.x_range.start = 0.5 - half; viewer.x_range.end = 0.5 + half;
+      viewer.y_range.start = 0;          viewer.y_range.end = ar;
+    } else {                          // fit its width, centre it vertically
+      viewer.x_range.start = 0;          viewer.x_range.end = 1;
+      viewer.y_range.start = ar / 2 - P / 2;
+      viewer.y_range.end   = ar / 2 + P / 2;
+    }
+  }
   function showImage(uri, w, h){
     later(function(){
       if(!page) return;
-      var ar = (h && w) ? h / w : 1.0;
-      page.data = {url:[uri], x:[0], y:[ar], w:[1], h:[ar]};
-      page.change.emit();
-      if(viewer){
-        viewer.x_range.start = 0; viewer.x_range.end = 1;
-        viewer.y_range.start = 0; viewer.y_range.end = ar;
-      }
+      shownAspect = (h && w) ? h / w : 1.0;
+      page.data = {url:[uri], x:[0], y:[shownAspect], w:[1], h:[shownAspect]};
+      fit();
     });
   }
   function onTap(cb){

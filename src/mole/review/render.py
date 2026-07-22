@@ -201,26 +201,31 @@ def _schemes(report, hands: list[str], paths, clusters) -> list[tuple[str, list[
     def _family(name):
         return name.split()[0]
 
+    # Prefer AGREEMENT WITH THE RECORDED HANDS when there is any: a partition that
+    # recovers what the archivist established beats one that is merely tidy.
+    # Silhouette remains the fallback where nothing is labeled.
+    key = "ari" if any(lv.get("ari") is not None for lv in levels) else "silhouette"
     best_by: dict[str, float] = {}
     for lv in levels:
-        if lv["silhouette"] is None:
+        if lv.get(key) is None:
             continue
         fam = _family(lv["level"])
-        best_by[fam] = max(best_by.get(fam, -2.0), lv["silhouette"])
+        best_by[fam] = max(best_by.get(fam, -2.0), lv[key])
     # exactly one star per family: ties go to the FINER partition, which is the
     # one that can still represent a two-document hand
     starred: set[str] = set()
     for lv in levels:
-        sil = lv["silhouette"]
         tag = f"{lv['level']} · {lv['n_clusters']} clusters"
         if lv.get("n_noise"):
             tag += f" · {lv['n_noise']} unclustered"
-        if sil is not None:
-            tag += f" · silhouette {sil:.3f}"
-            fam = _family(lv["level"])
-            if sil == best_by.get(fam) and fam not in starred:
-                starred.add(fam)
-                tag += " ★"
+        if lv.get("ari") is not None:
+            tag += f" · agreement {lv['ari']:.3f}"
+        elif lv["silhouette"] is not None:
+            tag += f" · silhouette {lv['silhouette']:.3f}"
+        val, fam = lv.get(key), _family(lv["level"])
+        if val is not None and val == best_by.get(fam) and fam not in starred:
+            starred.add(fam)
+            tag += " ★"
         # HDBSCAN's noise label is -1, which viz/scatter already treats as
         # "no ground truth": those points stay neutral grey instead of being
         # coloured as if they were a discovered hand.
@@ -416,7 +421,12 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <style>
  :root{--bg:#0f1016;--panel:#171922;--line:#2a2c39;--fg:#e8e8ec;--dim:#9aa0b0}
  *{box-sizing:border-box}
- body{font:15px/1.55 system-ui,sans-serif;margin:0;padding:14px 18px;background:var(--bg);
+ /* Roboto if the reader has it (common on Linux/Android and any machine with
+    Google Fonts installed), otherwise the nearest system equivalent. Not fetched:
+    a webfont link would break the offline guarantee, and embedding one costs
+    ~40 KB per weight — say the word and it becomes --embed-font. */
+ body{font:15px/1.55 Roboto,"Helvetica Neue",Arial,system-ui,sans-serif;
+   margin:0;padding:14px 18px;background:var(--bg);
    color:var(--fg);width:100%}
  h1{font-size:19px;margin:0} .sub{opacity:.65;font-size:13px;margin-bottom:10px}
  .bar,.ctl{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:13px}

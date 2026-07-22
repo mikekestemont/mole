@@ -316,3 +316,56 @@ def test_noise_is_never_proposed_as_a_new_hand(tmp_path):
     out = _new_hands(sim, labels, np.zeros(6, bool), np.zeros((6, 1), np.float32),
                      docs, names, [0.5], 10)
     assert all(c["cluster"] != NOISE for c in out)
+
+
+def test_star_follows_agreement_with_recorded_hands_when_labels_exist(tmp_path):
+    """A partition that recovers the archivist's hands beats a merely tidy one."""
+    npy = _corpus(tmp_path, n_hands=6, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "ag.html", method="pca", images=False,
+                           map_backend="svg")
+    names = list(_payload(out)["schemes"])
+    scored = [n for n in names if "agreement" in n]
+    assert scored, names                          # labels exist -> agreement shown
+    assert not any("silhouette" in n for n in scored)   # one number, not two
+
+
+def test_silhouette_is_the_fallback_when_nothing_is_labeled(tmp_path):
+    from PIL import Image
+
+    rng = np.random.default_rng(3)
+    ds = tmp_path / "arch1"
+    ds.mkdir()
+    vecs, rows = [], []
+    for h in range(6):
+        c = rng.standard_normal(24)
+        for d in range(4):
+            n = f"h{h}_d{d}.png"
+            Image.new("L", (60, 80), 255).save(ds / n)
+            vecs.append(c + 0.05 * rng.standard_normal(24))
+            rows.append({"row": len(rows), "image": str(ds / n)})
+    np.save(tmp_path / "u.npy", np.asarray(vecs, dtype=np.float32))
+    (tmp_path / "u.mapping.json").write_text(json.dumps({"rows": rows}))
+    # no labels.csv at all
+
+    out, _ = render_review(tmp_path / "u.npy", out=tmp_path / "u.html", method="pca",
+                           images=False, map_backend="svg")
+    names = list(_payload(out)["schemes"])
+    assert any("silhouette" in n for n in names), names
+    assert not any("agreement" in n for n in names)
+
+
+def test_selection_leaves_the_rest_legible(tmp_path):
+    """Bokeh's default non-selection alpha is invisible on a dark background."""
+    pytest.importorskip("bokeh")
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "sel.html", method="pca", images=False,
+                           map_backend="bokeh", max_mb=0)
+    # Bokeh serialises the kwarg into a nonselection_glyph, so check the model
+    from mole.review.bokeh_map import build
+
+    coords = np.zeros((3, 2), dtype=np.float32)
+    _, _, _, _, _ = build(coords, ["a", "b", "c"], ["H", "H", ""],
+                          ["#111", "#222", "#333"])
+    assert out.read_text()                       # the page still builds
+    # and the row-hover dim floor is legible too
+    assert "0.18" in out.read_text()

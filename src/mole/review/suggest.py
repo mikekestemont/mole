@@ -387,6 +387,30 @@ def _silhouette(Xn: np.ndarray, labels: np.ndarray) -> float | None:
         return None
 
 
+def _agreement(hands: np.ndarray, labels: np.ndarray) -> dict:
+    """Score a partition against the hands that ARE recorded.
+
+    This is the better selector when labels exist: silhouette only asks whether a
+    partition is geometrically tidy, while agreement asks whether it recovers what
+    the archivist already established. Both are reported — silhouette still works
+    where nothing is labeled.
+
+    Unlabeled documents are excluded (an unlabeled charter may well belong to a
+    recorded hand, so counting it as an error would be wrong), and so are HDBSCAN's
+    noise points — a method should not be scored on the charters it declined to
+    place.
+    """
+    from mole.cluster.finch import cluster_agreement
+
+    truth = [h if h and lab != NOISE else None
+             for h, lab in zip(hands.tolist(), labels.tolist())]
+    if not any(t is not None for t in truth):
+        return {"ari": None, "nmi": None, "purity": None, "n_scored": 0}
+    a = cluster_agreement(truth, labels)
+    return {"ari": a["ari"], "nmi": a["nmi"], "purity": a["purity"],
+            "n_scored": a["n_labeled"]}
+
+
 def _hdbscan_levels(Xn: np.ndarray, sizes=(2, 3, 5)) -> list[tuple[str, np.ndarray]]:
     """Density clustering at a few minimum cluster sizes.
 
@@ -483,21 +507,8 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
     report = ReviewReport(
         n_documents=len(rows), n_labeled=int(is_labeled.sum()), n_hands=len(members),
         datasets=sorted({p.name for p in parents}), model_id=meta.get("model_id"))
-    if not members:
-        return report                       # nothing labeled: no reference to reason from
-
-    scores, hands = hand_score_matrix(sim, members, doc_arr)
-    cal = _calibrate(scores, hands, labeled, hand_of_arr)
-    report.calibration = cal
-
-    report.attributions = _attributions(scores, hands, unlabeled, names, members, limit)
-    for a in report.attributions:
-        a["calibrated_p"] = _apply_calibration(cal, a["score"])
-    report.doubts = _doubts(scores, hands, labeled, hand_of_arr, names, limit)
-    report.merges = _merges(sim, members, doc_arr, limit)
-    report.splits = _splits(sim, members, doc_arr, names, seed, limit)
-    report.duplicates = _duplicates(sim, doc_arr, names, limit)
-    report.isolated = _isolated(sim, doc_arr, names, limit)
+    # Clustering does not need labels, and an archive with NONE is exactly when
+    # discovered clusters matter most — so compute them before the early return.
 
     levels: list[tuple[str, np.ndarray]] = []
     if clusters is not None:
@@ -517,10 +528,28 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
          "n_clusters": int(len(set(lab.tolist()) - {NOISE})),
          "n_noise": int((lab == NOISE).sum()),
          "labels": [int(v) for v in lab],
-         "silhouette": _silhouette(Xn, lab)}
+         "silhouette": _silhouette(Xn, lab),
+         **_agreement(hand_of_arr, lab)}
         for name, lab in levels
         if len(lab) == len(rows) and len(set(lab.tolist()) - {NOISE}) > 1
     ]
+
+    if not members:
+        return report      # nothing labeled: no hand to reason from, clusters only
+
+    scores, hands = hand_score_matrix(sim, members, doc_arr)
+    cal = _calibrate(scores, hands, labeled, hand_of_arr)
+    report.calibration = cal
+
+    report.attributions = _attributions(scores, hands, unlabeled, names, members, limit)
+    for a in report.attributions:
+        a["calibrated_p"] = _apply_calibration(cal, a["score"])
+    report.doubts = _doubts(scores, hands, labeled, hand_of_arr, names, limit)
+    report.merges = _merges(sim, members, doc_arr, limit)
+    report.splits = _splits(sim, members, doc_arr, names, seed, limit)
+    report.duplicates = _duplicates(sim, doc_arr, names, limit)
+    report.isolated = _isolated(sim, doc_arr, names, limit)
+
 
     cl = np.asarray(report.cluster_labels, dtype=int) if report.cluster_levels \
         else np.zeros(0, dtype=int)
