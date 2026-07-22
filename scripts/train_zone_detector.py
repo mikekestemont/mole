@@ -102,6 +102,27 @@ def build_dataset(images: Path, page: Path, out: Path, *, val_frac: float,
     return yaml, len(splits["train"]), len(splits["val"])
 
 
+def val_split(images: Path, page: Path, *, val_frac: float, seed: int):
+    """The held-out pairs, reconstructed exactly as build_dataset shuffled them.
+
+    Same filter, same sorted order, same seeded shuffle — so scoring a checkpoint
+    later never silently scores it on pages it trained on.
+    """
+    from mole.prep.pagexml import read_page_dir
+
+    layouts = read_page_dir(page)
+    by_stem = {p.stem: p for p in images.iterdir() if p.suffix.lower() in IMAGE_EXT}
+    pairs = []
+    for stem, layout in sorted(layouts.items()):
+        img = by_stem.get(stem)
+        bbox = layout.text_bbox()
+        if img is None or bbox is None or not (layout.width and layout.height):
+            continue
+        pairs.append((img, bbox, layout.width, layout.height))
+    random.Random(seed).shuffle(pairs)
+    return pairs[:max(1, int(round(len(pairs) * val_frac)))]
+
+
 def _predict_bbox(detector, image_path):
     from mole.prep.detect import main_text_zone, union_bbox
 
@@ -152,6 +173,14 @@ def _print_score(name: str, s: dict) -> None:
               f"{r['iou_median']:>6.3f}")
 
 
+def _print_guidance() -> None:
+    print("\n  Read COVERAGE first: clipping text is unrecoverable, extra background "
+          "is cheap.\n  Pick the smallest padding whose 'clipped' column is ~0%, then "
+          "check 'excess'.\n  Layout cropping was measured worth +0.053 macro on "
+          "Antwerp (GT zones), so the\n  bar is whether this detector recovers a "
+          "useful share of that on unseen pages.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -173,25 +202,39 @@ def main() -> None:
                     help="Skip scoring the off-the-shelf detector for comparison.")
     ap.add_argument("--dataset-only", action="store_true",
                     help="Build the YOLO dataset and stop (no training).")
+    ap.add_argument("--eval-only", type=Path, default=None, metavar="WEIGHTS",
+                    help="Skip training and score an existing .pt on the held-out "
+                         "split — e.g. a run's current best.pt while it is still "
+                         "training, or after stopping it early. Ultralytics picks "
+                         "best.pt by a mAP-blend fitness that weighs over- and "
+                         "under-cropping symmetrically; this scores what we "
+                         "actually care about.")
     args = ap.parse_args()
+
+    val_items = val_split(args.images, args.page, val_frac=args.val_frac,
+                          seed=args.seed)
+
+    if args.eval_only:
+        from mole.prep.detect import YoloTextZoneDetector
+
+        print(f"\n{'=' * 68}\n== Held-out zone quality ({len(val_items)} pages "
+              f"never trained on)\n{'=' * 68}")
+        _print_score(f"{args.eval_only}",
+                     score(YoloTextZoneDetector(weights=str(args.eval_only),
+                                                device=args.device),
+                           val_items, args.padding))
+        if not args.no_baseline:
+            _print_score("off-the-shelf YOLO_manuscripts",
+                         score(YoloTextZoneDetector(device=args.device),
+                               val_items, args.padding))
+        _print_guidance()
+        return
 
     args.out.mkdir(parents=True, exist_ok=True)
     yaml, n_train, n_val = build_dataset(args.images, args.page, args.out,
                                          val_frac=args.val_frac, seed=args.seed)
     if args.dataset_only:
         return
-
-    # Reconstruct the val split (same seed ⇒ same shuffle) for scoring.
-    from mole.prep.pagexml import read_page_dir
-
-    layouts = read_page_dir(args.page)
-    by_stem = {p.stem: p for p in args.images.iterdir()
-               if p.suffix.lower() in IMAGE_EXT}
-    pairs = [(by_stem[s], l.text_bbox(), l.width, l.height)
-             for s, l in sorted(layouts.items())
-             if s in by_stem and l.text_bbox() and l.width and l.height]
-    random.Random(args.seed).shuffle(pairs)
-    val_items = pairs[:max(1, int(round(len(pairs) * args.val_frac)))]
 
     from ultralytics import YOLO
 
@@ -215,11 +258,7 @@ def main() -> None:
         _print_score("off-the-shelf YOLO_manuscripts", score(base, val_items,
                                                              args.padding))
 
-    print("\n  Read COVERAGE first: clipping text is unrecoverable, extra background "
-          "is nearly free.\n  Pick the smallest padding whose 'clipped' column is ~0%, "
-          "then check 'excess'.\n  If the fine-tuned rows are not clearly better, keep "
-          "use_zones=false — the contrast\n  foreground filter has been doing this job "
-          "adequately since July.")
+    _print_guidance()
 
 
 if __name__ == "__main__":

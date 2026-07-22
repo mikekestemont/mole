@@ -139,3 +139,35 @@ def test_zone_family_match_is_case_insensitive():
     # …but unrelated families must still be excluded, in any casing.
     assert main_text_zone([Detection((0, 0, 5, 5), "paratext", 0.9)]) is None
     assert main_text_zone([Detection((0, 0, 5, 5), "Decoration", 0.9)]) is None
+
+
+def test_val_split_is_stable_across_calls(tmp_path):
+    """--eval-only must score the SAME held-out pages the run trained around.
+
+    The split is reconstructed from scratch rather than stored, so if the
+    filter/sort/shuffle ever drifted, a checkpoint would get scored on pages it
+    had trained on and look better than it is.
+    """
+    import sys
+    sys.path.insert(0, "scripts")
+    from train_zone_detector import build_dataset, val_split
+
+    imgs = tmp_path / "img"
+    imgs.mkdir()
+    for i in range(20):
+        _write(tmp_path, f"p{i:02d}")
+        (imgs / f"p{i:02d}.jpg").touch()
+
+    a = val_split(imgs, tmp_path / "page", val_frac=0.25, seed=7)
+    b = val_split(imgs, tmp_path / "page", val_frac=0.25, seed=7)
+    assert [x[0].name for x in a] == [x[0].name for x in b]
+    assert len(a) == 5
+
+    # …and it must agree with what build_dataset actually held out.
+    build_dataset(imgs, tmp_path / "page", tmp_path / "ds", val_frac=0.25, seed=7)
+    on_disk = {p.stem for p in (tmp_path / "ds" / "images" / "val").iterdir()}
+    assert {x[0].stem for x in a} == on_disk
+
+    # a different seed must give a different split (the shuffle is real)
+    c = val_split(imgs, tmp_path / "page", val_frac=0.25, seed=8)
+    assert {x[0].name for x in a} != {x[0].name for x in c}
