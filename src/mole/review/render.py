@@ -240,10 +240,18 @@ def _picker(schemes, scheme_data, hands, expert: bool = False) -> str:
     n_unl = sum(1 for h in hands if _is_unlabeled(h or "unlabeled"))
     bits = []
     if len(schemes) > 1:
-        opts = "".join(
-            f'<option value="{escape(n, quote=True)}">{escape(n)} '
-            f'({scheme_data[n]["n_cats"]})</option>' for n, _ in schemes)
-        bits.append(f'<label>colour by <select id="scheme">{opts}</select></label>')
+        # Count only REAL categories: "unlabeled" (and HDBSCAN's noise) is the
+        # absence of one, and counting it made the dropdown say 14 where the title
+        # said 13 scribes. Cluster schemes already carry their own counts.
+        opts = []
+        for name, cats in schemes:
+            label = escape(name)
+            if "·" not in name:
+                n_real = len({c for c in cats if not _is_unlabeled(c)})
+                label += f" ({n_real})"
+            opts.append(f'<option value="{escape(name, quote=True)}">{label}</option>')
+        bits.append('<label>colour by <select id="scheme">'
+                    + "".join(opts) + "</select></label>")
     if n_unl:
         bits.append(f'<label><input type="checkbox" id="unl" checked> '
                     f'show unattributed <b>{n_unl}</b></label>')
@@ -422,7 +430,8 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <title>Scribe review — __TITLE__</title>
 <style>__BOKEH_CSS__</style>
 <style>
- :root{--bg:#0f1016;--panel:#171922;--line:#2a2c39;--fg:#e8e8ec;--dim:#9aa0b0}
+ :root{--bg:#0f1016;--panel:#171922;--line:#2a2c39;--fg:#e8e8ec;--dim:#9aa0b0;
+   --fig-h:74vh}
  *{box-sizing:border-box}
  /* Roboto if the reader has it (common on Linux/Android and any machine with
     Google Fonts installed), otherwise the nearest system equivalent. Not fetched:
@@ -443,19 +452,26 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  .mapcol{flex:1 1 55%;min-width:260px}
  .viewcol{flex:1 1 45%;min-width:260px;display:flex;flex-direction:column}
  /* draggable divider: grab anywhere in the 14px gutter */
- .split{flex:0 0 14px;height:74vh;cursor:col-resize;position:relative;
+ .split{flex:0 0 14px;height:var(--fig-h);cursor:col-resize;position:relative;
    align-self:flex-start;touch-action:none}
  .split::after{content:"";position:absolute;left:6px;top:0;bottom:0;width:2px;
    background:var(--line);border-radius:2px}
  .split:hover::after,.split.drag::after{background:#5a7fd6}
- body.expert .split{height:84vh}
+
  body.dragging{user-select:none;cursor:col-resize}
+ body.vdragging{user-select:none;cursor:row-resize}
+ /* horizontal divider: same idea, one axis over */
+ .hsplit{height:14px;margin:2px 0;cursor:row-resize;position:relative;touch-action:none}
+ .hsplit::after{content:"";position:absolute;top:6px;left:0;right:0;height:2px;
+   background:var(--line);border-radius:2px}
+ .hsplit:hover::after,.hsplit.drag::after{background:#5a7fd6}
+ @media(max-width:900px){.hsplit{display:none}}
  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px}
  /* Bokeh's stretch_both needs a parent with a definite height; vh units make the
     map and the charter fill the window instead of a hard-coded pixel box. */
- .card.figbox{height:74vh;min-height:380px}
+ .card.figbox{height:var(--fig-h);min-height:180px}
  .card.figbox>div{width:100%;height:100%}
- body.expert .figbox{height:84vh}
+ body.expert{--fig-h:84vh}
  .legend{display:flex;flex-wrap:wrap;gap:3px 12px;margin-top:8px;font-size:12px;
    max-height:120px;overflow:auto}
  .lg{white-space:nowrap;opacity:.9}
@@ -471,9 +487,9 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  .inspect .ph{color:var(--dim);font-size:13px;padding:6px 0}
  /* no flex:1 here — its flex-basis:0% beats height:66vh in a column container
     and collapses the viewer to min-height */
- .inspect .figwrap{height:66vh;min-height:320px}
+ .inspect .figwrap{height:calc(var(--fig-h) - 54px);min-height:126px}
  .inspect .figwrap>div{width:100%;height:100%}
- body.expert .inspect .figwrap{height:76vh}
+
  #pageimg{width:100%;max-height:70vh;object-fit:contain;border-radius:6px;background:#000}
  .panel{display:flex;flex-direction:column;gap:9px;width:100%;margin-top:14px}
  body.expert .panel,body.expert .bar{display:none}
@@ -519,6 +535,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     </div>
   </div>
 </div>
+<div class="hsplit" id="hsplit" title="Drag to resize the panels"></div>
 <div class="panel" id="panel"></div>
 <script>__BOKEH_JS__</script>
 __BOKEH_SCRIPT__
@@ -603,6 +620,45 @@ paint(active);
   window.addEventListener('touchmove', move, {passive:false});
   window.addEventListener('mouseup', stop);
   window.addEventListener('touchend', stop);
+  // vertical drag: how much height the two panes get, the lists take the rest
+  var hsplit = document.getElementById('hsplit'), vdrag = false, startY = 0, startH = 0;
+  function figPx(){
+    var el = document.querySelector('.figbox');
+    return el ? el.getBoundingClientRect().height : 0;
+  }
+  function vmove(e){
+    if(!vdrag) return;
+    var y = (e.touches ? e.touches[0].clientY : e.clientY);
+    var h = Math.max(180, Math.min(window.innerHeight * 0.92, startH + (y - startY)));
+    document.documentElement.style.setProperty('--fig-h', h.toFixed(0) + 'px');
+  }
+  function vstop(){
+    if(!vdrag) return;
+    vdrag = false;
+    hsplit.classList.remove('drag');
+    document.body.classList.remove('vdragging');
+    window.dispatchEvent(new Event('resize'));
+  }
+  if(hsplit){
+    hsplit.addEventListener('mousedown', function(e){
+      vdrag = true; startY = e.clientY; startH = figPx();
+      hsplit.classList.add('drag'); document.body.classList.add('vdragging');
+      e.preventDefault();
+    });
+    hsplit.addEventListener('touchstart', function(e){
+      vdrag = true; startY = e.touches[0].clientY; startH = figPx();
+      hsplit.classList.add('drag'); e.preventDefault();
+    }, {passive:false});
+    window.addEventListener('mousemove', vmove);
+    window.addEventListener('touchmove', vmove, {passive:false});
+    window.addEventListener('mouseup', vstop);
+    window.addEventListener('touchend', vstop);
+    hsplit.addEventListener('dblclick', function(){
+      document.documentElement.style.removeProperty('--fig-h');
+      window.dispatchEvent(new Event('resize'));
+    });
+  }
+
   split.addEventListener('dblclick', function(){        // double-click = back to 58/42
     mapcol.style.flex = ''; right.style.flex = '';
     window.dispatchEvent(new Event('resize'));

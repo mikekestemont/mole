@@ -385,3 +385,30 @@ def test_selection_leaves_the_rest_legible(tmp_path):
     assert out.read_text()                       # the page still builds
     # and the row-hover dim floor is legible too
     assert "0.18" in out.read_text()
+
+
+def test_scheme_count_matches_the_scribe_count_in_the_title(tmp_path):
+    """"unlabeled" is the absence of a hand, not one more of them."""
+    npy = _corpus(tmp_path, n_hands=5, docs=4)      # 4 labelled hands + 1 unlabelled
+    out, _ = render_review(npy, out=tmp_path / "c.html", method="pca", images=False,
+                           map_backend="svg")
+    html = out.read_text()
+    title_n = int(re.search(r"(\d+) scribes", html).group(1))
+    picker_n = int(re.search(r'<option value="hand">hand \((\d+)\)</option>',
+                             html).group(1))
+    assert picker_n == title_n
+    # the unattributed documents are still THERE, just not counted as a scribe
+    assert 'id="unl"' in html
+
+
+def test_both_dividers_are_draggable(tmp_path):
+    npy = _corpus(tmp_path, n_hands=4, docs=4)
+    out, _ = render_review(npy, out=tmp_path / "dd.html", method="pca", images=False,
+                           map_backend="svg")
+    html = out.read_text()
+    assert 'id="split"' in html and "col-resize" in html      # map | viewer
+    assert 'id="hsplit"' in html and "row-resize" in html     # panes | suggestions
+    # the vertical drag drives one custom property that BOTH figures read,
+    # so they always resize together
+    assert "--fig-h" in html
+    assert "height:var(--fig-h)" in html.replace(" ", "")
