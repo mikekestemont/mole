@@ -67,6 +67,51 @@ def _family(label: str) -> str:
     return label.split("_", 1)[0]
 
 
+# ------------------------------------------------------------- zone quality
+def box_iou(a: BBox, b: BBox) -> float:
+    """Intersection over union of two axis-aligned boxes."""
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union else 0.0
+
+
+def text_coverage(pred: BBox, truth: BBox) -> float:
+    """Fraction of the TRUE text box retained by ``pred``.
+
+    THE metric for this task, because the costs are asymmetric: a zone that
+    includes extra background is nearly free (the contrast foreground filter
+    discards blank parchment anyway), while a zone that clips text destroys
+    writer signal that no downstream stage can recover. Optimise coverage first
+    and tightness second — never the reverse, and never IoU alone, which
+    averages the two failure modes into one number and hides which occurred.
+    """
+    ix0, iy0 = max(pred[0], truth[0]), max(pred[1], truth[1])
+    ix1, iy1 = min(pred[2], truth[2]), min(pred[3], truth[3])
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    area_t = max(0, truth[2] - truth[0]) * max(0, truth[3] - truth[1])
+    return inter / area_t if area_t else 0.0
+
+
+def excess_area(pred: BBox, truth: BBox) -> float:
+    """Predicted area as a multiple of the true area (1.0 = perfectly tight)."""
+    area_p = max(0, pred[2] - pred[0]) * max(0, pred[3] - pred[1])
+    area_t = max(0, truth[2] - truth[0]) * max(0, truth[3] - truth[1])
+    return area_p / area_t if area_t else 0.0
+
+
+def pad_bbox(b: BBox, padding: int, width: int = 0, height: int = 0) -> BBox:
+    """Grow a box by ``padding`` px, clamped to the image when size is known."""
+    x0, y0, x1, y1 = b
+    x0, y0 = max(0, x0 - padding), max(0, y0 - padding)
+    x1 = min(width, x1 + padding) if width else x1 + padding
+    y1 = min(height, y1 + padding) if height else y1 + padding
+    return (x0, y0, x1, y1)
+
+
 def main_text_zone(dets: list[Detection], families: tuple[str, ...] = ZONE_FAMILIES,
                    image_size: tuple[int, int] = (0, 0), padding: int = 0) -> BBox | None:
     """Union of detections whose class FAMILY is in ``families``, padded + clipped.
@@ -74,14 +119,21 @@ def main_text_zone(dets: list[Detection], families: tuple[str, ...] = ZONE_FAMIL
     Returns ``None`` when no in-family region was found (caller decides whether to
     fall back to the whole page).
     """
-    text = [d for d in dets if _family(d.label) in families]
+    # Case-insensitive: class-name casing is a convention of whoever trained the
+    # weights, not semantics. A detector fine-tuned locally may well emit "text"
+    # where YOLO_manuscripts emits "Text", and a case-sensitive match would drop
+    # every detection and silently fall back to whole-page on every image.
+    wanted = {f.lower() for f in families}
+    text = [d for d in dets if _family(d.label).lower() in wanted]
     box = union_bbox(text)
     if box is None:
         return None
+    # image_size 0 means "unknown", so don't clamp — clamping to 0 would collapse
+    # the box to (x0, y0, 0, 0). prep_folder always passes img.size; anything that
+    # doesn't (a scoring harness, a notebook) used to get a silently zeroed zone.
     w, h = image_size
     x0, y0, x1, y1 = box
-    return (max(0, x0 - padding), max(0, y0 - padding),
-            min(w, x1 + padding), min(h, y1 + padding))
+    return pad_bbox(box, padding, w, h)
 
 
 # --------------------------------------------------------------------------- #
@@ -164,9 +216,16 @@ class YoloTextZoneDetector:
         except Exception:
             pass
 
-        weight_path = hf_hub_download(repo_id=repo, filename=weights)
+        # A local .pt (a detector fine-tuned on this corpus, see
+        # scripts/train_zone_detector.py) short-circuits the hub download.
+        local = Path(weights)
+        if local.suffix == ".pt" and local.is_file():
+            weight_path = str(local)
+            self.model_id = f"local:{local}"
+        else:
+            weight_path = hf_hub_download(repo_id=repo, filename=weights)
+            self.model_id = f"{repo}:{weights}"
         self.model = YOLO(weight_path)
-        self.model_id = f"{repo}:{weights}"
         self.conf = conf
         self.device = device
 

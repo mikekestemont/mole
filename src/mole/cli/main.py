@@ -66,6 +66,11 @@ def prep(
     method: str = typer.Option("yolo", help="Detector: 'yolo' (mole[detect]) or 'heuristic'."),
     padding: int = typer.Option(16, help="Padding (px) around the detected text zone."),
     conf: float = typer.Option(0.25, help="YOLO confidence threshold."),
+    yolo_weights: Optional[str] = typer.Option(
+        None, "--yolo-weights",
+        help="Local .pt for the YOLO detector — e.g. one fine-tuned on your own "
+             "PAGE XML layout via scripts/train_zone_detector.py. Default: the "
+             "off-the-shelf magistermilitum/YOLO_manuscripts weights."),
     sample: Optional[int] = typer.Option(None, help="Process only a random N pages (quick QC)."),
     qc: Path = typer.Option(Path("outputs/prep_qc.html"), help="QC contact-sheet HTML path."),
     write_crops: Optional[Path] = typer.Option(None, help="Also materialise cropped images into this folder (opt-in)."),
@@ -111,9 +116,14 @@ def prep(
         return
 
     try:
+        det_kwargs = {}
+        if method == "yolo":
+            det_kwargs["conf"] = conf
+            if yolo_weights:
+                det_kwargs["weights"] = yolo_weights
         manifest, records = prep_folder(input_dir, zones_out=zones_out, method=method,
                                         padding=padding, sample=sample, qc_html=qc,
-                                        conf=conf, write_crops=write_crops)
+                                        write_crops=write_crops, **det_kwargs)
     except ImportError as e:
         console.print(f"[red]Missing dependency for method '{method}': {e}[/red]")
         console.print("[yellow]For the YOLO detector: pip install 'mole[detect]'[/yellow]")
