@@ -506,7 +506,19 @@ window.MOLE = (function(){
     clearHull: function(){},
     // no pan/zoom or size-flash on the static SVG map; showDoc still selects the dot
     centerOn: function(){},
-    flash: function(){}
+    flash: function(){},
+    // pop a clicked hand's dots: a brief CSS-eased grow, then back to their radius
+    pulse: function(idxs){
+      if(!idxs) return;
+      idxs.forEach(function(i){
+        var el = svg.querySelector('.dot[data-i="'+i+'"]');
+        if(!el) return;
+        var r0 = el.getAttribute('r');
+        el.style.transition = 'r .18s ease';
+        el.setAttribute('r', (parseFloat(r0) || 3.6) * 2.4);
+        setTimeout(function(){ el.setAttribute('r', r0); }, 260);
+      });
+    }
   };
 })();
 """
@@ -914,8 +926,10 @@ legendEl.addEventListener('click', function(e){
   } else {                                // focus a (new) hand: hull + isolation together
     isolatedCat = cat;
     chip.classList.add('hullon');
-    if(MOLE.showHull) MOLE.showHull(memberIdx(cat));
+    var members = memberIdx(cat);
+    if(MOLE.showHull) MOLE.showHull(members);
     MOLE.setAlphas(spotAlphas(cat));
+    if(MOLE.pulse) MOLE.pulse(members);   // pop the group so it really stands out
   }
 });
 

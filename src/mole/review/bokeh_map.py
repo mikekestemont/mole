@@ -396,6 +396,34 @@ window.MOLE = (function(){
       }, 1200);
     });
   }
+  var pulseRAF = null, pulseSet = null;
+  function restorePulse(set){
+    var d = Object.assign({}, scatter.data), s = d.size.slice();
+    (set || pulseSet || []).forEach(function(i){ s[i] = (d.alpha[i] === 0) ? 0 : baseSize; });
+    d.size = s; scatter.data = d;
+  }
+  // pop a whole GROUP of points (e.g. every charter of a clicked hand): one quick
+  // grow-and-settle so the category jumps off the page on click. Honours the hidden
+  // convention (alpha 0 stays size 0) and settles back to baseSize when done.
+  function pulse(idxs){
+    later(function(){
+      if(pulseRAF){ cancelAnimationFrame(pulseRAF); pulseRAF = null; restorePulse(); }
+      var set = (idxs || []).filter(function(i){ return scatter.data.alpha[i] !== 0; });
+      if(!set.length) return;
+      pulseSet = set;
+      var dur = 640, peak = 2.7, t0 = performance.now();
+      function frame(now){
+        var t = Math.min(1, (now - t0) / dur);
+        var mult = 1 + (peak - 1) * Math.sin(Math.PI * t);   // 0→peak→0, smooth
+        var d = Object.assign({}, scatter.data), s = d.size.slice();
+        for(var k=0;k<set.length;k++){ var i=set[k]; s[i] = (d.alpha[i]===0) ? 0 : baseSize*mult; }
+        d.size = s; scatter.data = d;
+        if(t < 1){ pulseRAF = requestAnimationFrame(frame); }
+        else { pulseRAF = null; pulseSet = null; restorePulse(set); }
+      }
+      pulseRAF = requestAnimationFrame(frame);
+    });
+  }
   function setAlphas(alphas, sizes){
     later(function(){
       var d = Object.assign({}, scatter.data);
@@ -454,6 +482,6 @@ window.MOLE = (function(){
           onTap:onTap, select:select, setLabels:setLabels, showLabels:showLabels,
           setSize:setSize, setTheme:setTheme, markNeighbors:markNeighbors,
           clearNeighbors:clearNeighbors, showHull:showHull, clearHull:clearHull,
-          centerOn:centerOn, flash:flash};
+          centerOn:centerOn, flash:flash, pulse:pulse};
 })();
 """.replace("__THEME__", theme_js)
