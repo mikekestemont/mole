@@ -275,8 +275,10 @@ def embed(
 
         mole embed CKPT DATASET out.npy            # add --invert for black-on-white input
 
-    Geometry (window_size/overlap/use_zones/invert) is inherited from the
-    checkpoint's training config; override any of it with --set key=value.
+    Geometry: window_size / use_zones / invert inherit from the checkpoint;
+    overlap defaults to 0 (non-overlapping inference tiles — much faster than
+    the dense training grid). Override any of it with --set key=value
+    (e.g. --set overlap=0.5 to match training).
     """
     from mole.embed import embed as _embed
 
@@ -316,14 +318,15 @@ def codebook(
     invert: Optional[bool] = typer.Option(None, "--invert/--no-invert",
                                           help="Override the checkpoint's polarity."),
     set_: Optional[list[str]] = typer.Option(
-        None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0."),
+        None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0.5."),
 ) -> None:
     """Fit ONE VLAD codebook over several datasets, in bounded memory.
 
     The index primitive: fit once over a pooled corpus, freeze, then encode every
     archive with `mole embed --codebook-from <out>` so all archives share one
     comparable space. Descriptors are streamed into a reservoir, so peak RAM is set
-    by --max-descriptors, not by corpus size.
+    by --max-descriptors, not by corpus size. Same geometry defaults as ``mole embed``
+    (overlap=0 unless overridden).
     """
     from mole.embed import fit_corpus_codebook
 

@@ -62,10 +62,12 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
           show_labels: bool = False, label_cats=None, theme: str = "dark"):
     """Return ``(script, map_div, view_div, css, js)`` ready to drop into a page.
 
-    ``highlight_idx`` rings the given point indices (hollow red overlay + red stem
-    label) — the Sluis target-document pattern. ``point_size`` sets the base marker
-    size. ``show_labels`` prints the active category id inside each circle (initial
-    state; toggled live). ``label_cats`` are the first scheme's per-point categories.
+    ``highlight_idx`` marks target documents with a thick red stroke + slightly
+    larger marker on the main scatter (plus a stem label) — the Sluis pattern.
+    Highlights are NOT a second overlay circle: those used to sit on top and
+    swallow taps. ``point_size`` sets the base marker size. ``show_labels``
+    prints the active category id inside each circle (initial state; toggled
+    live). ``label_cats`` are the first scheme's per-point categories.
     ``theme`` is ``dark`` (review) or ``light`` (publication).
     """
     from bokeh.embed import components
@@ -87,19 +89,30 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
     pal = THEME[theme]
     n = coords.shape[0]
     label_cats = list(label_cats) if label_cats is not None else [""] * n
+    hi_set = set(highlight_idx or [])
 
     xs = [float(v) for v in coords[:, 0]]
     ys = [float(v) for v in coords[:, 1]]
+    # Highlight = red stroke + bump on the SAME scatter (one hit target). A
+    # stacked hollow ring overlay used to intercept taps on targets.
+    sizes, line_colors, line_widths, hl_flags = [], [], [], []
+    for i in range(n):
+        is_hi = i in hi_set
+        hl_flags.append(1 if is_hi else 0)
+        sizes.append(float(point_size) + (6.0 if is_hi else 0.0))
+        line_colors.append(_HIGHLIGHT_STROKE if is_hi else pal["pt_line"])
+        line_widths.append(3.0 if is_hi else 0.5)
     src = ColumnDataSource(dict(
         x=xs, y=ys, name=list(names),
         hand=[h or "not attributed" for h in hands],
-        color=list(colors), alpha=[0.85] * n, size=[float(point_size)] * n,
+        color=list(colors), alpha=[0.85] * n, size=sizes,
+        line_color=line_colors, line_width=line_widths, hl=hl_flags,
         label=[_label_text(c) for c in label_cats],
         text_color=[_text_on(c) for c in colors]),
         name="scatter")
 
     p = figure(name="map", sizing_mode="stretch_both",
-               tools="pan,wheel_zoom,box_zoom,lasso_select,tap,reset,save",
+               tools="pan,wheel_zoom,box_zoom,reset,save",
                active_scroll="wheel_zoom", toolbar_location="above",
                x_axis_location=None, y_axis_location=None,
                background_fill_color=pal["bg"], border_fill_color=pal["bg"],
@@ -119,21 +132,21 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
 
     r = p.scatter("x", "y", source=src, size="size", color="color",
                   fill_alpha="alpha", line_alpha="alpha",
-                  line_color=pal["pt_line"], line_width=0.5,
+                  line_color="line_color", line_width="line_width",
                   # Bokeh's default non-selection alpha (0.2) is invisible on a dark
                   # background: selecting one charter must not erase the context it
                   # is being judged against. (Hidden points are removed by SIZE, not
                   # alpha — nonselection_fill_alpha would otherwise resurrect them.)
                   nonselection_fill_alpha=0.55, nonselection_line_alpha=0.25,
                   selection_line_color="#5a7fd6", selection_line_width=2.5)
+    # Explicit tools with renderers pinned to the main scatter. Overlay glyphs
+    # (NN rings, etc.) must never be in this list — they sit on top and would
+    # swallow taps so highlighted / ringed charters never open in the viewer.
+    tap = TapTool(renderers=[r])
+    lasso = LassoSelectTool(renderers=[r])
     p.add_tools(HoverTool(renderers=[r], tooltips=[("charter", "@name"),
-                                                   ("hand", "@hand")]))
-    # Tap/lasso must act ONLY on the main scatter — otherwise the highlight/NN
-    # overlays sit on top and swallow the click, so tapping a ringed target never
-    # selects the charter and the viewer stays blank.
-    for _tool in p.toolbar.tools:
-        if isinstance(_tool, (TapTool, LassoSelectTool)):
-            _tool.renderers = [r]
+                                                   ("hand", "@hand")]),
+                tap, lasso)
 
     # class-id labels, centred in each circle; toggled live from the page. Text colour
     # keys to the theme background (not the point) with a halo so it reads either way.
@@ -145,25 +158,28 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
     labels.visible = bool(show_labels)
     p.add_layout(labels)
 
-    # nearest-neighbour ring markers (over the points)
+    # nearest-neighbour ring markers (over the points). Underlay would hide them
+    # under the dots; keep overlay but leave TapTool.renderers=[r] so they don't
+    # steal clicks (re-assert after this glyph in case Bokeh expands the list).
     nn_pts = ColumnDataSource(dict(x=[], y=[]), name="nn_pts")
     p.scatter("x", "y", source=nn_pts, size=float(point_size) + 8, marker="circle",
               fill_alpha=0.0, line_color=_NN_ACCENT, line_width=2.0, level="overlay")
 
-    # Target highlighting: a hollow red ring keeps the underlying colour/label
-    # readable, plus a red stem label. Drawn as an overlay so it stays on top.
+    # Target names only (no second hit-tested circle). Highlight itself is the
+    # thicker red stroke + slightly larger size on the MAIN scatter above — a
+    # stacked hollow ring used to sit on top and eat taps even with TapTool
+    # pinned to ``r``.
     hi = list(highlight_idx or [])
     if hi:
         hl_src = ColumnDataSource(dict(
             x=[xs[i] for i in hi], y=[ys[i] for i in hi],
             label=[f"  {names[i]}" for i in hi]), name="highlights")
-        p.scatter("x", "y", source=hl_src, size=float(point_size) + 12, marker="circle",
-                  fill_alpha=0.0, line_color=_HIGHLIGHT_STROKE, line_width=3.0,
-                  level="overlay")
         p.add_layout(LabelSet(x="x", y="y", text="label", source=hl_src,
                               text_color=_HIGHLIGHT_STROKE, text_font_size="11pt",
                               text_font_style="bold"))
 
+    tap.renderers = [r]
+    lasso.renderers = [r]
     # the viewer: an image in data space, so zoom/pan behave like the map
     # every column must start empty: a url=[] beside x=[0] trips a BokehUserWarning
     img = ColumnDataSource(dict(url=[], x=[], y=[], w=[], h=[]), name="page")
@@ -215,7 +231,10 @@ window.MOLE = (function(){
     nnPts       = doc.get_model_by_name('nn_pts');
     hull        = doc.get_model_by_name('hull');
     if(!scatter) return false;
-    if(scatter.data.size && scatter.data.size.length) baseSize = scatter.data.size[0];
+    if(scatter.data.size && scatter.data.size.length){
+      var hl0 = (scatter.data.hl && scatter.data.hl[0]) ? 6 : 0;
+      baseSize = scatter.data.size[0] - hl0;
+    }
     ready = true;
     watchFrame();
     while(queue.length) queue.shift()();
@@ -230,6 +249,8 @@ window.MOLE = (function(){
     });
   }
   function later(fn){ ready ? fn() : queue.push(fn); }
+  // highlighted points are drawn slightly larger on the same scatter (no overlay ring)
+  function sized(i, d, px){ return px + ((d.hl && d.hl[i]) ? 6 : 0); }
 
   function textOn(hex){
     var h = String(hex||'').replace('#','');
@@ -272,7 +293,7 @@ window.MOLE = (function(){
       var s = new Array(d.x.length);
       // alpha 0 == "hidden by a toggle": keep it gone by giving it zero size, so a
       // later selection (nonselection_fill_alpha) can't bring it back on screen.
-      for(var i=0;i<s.length;i++) s[i] = (d.alpha[i] === 0) ? 0 : px;
+      for(var i=0;i<s.length;i++) s[i] = (d.alpha[i] === 0) ? 0 : sized(i, d, px);
       d.size = s;
       scatter.data = d;
       if(classLabels) classLabels.text_font_size = Math.max(7, px*0.9).toFixed(0)+'pt';
@@ -389,7 +410,7 @@ window.MOLE = (function(){
         var d2 = Object.assign({}, scatter.data);
         var s2 = d2.size.slice();
         // respect the "hidden by toggle" convention (alpha 0 == size 0)
-        s2[idx] = (d2.alpha[idx] === 0) ? 0 : baseSize;
+        s2[idx] = (d2.alpha[idx] === 0) ? 0 : sized(idx, d2, baseSize);
         d2.size = s2;
         scatter.data = d2;
         flashTimer = null;
@@ -399,7 +420,9 @@ window.MOLE = (function(){
   var pulseRAF = null, pulseSet = null;
   function restorePulse(set){
     var d = Object.assign({}, scatter.data), s = d.size.slice();
-    (set || pulseSet || []).forEach(function(i){ s[i] = (d.alpha[i] === 0) ? 0 : baseSize; });
+    (set || pulseSet || []).forEach(function(i){
+      s[i] = (d.alpha[i] === 0) ? 0 : sized(i, d, baseSize);
+    });
     d.size = s; scatter.data = d;
   }
   // pop a whole GROUP of points (e.g. every charter of a clicked hand): one quick
@@ -416,7 +439,10 @@ window.MOLE = (function(){
         var t = Math.min(1, (now - t0) / dur);
         var mult = 1 + (peak - 1) * Math.sin(Math.PI * t);   // 0→peak→0, smooth
         var d = Object.assign({}, scatter.data), s = d.size.slice();
-        for(var k=0;k<set.length;k++){ var i=set[k]; s[i] = (d.alpha[i]===0) ? 0 : baseSize*mult; }
+        for(var k=0;k<set.length;k++){
+          var i=set[k];
+          s[i] = (d.alpha[i]===0) ? 0 : sized(i, d, baseSize)*mult;
+        }
         d.size = s; scatter.data = d;
         if(t < 1){ pulseRAF = requestAnimationFrame(frame); }
         else { pulseRAF = null; pulseSet = null; restorePulse(set); }
@@ -429,11 +455,10 @@ window.MOLE = (function(){
       var d = Object.assign({}, scatter.data);
       d.alpha = alphas.slice();
       // fully remove alpha-0 points by shrinking them to nothing (see setSize)
-      var base = sizes ? null : baseSize;
       var s = sizes ? sizes.slice() : d.size.slice();
       for(var i=0;i<alphas.length;i++){
         if(alphas[i] === 0) s[i] = 0;
-        else if(base != null) s[i] = base;
+        else if(!sizes) s[i] = sized(i, d, baseSize);
       }
       d.size = s;
       scatter.data = d;

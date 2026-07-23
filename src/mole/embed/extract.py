@@ -36,10 +36,16 @@ def _as_bool(v):
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
-# data.* keys that --set-style overrides may change at embed time (defaults come
-# from the checkpoint's training config so embed matches train unless asked).
+# data.* keys that --set-style overrides may change at embed time. window_size /
+# use_zones / invert still default from the checkpoint; overlap does not (below).
 _OVERRIDABLE = {"window_size": int, "overlap": float, "use_zones": _as_bool,
                 "invert": _as_bool, "batch_size": int}
+
+# Inference (embed / codebook) uses non-overlapping windows by default. Training
+# often keeps overlap=0.5 for denser SSL crops; inheriting that at embed time
+# roughly doubles the window count for little retrieval gain. Override with
+# ``--set overlap=0.5`` to match training geometry.
+_INFERENCE_OVERLAP = 0.0
 
 
 # --------------------------------------------------------------------- backbone
@@ -448,7 +454,7 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
     if head is not None:
         project_head, pool_dim, head_id = _load_head(head, meta["model_id"])
 
-    settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
+    settings = {"window_size": meta["window_size"], "overlap": _INFERENCE_OVERLAP,
                 "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
                 "batch_size": batch_size}
     if invert is not None:
@@ -550,8 +556,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     fitted codebook is saved next to the output.
 
     ``overrides`` accepts ``key=value`` strings for a small set of geometry knobs
-    (``window_size``, ``overlap``, ``use_zones``, ``batch_size``); defaults come
-    from the checkpoint so embed matches training unless deliberately changed.
+    (``window_size``, ``overlap``, ``use_zones``, ``batch_size``). ``window_size``,
+    ``use_zones`` and ``invert`` default from the checkpoint; ``overlap`` defaults
+    to 0 (non-overlapping inference tiles) — use ``--set overlap=0.5`` to match a
+    dense training grid.
     """
     import torch
 
@@ -579,7 +587,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                              "pooling, not cls")
         project_head, pool_dim, head_id = _load_head(head, meta["model_id"])
 
-    settings = {"window_size": meta["window_size"], "overlap": meta["overlap"],
+    settings = {"window_size": meta["window_size"], "overlap": _INFERENCE_OVERLAP,
                 "use_zones": meta["use_zones"], "invert": meta.get("invert", False),
                 "batch_size": batch_size}
     if invert is not None:  # explicit --invert/--no-invert wins over the checkpoint's value
