@@ -340,27 +340,91 @@ def codebook(
         f"  provenance → {out}.json")
 
 
+# ------------------------------------------------------------------- codebook-viz
+@app.command(name="codebook-viz")
+def codebook_viz(
+    embeddings: Path = typer.Argument(
+        ..., help="A vlad embeddings .npy; reads its .codebook.npy + .mapping.json sidecar."),
+    checkpoint: Optional[Path] = typer.Option(
+        None, help="Model checkpoint (default: the one recorded in the sidecar)."),
+    out: Optional[Path] = typer.Option(
+        None, help="Output HTML (default: <embeddings>.codebook.viz.html)."),
+    per_word: int = typer.Option(24, "--per-word", help="Nearest patches to show per word."),
+    max_pages: int = typer.Option(
+        250, "--max-pages", help="Pages to sample for descriptors (0 = all; more = slower)."),
+    mosaic_windows: int = typer.Option(
+        6, "--mosaics", help="How many per-window assignment mosaics to render."),
+    method: str = typer.Option("umap", help="Centroid projection: umap | pca | tsne."),
+    theme: str = typer.Option("light", help="Initial theme: light (publication) | dark."),
+    device: Optional[str] = typer.Option(None, help="Force device (cuda/mps/cpu); default auto."),
+    seed: int = typer.Option(0, help="Projection/sampling seed."),
+) -> None:
+    """Visualise what a VLAD codebook learned: nearest-patch montages, per-window
+    assignment mosaics, an occupancy histogram, and the centroid geometry."""
+    from mole.viz.codebook import visualize_codebook
+
+    path = visualize_codebook(
+        embeddings, checkpoint=checkpoint, out=out, per_word=per_word,
+        max_pages=max_pages, mosaic_windows=mosaic_windows, method=method,
+        theme=theme, seed=seed, device=device)
+    console.print(f"[green]✓ codebook report → {path}[/green]")
+
+
 # ---------------------------------------------------------------------------- viz
 @app.command()
 def viz(
     embeddings: Path = typer.Argument(..., help="Embeddings .npy (its .mapping.json sidecar is read too)."),
     out: Optional[Path] = typer.Option(None, help="Output HTML (default: <embeddings>.viz.html)."),
     method: str = typer.Option("auto", help="2D projection: auto (PCA→UMAP) | pca | tsne | umap."),
-    pca_dim: int = typer.Option(150, help="PCA pre-reduction dims before UMAP/t-SNE."),
-    color: str = typer.Option("dataset", help="Colour points by: dataset|hand|none."),
-    color_regex: Optional[str] = typer.Option(None, help=r"Colour by a filename capture group, e.g. '_(\d{4})-' for year."),
+    pca_whiten: bool = typer.Option(
+        True, "--pca-whiten/--no-pca-whiten",
+        help="Whiten PCA scores before UMAP (Sluis charter-viz recipe; default on)."),
+    umap_neighbors: int = typer.Option(
+        15, "--umap-neighbors", help="UMAP n_neighbors (local vs global structure)."),
+    umap_min_dist: float = typer.Option(
+        0.1, "--umap-min-dist", help="UMAP min_dist (lower = tighter clusters)."),
     clusters: Optional[Path] = typer.Option(
         None, "--clusters",
         help="A `mole cluster` report (.clusters.json): adds a switchable colour scheme per FINCH level."),
+    highlight: Optional[list[str]] = typer.Option(
+        None, "--highlight",
+        help="Filename stem(s) to ring-highlight (repeatable). Generalises Sluis target docs."),
+    highlight_file: Optional[Path] = typer.Option(
+        None, "--highlight-file",
+        help="Text file of stems/filenames to ring-highlight, one per line (# comments ok)."),
+    point_size: float = typer.Option(
+        9.0, "--point-size", help="Initial map marker size in px (slider in the page)."),
+    theme: str = typer.Option(
+        "dark", help="Initial theme: dark (Cursor-style) | light (publication). Toggle in the page."),
+    show_labels: bool = typer.Option(
+        False, "--labels/--no-labels",
+        help="Start with the active category id printed inside each point."),
+    images: bool = typer.Option(
+        True, "--images/--no-images",
+        help="Embed charter images so any point opens in the viewer (bipanel)."),
+    max_mb: float = typer.Option(
+        0.0, "--max-mb", help="Cap the file size (MB); 0 = no cap (local use)."),
+    map_backend: str = typer.Option(
+        "auto", "--map",
+        help="Map backend: bokeh (zoom/pan viewer bipanel; default when installed) | svg | auto."),
     seed: int = typer.Option(0, help="Projection seed (reproducible)."),
 ) -> None:
-    """Project an embeddings file to 2D and write an interactive HTML scatter."""
-    from mole.viz import plot_embeddings
+    """Interactive 2D map of an embeddings file — map + charter viewer bipanel.
 
-    out_path, used = plot_embeddings(embeddings, out=out, method=method, color=color,
-                                     color_regex=color_regex, seed=seed, pca_dim=pca_dim,
-                                     clusters=clusters)
-    console.print(f"[green]✓ {used} scatter → {out_path}[/green]")
+    Same renderer as ``mole review`` (opened in expert mode: just the map and the
+    charter viewer, no suggestion lists). Colour by hand/dataset/FINCH level with the
+    in-page picker; ring target documents with --highlight / --highlight-file.
+    """
+    from mole.review.render import render_review
+
+    out = out or embeddings.with_suffix(".viz.html")
+    path, summary = render_review(
+        embeddings, out=out, clusters=clusters, method=method, seed=seed,
+        map_backend=map_backend, expert=True, images=images, image_scope="all",
+        max_mb=max_mb, highlight=highlight, highlight_file=highlight_file,
+        point_size=point_size, pca_whiten=pca_whiten, umap_neighbors=umap_neighbors,
+        umap_min_dist=umap_min_dist, theme=theme, show_labels=show_labels)
+    console.print(f"[green]✓ viz → {path}[/green]\n  {summary}")
 
 
 # ------------------------------------------------------------------------ cluster

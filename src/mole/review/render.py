@@ -145,8 +145,33 @@ def _rows_for(kind: str, items: list[dict], members: dict[str, list[int]],
     return rows
 
 
+def _nearest_neighbors(X: np.ndarray, k: int = 5) -> list[list[int]]:
+    """Top-``k`` cosine neighbours per document (self excluded), as index lists.
+
+    Cosine because retrieval is scored cosine (see ``mole eval``): the panel then
+    shows exactly the pages the metric considers closest, so a click doubles as a
+    read-out of what the model thinks looks alike.
+    """
+    if k <= 0 or X.shape[0] < 2:
+        return [[] for _ in range(X.shape[0])]
+    Xf = np.asarray(X, dtype=np.float32)
+    norm = np.linalg.norm(Xf, axis=1, keepdims=True)
+    Xn = Xf / np.clip(norm, 1e-12, None)
+    out: list[list[int]] = []
+    kk = min(k, Xf.shape[0] - 1)
+    # block the matrix to keep peak memory sane on large corpora
+    for lo in range(0, Xn.shape[0], 512):
+        hi = min(lo + 512, Xn.shape[0])
+        sims = Xn[lo:hi] @ Xn.T
+        for r, gi in enumerate(range(lo, hi)):
+            sims[r, gi] = -np.inf
+            top = np.argpartition(sims[r], -kk)[-kk:]
+            out.append([int(j) for j in top[np.argsort(sims[r, top])[::-1]]])
+    return out
+
+
 def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
-         names: list[str], size: int = 620) -> str:
+         names: list[str], size: int = 620, highlight_idx=None) -> str:
     """The map, with unlabeled documents crossed through as in ``mole viz``.
 
     The cross is a property of the DOCUMENT, not of the active colouring, so it is
@@ -154,7 +179,7 @@ def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
     under a cluster scheme an unlabeled point is still coloured by its cluster,
     which is exactly the attribution question ("which cluster did it join?").
     """
-    from mole.viz.scatter import _UNLABELED_CROSS, _is_unlabeled
+    from mole.viz.scatter import _HIGHLIGHT_STROKE, _UNLABELED_CROSS, _is_unlabeled
 
     xs, ys = coords[:, 0].astype(float), coords[:, 1].astype(float)
 
@@ -165,6 +190,7 @@ def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
     pad = 18
     nx = norm(xs) * (size - 2 * pad) + pad
     ny = (1.0 - norm(ys)) * (size - 2 * pad) + pad
+    hi = set(highlight_idx or [])
     out = []
     for i, (x, y) in enumerate(zip(nx, ny)):
         dot = (f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="3.6" '
@@ -178,6 +204,14 @@ def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
                    f'stroke="{_UNLABELED_CROSS}" stroke-width="1" '
                    f'stroke-linecap="round" pointer-events="none"/></g>')
         out.append(dot)
+    for i in hi:
+        x, y = nx[i], ny[i]
+        out.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7.5" fill="none" '
+            f'stroke="{_HIGHLIGHT_STROKE}" stroke-width="2" pointer-events="none"/>'
+            f'<text x="{x + 9:.1f}" y="{y:.1f}" dominant-baseline="central" '
+            f'fill="{_HIGHLIGHT_STROKE}" font-size="10" font-weight="700" '
+            f'pointer-events="none">{escape(names[i])}</text>')
     return (f'<svg id="map" viewBox="0 0 {size} {size}" width="{size}" '
             f'height="{size}">{"".join(out)}</svg>')
 
@@ -270,18 +304,40 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   image_url: str | None = None, images: bool = True,
                   image_scope: str = "listed", map_backend: str = "auto",
                   expert: bool = False, cluster_method: str = "both",
-                  method: str = "auto", seed: int = 0) -> tuple[Path, str]:
-    """Build the review sheet. Returns ``(path, summary_line)``."""
+                  method: str = "auto", seed: int = 0,
+                  highlight: list[str] | None = None,
+                  highlight_file: str | Path | None = None,
+                  point_size: float = 9.0, pca_whiten: bool = True,
+                  umap_neighbors: int = 15, umap_min_dist: float = 0.1,
+                  theme: str = "dark", show_labels: bool = False,
+                  neighbors: int = 5) -> tuple[Path, str]:
+    """Build the review / viz sheet. Returns ``(path, summary_line)``.
+
+    ``highlight`` / ``highlight_file`` ring specific documents (Sluis target
+    pattern). ``mole viz`` calls this in ``expert`` mode for the bare map + charter
+    viewer bipanel; the full review adds the suggestion lists. ``theme`` is ``dark``
+    (review) or ``light`` (publication figure), toggleable live. ``show_labels``
+    prints the active category id in each circle. ``neighbors`` is how many nearest
+    charters to list under the viewer when a document is selected.
+    """
     from mole.review.images import ImageBudget
     from mole.review.suggest import build_review, document_table
-    from mole.viz.scatter import reduce_2d
+    from mole.viz.scatter import _is_highlighted, _parse_highlights, reduce_2d
 
     embeddings = Path(embeddings)
     report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed,
                           cluster_method=cluster_method)
     X, meta, rows_meta, names, paths, hands, _docs = document_table(embeddings)
-    coords, used_method = reduce_2d(X, method, seed)
+    coords, used_method = reduce_2d(X, method, seed, pca_whiten=pca_whiten,
+                                    umap_neighbors=umap_neighbors, umap_min_dist=umap_min_dist)
     schemes = _schemes(report, hands, paths, clusters)
+
+    hl = _parse_highlights(highlight, highlight_file)
+    highlight_idx = ([i for i, p in enumerate(paths) if _is_highlighted(str(p), hl)]
+                     if hl else [])
+
+    nn = _nearest_neighbors(X, k=neighbors)
+    theme = "light" if str(theme).lower() == "light" else "dark"
 
     members: dict[str, list[int]] = {}
     for i, h in enumerate(hands):
@@ -349,6 +405,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
         "images": budget.uris,
         "names": names,
         "hands": [_short(h) for h in hands],
+        "nn": nn,
         "urls": ([image_url.replace("{filename}", n) for n in names] if image_url
                  else [p.resolve().as_uri() if p.is_file() else "" for p in paths]),
     }
@@ -357,15 +414,22 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
 
     if use_bokeh:
         bk_script, map_div, view_div, bk_css, bk_js = bokeh_map.build(
-            coords, names, [_short(h) for h in hands], first["colors"])
+            coords, names, [_short(h) for h in hands], first["colors"],
+            highlight_idx=highlight_idx, point_size=point_size,
+            show_labels=show_labels, label_cats=schemes[0][1], theme=theme)
         glue = bokeh_map.glue_js()
         viewer_html = view_div
     else:
         bk_script = map_div = bk_css = bk_js = ""
-        map_div = _svg(coords, first["colors"], schemes[0][1], names)
+        map_div = _svg(coords, first["colors"], schemes[0][1], names,
+                       highlight_idx=highlight_idx)
         glue = _svg_glue_js()
         viewer_html = '<img id="pageimg" style="display:none">' 
-    html = _HTML.replace("__BODYCLASS__", "expert" if expert else "") \
+    body_class = " ".join(c for c in (theme, "expert" if expert else "") if c)
+    html = _HTML.replace("__BODYCLASS__", body_class) \
+                .replace("__THEMECHK__", " checked" if theme == "light" else "") \
+                .replace("__LABELCHK__", " checked" if show_labels else "") \
+                .replace("__PSIZE__", f"{float(point_size):.1f}") \
                 .replace("__TITLE__", escape(", ".join(report.datasets) or "archive")) \
                 .replace("__SUBTITLE__", subtitle) \
                 .replace("__BOKEH_CSS__", bk_css) \
@@ -407,8 +471,11 @@ window.MOLE = (function(){
         dots[i].setAttribute('fill', cols[+dots[i].getAttribute('data-i')]);
     },
     setAlphas: function(alphas){
-      for(var i=0;i<dots.length;i++)
-        dots[i].setAttribute('fill-opacity', alphas[+dots[i].getAttribute('data-i')]);
+      for(var i=0;i<dots.length;i++){
+        var a = alphas[+dots[i].getAttribute('data-i')];
+        dots[i].setAttribute('fill-opacity', a);
+        dots[i].style.display = (a === 0) ? 'none' : '';   // toggle = truly gone
+      }
     },
     showImage: function(uri, w, h){
       var img = document.getElementById('pageimg');
@@ -420,7 +487,26 @@ window.MOLE = (function(){
     select: function(i){
       for(var k=0;k<dots.length;k++)
         dots[k].classList.toggle('sel', +dots[k].getAttribute('data-i') === i);
-    }
+    },
+    // the lightweight SVG map has no in-circle labels / size / theme controls;
+    // keep the interface identical so the shared page JS runs unchanged
+    setLabels: function(){},
+    showLabels: function(){},
+    setSize: function(px){
+      for(var i=0;i<dots.length;i++) dots[i].setAttribute('r', Math.max(1.5, px/2.4));
+    },
+    setTheme: function(dark){
+      if(svg) svg.style.background = dark ? '#12131a' : '#ffffff';
+    },
+    markNeighbors: function(){},
+    clearNeighbors: function(){},
+    // the SVG backend draws no category hull; keep the interface identical so the
+    // shared page script's legend-tap handler runs without erroring
+    showHull: function(){},
+    clearHull: function(){},
+    // no pan/zoom or size-flash on the static SVG map; showDoc still selects the dot
+    centerOn: function(){},
+    flash: function(){}
   };
 })();
 """
@@ -430,87 +516,140 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <title>Scribe review — __TITLE__</title>
 <style>__BOKEH_CSS__</style>
 <style>
- :root{--bg:#0f1016;--panel:#171922;--line:#2a2c39;--fg:#e8e8ec;--dim:#9aa0b0;
-   --fig-h:74vh}
+ /* Cursor-app feel: near-black canvas, quiet elevated panels, one cool accent,
+    hairline borders and soft shadows. Everything keys off a small token set so the
+    light (publication) theme is the same layout with an inverted palette. */
+ :root{--bg:#141416;--panel:#1b1b1e;--elev:#232327;--line:#2b2b31;--fg:#e6e6ea;
+   --dim:#8a8a94;--accent:#6ea8fe;--accent-weak:rgba(110,168,254,.14);
+   --shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.22);--fig-h:74vh}
  *{box-sizing:border-box}
- /* Roboto if the reader has it (common on Linux/Android and any machine with
-    Google Fonts installed), otherwise the nearest system equivalent. Not fetched:
-    a webfont link would break the offline guarantee, and embedding one costs
-    ~40 KB per weight — say the word and it becomes --embed-font. */
- body{font:15px/1.55 Roboto,"Helvetica Neue",Arial,system-ui,sans-serif;
-   margin:0;padding:14px 18px;background:var(--bg);
-   color:var(--fg);width:100%}
- h1{font-size:19px;margin:0} .sub{opacity:.65;font-size:13px;margin-bottom:10px}
- .bar,.ctl{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:13px}
- .bar{margin-bottom:10px} .ctl{margin-bottom:6px}
- .ctl label,.bar label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
- button,select,input[type=text]{background:#1e2130;color:var(--fg);border:1px solid var(--line);
-   border-radius:7px;padding:5px 12px;font:inherit;font-size:13px;cursor:pointer}
- /* top row: map | draggable divider | charter viewer, across the FULL width.
-    The suggestion lists sit underneath it, so both panes keep the whole window. */
+ ::selection{background:var(--accent-weak)}
+ ::-webkit-scrollbar{width:10px;height:10px}
+ ::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px}
+ ::-webkit-scrollbar-thumb:hover{background:#3a3a42}
+ ::-webkit-scrollbar-track{background:transparent}
+ body{font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+   "Helvetica Neue",Arial,system-ui,sans-serif;margin:0;padding:16px 20px 26px;
+   background:var(--bg);color:var(--fg);width:100%;
+   -webkit-font-smoothing:antialiased;letter-spacing:.005em}
+ h1{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em}
+ .sub{color:var(--dim);font-size:12.5px;margin-bottom:12px}
+ .sub code,.sub b{color:var(--fg);font-weight:600}
+ code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11.5px}
+ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+ .bar,.ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+ .bar{margin-bottom:10px} .ctl{margin-bottom:12px}
+ /* controls read as a segmented toolbar: each label is a pill that lights up when
+    its checkbox is on (:has), the Cursor toolbar idiom. */
+ .ctl label,.bar label{display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+   padding:5px 11px;border:1px solid var(--line);border-radius:9px;
+   background:var(--panel);color:var(--dim);transition:.13s ease;user-select:none}
+ .ctl label:hover,.bar label:hover{border-color:#3a3a44;color:var(--fg)}
+ .ctl label:has(input:checked),.bar label:has(input:checked){
+   border-color:var(--accent);background:var(--accent-weak);color:var(--fg)}
+ input[type=checkbox],input[type=range]{accent-color:var(--accent);cursor:pointer;margin:0}
+ button,select,input[type=text]{background:var(--elev);color:var(--fg);
+   border:1px solid var(--line);border-radius:9px;padding:5px 11px;font:inherit;
+   font-size:12.5px;cursor:pointer;transition:.13s ease}
+ button:hover,select:hover{border-color:var(--accent);color:var(--fg)}
+ select{color:var(--fg)}
+ .ctl input[type=range]{width:120px}
+ .ctl #search{width:160px}
+ .ctl #search::placeholder{color:var(--dim)}
+ .ctl #search.notfound{border-color:#e5534b;color:#e5534b}
+ /* top row: map | draggable divider | charter viewer, across the FULL width. */
  .wrap{display:flex;gap:0;align-items:flex-start;width:100%}
  .mapcol{flex:1 1 55%;min-width:260px}
  .viewcol{flex:1 1 45%;min-width:260px;display:flex;flex-direction:column}
- /* draggable divider: grab anywhere in the 14px gutter */
- .split{flex:0 0 14px;height:var(--fig-h);cursor:col-resize;position:relative;
+ .split{flex:0 0 16px;height:var(--fig-h);cursor:col-resize;position:relative;
    align-self:flex-start;touch-action:none}
- .split::after{content:"";position:absolute;left:6px;top:0;bottom:0;width:2px;
-   background:var(--line);border-radius:2px}
- .split:hover::after,.split.drag::after{background:#5a7fd6}
-
+ .split::after{content:"";position:absolute;left:7px;top:0;bottom:0;width:2px;
+   background:var(--line);border-radius:2px;transition:.13s ease}
+ .split:hover::after,.split.drag::after{background:var(--accent);width:3px;left:6.5px}
  body.dragging{user-select:none;cursor:col-resize}
  body.vdragging{user-select:none;cursor:row-resize}
- /* horizontal divider: same idea, one axis over */
- .hsplit{height:14px;margin:2px 0;cursor:row-resize;position:relative;touch-action:none}
- .hsplit::after{content:"";position:absolute;top:6px;left:0;right:0;height:2px;
-   background:var(--line);border-radius:2px}
- .hsplit:hover::after,.hsplit.drag::after{background:#5a7fd6}
+ .hsplit{height:16px;margin:2px 0;cursor:row-resize;position:relative;touch-action:none}
+ .hsplit::after{content:"";position:absolute;top:7px;left:0;right:0;height:2px;
+   background:var(--line);border-radius:2px;transition:.13s ease}
+ .hsplit:hover::after,.hsplit.drag::after{background:var(--accent);height:3px;top:6.5px}
  @media(max-width:900px){.hsplit{display:none}}
- .card{background:var(--panel);border:1px solid var(--line);border-radius:10px}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;
+   box-shadow:var(--shadow)}
  /* Bokeh's stretch_both needs a parent with a definite height; vh units make the
     map and the charter fill the window instead of a hard-coded pixel box. */
- .card.figbox{height:var(--fig-h);min-height:180px}
+ .card.figbox{height:var(--fig-h);min-height:180px;overflow:hidden}
  .card.figbox>div{width:100%;height:100%}
  body.expert{--fig-h:84vh}
- .legend{display:flex;flex-wrap:wrap;gap:3px 12px;margin-top:8px;font-size:12px;
-   max-height:120px;overflow:auto}
- .lg{white-space:nowrap;opacity:.9}
- .lg i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;
+ /* publication light theme (toggle): same layout, inverted palette */
+ body.light{--bg:#f6f7f9;--panel:#ffffff;--elev:#ffffff;--line:#e2e5ea;
+   --fg:#1a1c22;--dim:#5b616e;--accent:#2563eb;--accent-weak:rgba(37,99,235,.10);
+   --shadow:0 1px 2px rgba(20,30,60,.06),0 8px 24px rgba(20,30,60,.06)}
+ body.light .lg i.xm::after{color:#c3c8d2}
+ /* nearest-neighbour strip under the charter viewer */
+ #nn{padding:10px 12px 12px}
+ #nn .nnh{font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;
+   color:var(--dim);margin:2px 0 7px}
+ .nnrow{display:flex;gap:9px;overflow-x:auto;padding-bottom:4px}
+ .nnrow figure{margin:0;flex:0 0 auto;width:92px;cursor:pointer;text-align:center;
+   transition:transform .12s ease}
+ .nnrow figure:hover{transform:translateY(-2px)}
+ .nnrow img,.nnrow .ph2{width:92px;height:92px;object-fit:cover;
+   border:1px solid var(--line);border-radius:9px;background:#0c0c0e;display:block;
+   transition:border-color .12s ease}
+ .nnrow .ph2{display:flex;align-items:center;justify-content:center;color:var(--dim);
+   font-size:11px;background:var(--elev)}
+ .nnrow figure:hover img,.nnrow figure:hover .ph2{border-color:var(--accent)}
+ .nnrow figcaption{font-size:10.5px;margin-top:4px;white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis;max-width:92px;color:var(--fg)}
+ .nnrow .rank{font-size:9.5px;color:var(--dim)}
+ .legend{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px;font-size:11.5px;
+   max-height:120px;overflow:auto;padding:2px}
+ .lg{white-space:nowrap;color:var(--dim);background:var(--panel);border:1px solid var(--line);
+   padding:2px 8px 2px 6px;border-radius:20px;display:inline-flex;align-items:center}
+ .lg i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;
    vertical-align:baseline;position:relative}
- .lg i.xm::after{content:"×";position:absolute;inset:-1px 0 0 0;color:#000;font-size:11px;
-   line-height:10px;text-align:center;font-weight:700}
- .lg b{opacity:.5;font-weight:500} .more{opacity:.6;font-style:italic}
- .lg.unl.off{opacity:.3;text-decoration:line-through}
- .inspect{padding:10px 12px}
- .inspect h2{font-size:14px;margin:0 0 2px;word-break:break-all}
- .inspect .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
- .inspect .ph{color:var(--dim);font-size:13px;padding:6px 0}
- /* no flex:1 here — its flex-basis:0% beats height:66vh in a column container
-    and collapses the viewer to min-height */
- .inspect .figwrap{height:calc(var(--fig-h) - 54px);min-height:126px}
+ .lg i.xm::after{content:"×";position:absolute;inset:-2px 0 0 0;color:#000;font-size:10px;
+   line-height:9px;text-align:center;font-weight:700}
+ .lg b{opacity:.55;font-weight:500;margin-left:3px} .more{opacity:.6;font-style:italic}
+ .lg.unl.off{opacity:.35;text-decoration:line-through}
+ /* legend chips are tappable to outline a category's region (convex hull) */
+ .lg[data-cat]{cursor:pointer}
+ .lg.hullon{border-color:var(--accent);color:var(--fg);
+   background:var(--accent-weak);box-shadow:0 0 0 1px var(--accent) inset}
+ .inspect{padding:12px 14px}
+ .inspect h2{font-size:14px;font-weight:600;margin:0 0 2px;word-break:break-all}
+ .inspect .meta{font-size:12px;color:var(--dim);margin-bottom:8px}
+ .inspect .ph{color:var(--dim);font-size:13px;padding:8px 2px}
+ .inspect .figwrap{height:calc(var(--fig-h) - 54px);min-height:126px;
+   border-radius:10px;overflow:hidden;background:var(--bg)}
  .inspect .figwrap>div{width:100%;height:100%}
-
- #pageimg{width:100%;max-height:70vh;object-fit:contain;border-radius:6px;background:#000}
- .panel{display:flex;flex-direction:column;gap:9px;width:100%;margin-top:14px}
+ #pageimg{width:100%;max-height:70vh;object-fit:contain;border-radius:8px;background:#0c0c0e}
+ .panel{display:flex;flex-direction:column;gap:10px;width:100%;margin-top:16px}
  body.expert .panel,body.expert .bar{display:none}
- details.sec{border:1px solid var(--line);border-radius:10px;background:var(--panel)}
- details.sec>summary{cursor:pointer;padding:10px 13px;font-weight:600;list-style:none}
+ details.sec{border:1px solid var(--line);border-radius:13px;background:var(--panel);
+   box-shadow:var(--shadow);overflow:hidden}
+ details.sec>summary{cursor:pointer;padding:11px 14px;font-weight:600;list-style:none;
+   transition:background .12s ease}
+ details.sec>summary:hover{background:var(--accent-weak)}
  details.sec>summary::-webkit-details-marker{display:none}
- .count{background:#ffffff14;border-radius:20px;padding:1px 9px;font-size:12px;margin-left:6px}
- .blurb{padding:0 13px 8px;font-size:12.5px;color:var(--dim)}
- .row{padding:8px 13px;border-top:1px solid #ffffff0f;cursor:pointer}
- .row:hover{background:#ffffff0a}
+ .count{background:var(--accent-weak);color:var(--accent);border-radius:20px;
+   padding:1px 9px;font-size:11.5px;margin-left:7px;font-weight:600}
+ .blurb{padding:0 14px 9px;font-size:12.5px;color:var(--dim)}
+ .row{padding:9px 14px;border-top:1px solid var(--line);cursor:pointer;transition:background .1s}
+ .row:hover{background:var(--accent-weak)}
  .row .t{font-size:13.5px} .row .x{font-size:12.5px;color:var(--dim)}
  .row .num{font-size:11.5px;color:var(--dim);font-family:ui-monospace,monospace;display:none}
  body.nums .row .num{display:block}
  .detail{display:none;padding:8px 0 4px} .row.open .detail{display:block}
  .imgs{display:flex;flex-direction:column;gap:8px;margin:8px 0}
- .imgs figure{margin:0} .imgs img{width:100%;border:1px solid var(--line);border-radius:6px}
+ .imgs figure{margin:0} .imgs img{width:100%;border:1px solid var(--line);border-radius:9px}
  .imgs figcaption{font-size:12px;color:var(--dim)}
  .dec{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
- .dec button.on{background:#e8e8ec;color:#111} .dec input{flex:1;min-width:150px}
- a{color:#8ab4f8} .dot{stroke:#0006;stroke-width:.5} .dot.sel{stroke:#fff;stroke-width:2}
- svg#map{background:#12131a;border:1px solid var(--line);border-radius:10px;width:100%;height:auto}
+ .dec button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+ .dec input{flex:1;min-width:150px}
+ .dot{stroke:#0006;stroke-width:.5} .dot.sel{stroke:var(--accent);stroke-width:2}
+ svg#map{background:var(--bg);border:1px solid var(--line);border-radius:13px;
+   width:100%;height:auto}
  @media(max-width:900px){.wrap{flex-direction:column;gap:12px}
    .mapcol,.viewcol{flex:1 1 auto !important;width:100%}.split{display:none}}
 </style></head><body class="__BODYCLASS__">
@@ -521,7 +660,13 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   <label><input type="checkbox" id="nums"> show the numbers</label>
   <span class="sub" id="tally"></span>
 </div>
-<div class="ctl">__PICKER__</div>
+<div class="ctl">
+  <label title="Publication light background"><input type="checkbox" id="theme"__THEMECHK__> light theme</label>
+  <label title="Print the active category id inside each point"><input type="checkbox" id="labels"__LABELCHK__> class IDs</label>
+  <label>point size <input type="range" id="psize" min="3" max="26" step="0.5" value="__PSIZE__"></label>
+  __PICKER__
+  <input type="text" id="search" placeholder="find charter…" title="Type a filename, then Enter, to jump to that charter">
+</div>
 <div class="wrap">
   <div class="mapcol">
     <div class="card figbox">__MAP__</div>
@@ -532,6 +677,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     <div class="card inspect" id="inspect">
       <div id="ihead" class="ph">Click any point on the map to open that charter.</div>
       <div class="figwrap">__VIEWER__</div>
+      <div id="nn"></div>
     </div>
   </div>
 </div>
@@ -542,6 +688,7 @@ __BOKEH_SCRIPT__
 <script>__MOLE_JS__</script>
 <script>
 var D = __PAYLOAD__, decisions = {}, active = D.first, N = D.names.length;
+var isolatedCat = null;                // category click-isolated (hull + dimmed others)
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 var hidden = {};                       // row-index -> hidden by the unattributed toggle
 
@@ -550,11 +697,29 @@ function baseAlphas(){
   for(var i=0;i<N;i++) a[i] = hidden[i] ? 0 : 0.85;
   return a;
 }
+// spotlight: keep one category bright, dim the rest — for legend hover preview and
+// click isolation. Always respects the unattributed toggle (hidden[] stays hidden).
+function spotAlphas(cat){
+  var cats = (D.schemes[active] || {}).cats || [];
+  var a = new Array(N);
+  for(var i=0;i<N;i++) a[i] = hidden[i] ? 0 : (cats[i] === cat ? 0.85 : 0.08);
+  return a;
+}
+// return to whatever the "resting" view is: a click-isolated category if one is
+// active, otherwise the plain base alphas.
+function restoreAlphas(){
+  MOLE.setAlphas(isolatedCat !== null ? spotAlphas(isolatedCat) : baseAlphas());
+}
 function paint(name){
   var sc = D.schemes[name]; if(!sc) return;
   active = name;
   MOLE.setColors(sc.colors);
+  MOLE.setLabels(sc.cats);
   document.getElementById('legend').innerHTML = sc.legend;
+  // categories differ across schemes, so a hull/isolation for the old one is
+  // meaningless — drop the focus and return to a plain view.
+  isolatedCat = null;
+  if(MOLE.clearHull) MOLE.clearHull();
   MOLE.setAlphas(baseAlphas());
 }
 function light(row){
@@ -565,7 +730,7 @@ function light(row){
   for(var i=0;i<N;i++) a[i] = hidden[i] ? 0 : (hot[i] ? 1 : (warm[i] ? 0.7 : 0.05));
   MOLE.setAlphas(a);
 }
-function unlight(){ MOLE.setAlphas(baseAlphas()); }
+function unlight(){ restoreAlphas(); }
 
 function showDoc(i){
   var uri = D.images[i], dim = D.dims[i] || [1,1], url = D.urls[i] || '';
@@ -580,9 +745,50 @@ function showDoc(i){
     '</div>';
   MOLE.showImage(uri || '', dim[0], dim[1]);
   if(MOLE.select) MOLE.select(i);
+  if(MOLE.markNeighbors) MOLE.markNeighbors(i, (D.nn && D.nn[i]) || []);
+  renderNN(i);
+}
+function renderNN(i){
+  var box = document.getElementById('nn'); if(!box) return;
+  var list = (D.nn && D.nn[i]) || [];
+  if(!list.length){ box.innerHTML = ''; return; }
+  var out = '<div class="nnh">nearest neighbours (cosine)</div><div class="nnrow">';
+  list.forEach(function(j, rank){
+    var thumb = D.images[j]
+      ? '<img loading="lazy" src="' + D.images[j] + '">'
+      : '<div class="ph2">no image</div>';
+    out += '<figure data-i="' + j + '" title="' + esc(D.names[j]) + '">' + thumb +
+           '<figcaption>' + esc(D.names[j]) + '</figcaption>' +
+           '<div class="rank">#' + (rank + 1) +
+           (D.hands[j] ? ' · ' + esc(D.hands[j]) : '') + '</div></figure>';
+  });
+  box.innerHTML = out + '</div>';
+  box.querySelectorAll('figure').forEach(function(f){
+    f.addEventListener('click', function(){ showDoc(+f.getAttribute('data-i')); });
+  });
 }
 MOLE.onTap(showDoc);
 paint(active);
+
+// --- viz/publication controls (shared by both commands)
+var themeBox = document.getElementById('theme');
+if(themeBox) themeBox.addEventListener('change', function(){
+  var light = themeBox.checked;
+  document.body.classList.toggle('light', light);
+  document.body.classList.toggle('dark', !light);
+  MOLE.setTheme(!light);
+  window.dispatchEvent(new Event('resize'));
+});
+var labelBox = document.getElementById('labels');
+if(labelBox){
+  MOLE.showLabels(labelBox.checked);
+  labelBox.addEventListener('change', function(){ MOLE.showLabels(labelBox.checked); });
+}
+var psize = document.getElementById('psize');
+if(psize){
+  MOLE.setSize(parseFloat(psize.value));
+  psize.addEventListener('input', function(){ MOLE.setSize(parseFloat(psize.value)); });
+}
 
 // --- draggable divider between the map and the charter viewer
 (function(){
@@ -667,12 +873,84 @@ paint(active);
 
 var picker = document.getElementById('scheme');
 if(picker) picker.addEventListener('change', function(){ paint(picker.value); });
+
+// Legend chips are interactive (event delegation, because paint() rebuilds
+// #legend's innerHTML on every scheme change; the "+N more…" chip carries no
+// data-cat and is ignored):
+//   HOVER  → spotlight preview: dim every other hand while the mouse is on the chip.
+//   CLICK  → focus this hand: draw its convex hull AND persistently isolate it.
+//            Clicking the focused chip again clears both; a different chip switches.
+var legendEl = document.getElementById('legend');
+function memberIdx(cat){
+  var cats = (D.schemes[active] || {}).cats || [], idx = [];
+  for(var i=0;i<cats.length;i++) if(cats[i] === cat) idx.push(i);
+  return idx;
+}
+legendEl.addEventListener('mouseover', function(e){
+  var chip = e.target.closest ? e.target.closest('.lg[data-cat]') : null;
+  if(!chip) return;
+  var cat = chip.getAttribute('data-cat');
+  if(cat === isolatedCat) return;         // already showing this one; nothing to preview
+  MOLE.setAlphas(spotAlphas(cat));        // temporary — restored on mouseout
+});
+legendEl.addEventListener('mouseout', function(e){
+  var chip = e.target.closest ? e.target.closest('.lg[data-cat]') : null;
+  if(!chip) return;
+  // returning to a real element inside the same chip is not a leave
+  var to = e.relatedTarget;
+  if(to && chip.contains(to)) return;
+  restoreAlphas();                        // back to click-isolation, or plain base
+});
+legendEl.addEventListener('click', function(e){
+  var chip = e.target.closest ? e.target.closest('.lg[data-cat]') : null;
+  if(!chip) return;
+  var cat = chip.getAttribute('data-cat');
+  var chips = legendEl.querySelectorAll('.lg.hullon');
+  for(var k=0;k<chips.length;k++) chips[k].classList.remove('hullon');
+  if(isolatedCat === cat){                // clicking the focused chip clears everything
+    isolatedCat = null;
+    if(MOLE.clearHull) MOLE.clearHull();
+    MOLE.setAlphas(baseAlphas());
+  } else {                                // focus a (new) hand: hull + isolation together
+    isolatedCat = cat;
+    chip.classList.add('hullon');
+    if(MOLE.showHull) MOLE.showHull(memberIdx(cat));
+    MOLE.setAlphas(spotAlphas(cat));
+  }
+});
+
+// Filename search: jump the viewer + map to a charter by (partial) name.
+var search = document.getElementById('search');
+function doSearch(){
+  if(!search) return;
+  var q = search.value.trim().toLowerCase();
+  if(!q) return;
+  var stem = function(n){ return String(n).replace(/\.[^.]+$/, ''); };
+  var exact = -1, sub = -1;
+  for(var i=0;i<N;i++){
+    var nm = String(D.names[i]).toLowerCase(), st = stem(nm);
+    if(st === q){ exact = i; break; }                       // prefer an exact stem
+    if(sub < 0 && (nm.indexOf(q) >= 0 || st.indexOf(q) >= 0)) sub = i;
+  }
+  var idx = exact >= 0 ? exact : sub;
+  if(idx < 0){                                              // no match: brief red cue
+    search.classList.add('notfound');
+    setTimeout(function(){ search.classList.remove('notfound'); }, 1000);
+    return;
+  }
+  showDoc(idx);                                             // select + load + NN strip
+  if(MOLE.centerOn) MOLE.centerOn(idx);                     // recenter/zoom the map
+  if(MOLE.flash) MOLE.flash(idx);                           // brief size pulse
+}
+if(search) search.addEventListener('keydown', function(e){
+  if(e.key === 'Enter'){ e.preventDefault(); doSearch(); }
+});
 var unl = document.getElementById('unl');
 function syncUnl(){
   if(!unl) return;
   var vis = unl.checked, cats = D.schemes['hand'].cats;
   for(var i=0;i<N;i++) hidden[i] = (!vis && !D.hands[i]);
-  MOLE.setAlphas(baseAlphas());
+  restoreAlphas();
   var keys = document.querySelectorAll('.lg.unl');
   for(var j=0;j<keys.length;j++) keys[j].classList.toggle('off', !vis);
 }

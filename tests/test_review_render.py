@@ -266,9 +266,9 @@ def test_expert_flag_opens_without_the_suggestion_lists(tmp_path):
                              map_backend="svg")
     exp, _ = render_review(npy, out=tmp_path / "e.html", method="pca", images=False,
                            map_backend="svg", expert=True)
-    assert '<body class="">' in plain.read_text()
+    assert '<body class="dark">' in plain.read_text()
     assert 'id="showlists" checked' in plain.read_text()      # lists on by default
-    assert '<body class="expert">' in exp.read_text()
+    assert '<body class="dark expert">' in exp.read_text()
     assert 'id="showlists" checked' not in exp.read_text()    # ... off with --expert
 
 

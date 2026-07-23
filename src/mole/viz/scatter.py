@@ -12,9 +12,10 @@ Projection backends (``--method``):
 * ``umap`` -- ``umap-learn`` (optional ``mole[viz]`` extra); best global+local.
 * ``auto`` -- umap if installed, else pca.
 
-High-dimensional inputs (e.g. VLAD's ``K*dim``) are PCA-reduced to 50 dims before
-t-SNE/UMAP, the standard denoise-then-embed recipe. Everything is seeded, so a run
-is reproducible.
+High-dimensional inputs (e.g. VLAD's ``K*dim``) are PCA-reduced before t-SNE/UMAP.
+The default UMAP path follows the Sluis charter-viz recipe: **sklearn PCA(150,
+whiten=True) → precomputed Euclidean distances → UMAP(n=15, min_dist=0.1)**.
+Everything is seeded, so a run is reproducible.
 """
 
 from __future__ import annotations
@@ -22,10 +23,13 @@ from __future__ import annotations
 import colorsys
 import json
 import re
+import unicodedata
 from html import escape
 from pathlib import Path
 
 import numpy as np
+
+_HIGHLIGHT_STROKE = "#CC0000"
 
 
 # ------------------------------------------------------------------------ load
@@ -61,13 +65,27 @@ def _pca(X: np.ndarray, k: int) -> np.ndarray:
     return (Xc @ vt[:k].T).astype(np.float32)
 
 
+def _pca_sklearn(X: np.ndarray, k: int, seed: int, *, whiten: bool) -> np.ndarray:
+    """PCA pre-reduction via sklearn (supports whitening — the Sluis viz recipe)."""
+    from sklearn.decomposition import PCA
+
+    k = min(int(k), X.shape[0], X.shape[1])
+    if k < 2:
+        return np.asarray(X, dtype=np.float32)
+    return PCA(n_components=k, whiten=whiten, random_state=seed).fit_transform(
+        np.asarray(X, dtype=np.float64)).astype(np.float32)
+
+
 def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0,
-              pca_dim: int = 150) -> tuple[np.ndarray, str]:
+              pca_dim: int = 150, *, pca_whiten: bool = True,
+              umap_neighbors: int = 15, umap_min_dist: float = 0.1) -> tuple[np.ndarray, str]:
     """Project ``[N, D]`` to ``[N, 2]``; returns (coords, method_used).
 
-    For the nonlinear backends the input is first PCA-reduced to ``pca_dim`` dims
-    (the standard denoise-then-embed recipe) — the default pipeline is
-    **PCA(150) → UMAP**. ``pca`` alone goes straight to 2 components.
+    For the nonlinear backends the input is first PCA-reduced to ``pca_dim`` dims.
+    **UMAP** (and ``auto`` when umap-learn is installed) uses the Sluis charter-viz
+    recipe by default: whitened PCA, then UMAP on a **precomputed Euclidean distance
+    matrix** with ``n_neighbors=15`` and ``min_dist=0.1``. Plain ``pca`` goes straight
+    to 2 components (linear, fast, but rarely as pretty as UMAP).
     """
     X = np.asarray(X, dtype=np.float32)
     method = method.lower()
@@ -80,11 +98,14 @@ def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0,
     if method == "pca":
         return _pca(X, 2), "pca"
 
-    # linear denoise to pca_dim before the nonlinear embedding
     k = min(pca_dim, X.shape[1], max(2, X.shape[0] - 1))
     reduced = X.shape[1] > k
-    pre = _pca(X, k) if reduced else X
-    tag = f" (pca-{k})" if reduced else ""
+    if method == "umap":
+        pre = _pca_sklearn(X, k, seed, whiten=pca_whiten) if reduced else X
+    else:
+        pre = _pca(X, k) if reduced else X
+    whiten_tag = " whiten" if (method == "umap" and pca_whiten and reduced) else ""
+    tag = f" (pca-{k}{whiten_tag})" if reduced else ""
     if method == "tsne":
         from sklearn.manifold import TSNE
 
@@ -100,12 +121,22 @@ def reduce_2d(X: np.ndarray, method: str = "auto", seed: int = 0,
         except ImportError as e:
             raise ImportError("method='umap' needs umap-learn: pip install 'mole[viz]' "
                               "(or use --method tsne / pca)") from e
+        from scipy.spatial.distance import pdist, squareform
+
+        n_neighbors = min(int(umap_neighbors), len(pre) - 1)
         with warnings.catch_warnings():
-            # a fixed random_state makes UMAP single-threaded (for reproducibility);
-            # its "n_jobs overridden" notice is expected and harmless — silence it.
             warnings.filterwarnings("ignore", message=r".*n_jobs value.*overridden.*")
-            coords = umap.UMAP(n_components=2, random_state=seed).fit_transform(pre)
-        return coords, f"umap{tag}"
+            warnings.filterwarnings("ignore", message=r".*precomputed metric.*")
+            dist = squareform(pdist(pre, metric="euclidean"))
+            coords = umap.UMAP(
+                n_components=2,
+                n_neighbors=max(2, n_neighbors),
+                min_dist=float(umap_min_dist),
+                metric="precomputed",
+                random_state=seed,
+            ).fit_transform(dist)
+        umap_tag = (f"n={n_neighbors} d={umap_min_dist:g} precomputed")
+        return coords, f"umap ({umap_tag}{tag})"
     raise ValueError(f"unknown method {method!r} (pca|tsne|umap|auto)")
 
 
@@ -161,6 +192,49 @@ def _palette(n: int) -> list[str]:
             for i in range(n)]
 
 
+def _nfc(s: str) -> str:
+    """Unicode NFC — macOS filenames are often NFD while highlight lists are NFC."""
+    return unicodedata.normalize("NFC", s)
+
+
+def _parse_highlights(items: list[str] | None,
+                      highlight_file: str | Path | None) -> set[str]:
+    """Normalised filename stems to ring-highlight (Sluis-style target overlay)."""
+    out: set[str] = set()
+    for raw in items or []:
+        raw = raw.strip()
+        if raw:
+            out.add(_nfc(Path(raw).stem))
+    if highlight_file:
+        for line in Path(highlight_file).read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                out.add(_nfc(Path(line).stem))
+    return out
+
+
+def _is_highlighted(image: str, highlights: set[str]) -> bool:
+    return _nfc(Path(image).stem) in highlights if highlights else False
+
+
+def _text_on(hex_color: str) -> str:
+    """Black or white label text for legibility on a filled circle."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return "#111"
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#111" if lum > 140 else "#fff"
+
+
+def _label_text(cat: str, max_len: int = 8) -> str:
+    """Short class id for in-circle labels (hand-group numbers, cluster ids, …)."""
+    s = str(cat).strip()
+    if _is_unlabeled(s):
+        return ""
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
 # -------------------------------------------------------------------------- html
 def _scheme_payload(cats: list[str]) -> dict:
     """Colours + legend for one colouring of the points.
@@ -174,8 +248,12 @@ def _scheme_payload(cats: list[str]) -> dict:
     cmap = dict(zip(labeled_uniq, _palette(len(labeled_uniq))))
     cmap.update({c: _UNLABELED_GREY for c in uniq if _is_unlabeled(c)})
     show = uniq[:60]
+    # data-cat carries the machine-readable category (== the values in ``cats``) so
+    # the page can find a chip's member points and draw its convex hull on tap. The
+    # "…and N more" chip is deliberately NOT tagged: it names no single category.
     legend = "".join(
-        f'<span class="lg{" unl" if _is_unlabeled(c) else ""}">'
+        f'<span class="lg{" unl" if _is_unlabeled(c) else ""}" '
+        f'data-cat="{escape(str(c), quote=True)}">'
         f'<i class="{"xm" if _is_unlabeled(c) else ""}" style="background:{cmap[c]}"></i>'
         f'{escape(str(c))} <b>{cats.count(c)}</b></span>' for c in show)
     if len(uniq) > len(show):
@@ -184,14 +262,24 @@ def _scheme_payload(cats: list[str]) -> dict:
             "legend": legend, "n_cats": len(uniq)}
 
 
-def _build_html(coords, schemes, rows, meta, method) -> str:
+def _build_html(coords, schemes, rows, meta, method, *,
+                highlights: set[str] | None = None,
+                theme: str = "light",
+                show_labels: bool = False,
+                point_size: float = 4.5) -> str:
     """``schemes`` is ``[(name, cats), ...]``; the first is shown initially.
 
     Extra schemes (e.g. one per FINCH level) are switchable in the browser: the
     circles' fill is repainted from a per-scheme colour array, so ground truth and
     discovered clusters can be flipped in place on the SAME projection — which is the
     only honest way to ask "do the clusters recover the known hands?".
+
+    ``highlights`` ring specific documents (hollow red overlay + stem label), abstracting
+    the Sluis ``HIGHLIGHT_FILES`` pattern for any archive.
     """
+    highlights = highlights or set()
+    theme = "dark" if theme.lower() == "dark" else "light"
+    point_size = float(max(2.0, min(30.0, point_size)))
     xs, ys = coords[:, 0].astype(float), coords[:, 1].astype(float)
 
     def norm(a):
@@ -206,24 +294,53 @@ def _build_html(coords, schemes, rows, meta, method) -> str:
     names = [n for n, _ in schemes]
     payloads = {n: _scheme_payload(c) for n, c in schemes}
     first = payloads[names[0]]
-    # "No ground truth" is a property of the DOCUMENT, not of the active colouring, so
-    # the cross marker is fixed to the hand labels (scheme 0) and stays put while the
-    # fill changes — under a cluster scheme an unlabeled point is still coloured by its
-    # cluster, which is exactly the attribution question ("which cluster did it join?").
     base_cats = schemes[0][1]
+    hl_ring = point_size + 6
 
-    dots = []
+    pts = []
+    n_highlighted = 0
     for i, (x, y, r) in enumerate(zip(nx, ny, rows)):
+        stem = Path(r["image"]).stem
         name = escape(Path(r["image"]).name, quote=True)
-        dot = (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4.5" fill="{first["colors"][i]}" '
-               f'fill-opacity="0.82" stroke="#0003" stroke-width="0.5" data-i="{i}" '
-               f'data-name="{name}"/>')
-        if _is_unlabeled(base_cats[i]):
-            a = 2.2
-            dot = (f'<g data-unl="1">{dot}<path d="M{x - a:.1f} {y - a:.1f}L{x + a:.1f} {y + a:.1f}'
-                   f'M{x - a:.1f} {y + a:.1f}L{x + a:.1f} {y - a:.1f}" stroke="{_UNLABELED_CROSS}" '
-                   f'stroke-width="1.1" stroke-linecap="round" pointer-events="none"/></g>')
-        dots.append(dot)
+        fill = first["colors"][i]
+        cat = base_cats[i]
+        lbl = escape(_label_text(cat), quote=True)
+        txt_fill = _text_on(fill)
+        hl = _is_highlighted(r["image"], highlights)
+        if hl:
+            n_highlighted += 1
+        unl = _is_unlabeled(cat)
+        parts = [
+            f'<g class="pt" data-i="{i}" data-hl="{1 if hl else 0}"'
+            f' data-unl="{1 if unl else 0}">',
+            (f'<circle class="dot" cx="{x:.1f}" cy="{y:.1f}" r="{point_size:.1f}" '
+             f'fill="{fill}" fill-opacity="0.82" stroke="#0003" stroke-width="0.5" '
+             f'data-i="{i}" data-name="{name}"/>'),
+        ]
+        if hl:
+            parts.append(
+                f'<circle class="hl-ring" cx="{x:.1f}" cy="{y:.1f}" r="{hl_ring:.1f}" '
+                f'fill="none" stroke="{_HIGHLIGHT_STROKE}" stroke-width="2.5" '
+                f'pointer-events="none"/>')
+            parts.append(
+                f'<text class="hl-lbl" x="{x + hl_ring + 4:.1f}" y="{y:.1f}" '
+                f'dominant-baseline="central" fill="{_HIGHLIGHT_STROKE}" font-size="11" '
+                f'font-weight="700" pointer-events="none">{escape(stem)}</text>')
+        if lbl:
+            vis = "visible" if show_labels else "hidden"
+            fs = max(6.0, point_size * 0.85)
+            parts.append(
+                f'<text class="lbl" x="{x:.1f}" y="{y:.1f}" text-anchor="middle" '
+                f'dominant-baseline="central" font-size="{fs:.1f}" font-weight="600" '
+                f'fill="{txt_fill}" visibility="{vis}" pointer-events="none">{lbl}</text>')
+        if unl:
+            a = point_size * 0.48
+            parts.append(
+                f'<path class="unl-x" d="M{x - a:.1f} {y - a:.1f}L{x + a:.1f} {y + a:.1f}'
+                f'M{x - a:.1f} {y + a:.1f}L{x + a:.1f} {y - a:.1f}" stroke="{_UNLABELED_CROSS}" '
+                f'stroke-width="1.1" stroke-linecap="round" pointer-events="none"/>')
+        parts.append("</g>")
+        pts.append("".join(parts))
 
     n_unlabeled = sum(1 for c in base_cats if _is_unlabeled(c))
     legend = first["legend"]
@@ -236,26 +353,38 @@ def _build_html(coords, schemes, rows, meta, method) -> str:
                        f'({payloads[n]["n_cats"]})</option>' for n in names)
         picker = (f'<label class="tgl">colour by <select id="scheme">{opts}</select></label>')
 
+    hl_note = (f' · <b>{n_highlighted}</b> highlighted'
+               if highlights else "")
+    if highlights and n_highlighted < len(highlights):
+        hl_note += f' ({len(highlights) - n_highlighted} not found)'
+
     mid = meta.get("model_id", "?")
     pooling = meta.get("pooling", "?")
     subtitle = (f"{len(rows)} documents · pooling <b>{escape(pooling)}</b> · "
-                f"projection <b>{method}</b> · colour by <b id=\"cdesc\">{escape(names[0])}</b> · "
-                f"model <code>{escape(str(mid))}</code>")
+                f"projection <b>{method}</b> · colour by <b id=\"cdesc\">{escape(names[0])}</b>"
+                f"{hl_note} · model <code>{escape(str(mid))}</code>")
     schemes_json = json.dumps({n: {"colors": p["colors"], "cats": p["cats"],
                                    "legend": p["legend"]} for n, p in payloads.items()})
+    labels_checked = " checked" if show_labels else ""
+    theme_checked = " checked" if theme == "dark" else ""
+    body_class = theme
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>mole embedding scatter</title>
 <style>
   :root {{ color-scheme: light dark; }}
-  body {{ font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 20px;
-          background: Canvas; color: CanvasText; }}
+  body {{ font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 20px; }}
+  body.light {{ background: #f8f9fa; color: #111; }}
+  body.dark {{ background: #1a1d21; color: #e8eaed; }}
   h1 {{ font-size: 17px; margin: 0 0 2px; }}
   .sub {{ opacity: .75; margin-bottom: 12px; }}
+  .controls {{ display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+               margin-bottom: 10px; }}
   .wrap {{ display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }}
-  svg {{ background: #fff; border: 1px solid #0002; border-radius: 8px;
-         max-width: 100%; height: auto; }}
-  circle:hover {{ r: 7; fill-opacity: 1; }}
+  svg {{ border-radius: 8px; max-width: 100%; height: auto; }}
+  svg.light {{ background: #fff; border: 1px solid #0002; }}
+  svg.dark {{ background: #252830; border: 1px solid #fff2; }}
+  .dot:hover {{ fill-opacity: 1; }}
   .legend {{ max-width: 320px; display: flex; flex-wrap: wrap; gap: 4px 12px;
              align-content: flex-start; }}
   .lg {{ white-space: nowrap; opacity: .9; }}
@@ -263,45 +392,100 @@ def _build_html(coords, schemes, rows, meta, method) -> str:
            margin-right: 5px; vertical-align: baseline; position: relative; }}
   .lg i.xm::after {{ content: "×"; position: absolute; inset: -1px 0 0 0; color: #2f3336;
                      font-size: 11px; line-height: 10px; text-align: center; font-weight: 700; }}
+  body.dark .lg i.xm::after {{ color: #cbd0d6; }}
   .lg b {{ opacity: .55; font-weight: 500; }}
   .more {{ opacity: .6; font-style: italic; }}
-  .tgl {{ display: inline-flex; align-items: center; gap: 6px; margin-bottom: 10px;
-          cursor: pointer; user-select: none; opacity: .85; }}
+  .tgl {{ display: inline-flex; align-items: center; gap: 6px;
+          cursor: pointer; user-select: none; opacity: .85; white-space: nowrap; }}
   .tgl b {{ opacity: .55; font-weight: 500; }}
+  .tgl input[type=range] {{ width: 110px; vertical-align: middle; }}
   .lg.unl.off {{ opacity: .3; text-decoration: line-through; }}
   code {{ font-size: 12px; opacity: .8; }}
-  circle {{ cursor: crosshair; }}
+  .dot {{ cursor: crosshair; }}
   #tt {{ position: fixed; z-index: 10; display: none; pointer-events: none;
-         background: #111d; color: #fff; padding: 5px 8px; border-radius: 6px;
-         font-size: 12px; max-width: 340px; box-shadow: 0 2px 8px #0006; }}
+         padding: 5px 8px; border-radius: 6px; font-size: 12px; max-width: 340px;
+         box-shadow: 0 2px 8px #0006; }}
+  body.light #tt {{ background: #111d; color: #fff; }}
+  body.dark #tt {{ background: #fffd; color: #111; }}
   #tt b {{ font-weight: 600; }} #tt span {{ opacity: .7; }}
-</style></head><body>
+</style></head><body class="{body_class}">
 <h1>Document embedding scatter</h1>
 <div class="sub">{subtitle}</div>
-{toggle}{picker}
+<div class="controls">
+  <label class="tgl"><input type="checkbox" id="theme"{theme_checked}> dark mode</label>
+  <label class="tgl"><input type="checkbox" id="labels"{labels_checked}> show class IDs</label>
+  <label class="tgl">point size <input type="range" id="psize" min="3" max="24"
+         step="0.5" value="{point_size:.1f}"></label>
+  {toggle}{picker}
+</div>
 <div class="wrap">
-  <svg viewBox="0 0 {W} {H}" width="{W}" height="{H}">{''.join(dots)}</svg>
+  <svg class="{body_class}" viewBox="0 0 {W} {H}" width="{W}" height="{H}">{''.join(pts)}</svg>
   <div class="legend">{legend}</div>
 </div>
 <div id="tt"></div>
-<p class="sub">Hover a point for its filename. Same-hand / same-scribe documents
-should form neighbourhoods as the model learns. Where a FINCH level is available,
-switch the colouring to compare discovered clusters against the known hands —
-crosses mark documents with no ground truth, whichever colouring is active.</p>
+<p class="sub">Hover a point for its filename. Ringed points are explicitly highlighted targets.
+Toggle <b>show class IDs</b> to print the active colour category inside each circle (hand-group
+numbers, cluster ids, …). Same-hand documents should form neighbourhoods as the model learns.
+Crosses mark documents with no ground truth.</p>
 <script>
 (function() {{
-  var svg = document.querySelector('svg'), tt = document.getElementById('tt');
+  var svg = document.querySelector('svg'), body = document.body, tt = document.getElementById('tt');
   var SCHEMES = {schemes_json};
   var active = {json.dumps(names[0])};
-  var dots = svg.querySelectorAll('circle');
+  function textOn(hex) {{
+    var h = hex.replace('#','');
+    if (h.length !== 6) return '#111';
+    var r = parseInt(h.slice(0,2),16), g = parseInt(h.slice(2,4),16), b = parseInt(h.slice(4,6),16);
+    var lum = 0.299*r + 0.587*g + 0.114*b;
+    return lum > 140 ? '#111' : '#fff';
+  }}
+  function labelText(cat) {{
+    var s = String(cat || '').trim().toLowerCase();
+    var bad = {{unlabeled:1,'-1':1,'—':1,'-':1,'none':1,nan:1,unknown:1,na:1,'n/a':1,'?':1}};
+    if (!s || bad[s]) return '';
+    return String(cat).length > 8 ? String(cat).slice(0,7)+'…' : String(cat);
+  }}
+  function size() {{ return parseFloat(document.getElementById('psize').value); }}
+  function applySize() {{
+    var r = size(), ring = r + 6, fs = Math.max(6, r * 0.85);
+    document.querySelectorAll('.pt').forEach(function(g) {{
+      var dot = g.querySelector('.dot');
+      if (!dot) return;
+      var x = parseFloat(dot.getAttribute('cx')), y = parseFloat(dot.getAttribute('cy'));
+      dot.setAttribute('r', r);
+      var ringEl = g.querySelector('.hl-ring');
+      if (ringEl) ringEl.setAttribute('r', ring);
+      var hl = g.querySelector('.hl-lbl');
+      if (hl) hl.setAttribute('x', x + ring + 4);
+      var lbl = g.querySelector('.lbl');
+      if (lbl) {{ lbl.setAttribute('font-size', fs); lbl.setAttribute('x', x); lbl.setAttribute('y', y); }}
+      var xmark = g.querySelector('.unl-x');
+      if (xmark) {{
+        var a = r * 0.48;
+        xmark.setAttribute('d', 'M'+(x-a)+' '+(y-a)+'L'+(x+a)+' '+(y+a)+
+                          'M'+(x-a)+' '+(y+a)+'L'+(x+a)+' '+(y-a));
+      }}
+    }});
+  }}
   function paint(name) {{
     var s = SCHEMES[name];
     if (!s) return;
     active = name;
-    for (var i = 0; i < dots.length; i++) {{
-      var k = +dots[i].getAttribute('data-i');
-      dots[i].setAttribute('fill', s.colors[k]);
-    }}
+    document.querySelectorAll('.pt').forEach(function(g) {{
+      var i = +g.getAttribute('data-i');
+      var dot = g.querySelector('.dot');
+      if (!dot) return;
+      var col = s.colors[i];
+      dot.setAttribute('fill', col);
+      var lbl = g.querySelector('.lbl');
+      if (lbl) {{
+        var t = labelText(s.cats[i]);
+        lbl.textContent = t;
+        lbl.setAttribute('fill', textOn(col));
+        lbl.setAttribute('visibility', t && document.getElementById('labels').checked
+                         ? 'visible' : 'hidden');
+      }}
+    }});
     document.querySelector('.legend').innerHTML = s.legend;
     document.getElementById('cdesc').textContent = name;
     tt.style.display = 'none';
@@ -310,7 +494,7 @@ crosses mark documents with no ground truth, whichever colouring is active.</p>
   if (picker) picker.addEventListener('change', function() {{ paint(picker.value); }});
   svg.addEventListener('mouseover', function(e) {{
     var t = e.target;
-    if (t.tagName === 'circle') {{
+    if (t.classList && t.classList.contains('dot')) {{
       tt.innerHTML = '<b></b><br><span></span>';
       tt.querySelector('b').textContent = t.getAttribute('data-name');
       tt.querySelector('span').textContent =
@@ -323,19 +507,34 @@ crosses mark documents with no ground truth, whichever colouring is active.</p>
     tt.style.top = (e.clientY + 14) + 'px';
   }});
   svg.addEventListener('mouseout', function(e) {{
-    if (e.target.tagName === 'circle') tt.style.display = 'none';
+    if (e.target.classList && e.target.classList.contains('dot')) tt.style.display = 'none';
   }});
   var unl = document.getElementById('unl');
   if (unl) {{
-    var pts = svg.querySelectorAll('[data-unl]');   // the <g> wrapping disc + cross
     var keys = document.querySelectorAll('.lg.unl');
     unl.addEventListener('change', function() {{
       var vis = unl.checked;
-      for (var i = 0; i < pts.length; i++) pts[i].style.display = vis ? '' : 'none';
+      document.querySelectorAll('.pt[data-unl="1"]').forEach(function(g) {{
+        g.style.display = vis ? '' : 'none';
+      }});
       for (var j = 0; j < keys.length; j++) keys[j].classList.toggle('off', !vis);
       tt.style.display = 'none';
     }});
   }}
+  document.getElementById('theme').addEventListener('change', function(e) {{
+    var dark = e.target.checked;
+    body.className = dark ? 'dark' : 'light';
+    svg.className = body.className;
+  }});
+  document.getElementById('labels').addEventListener('change', function(e) {{
+    var vis = e.target.checked ? 'visible' : 'hidden';
+    document.querySelectorAll('.lbl').forEach(function(t) {{
+      if (t.textContent) t.setAttribute('visibility', vis);
+    }});
+  }});
+  document.getElementById('psize').addEventListener('input', applySize);
+  applySize();
+  paint(active);
 }})();
 </script>
 </body></html>"""
@@ -365,26 +564,39 @@ def _cluster_schemes(clusters: str | Path, rows: list[dict]) -> list[tuple[str, 
 def plot_embeddings(embeddings: str | Path, out: str | Path | None = None,
                     method: str = "auto", color: str = "dataset",
                     color_regex: str | None = None, seed: int = 0,
-                    pca_dim: int = 150,
-                    clusters: str | Path | None = None) -> tuple[Path, str]:
-    """Project an embeddings file to 2D and write an interactive HTML scatter.
+                    pca_dim: int = 150, pca_whiten: bool = True,
+                    umap_neighbors: int = 15, umap_min_dist: float = 0.1,
+                    clusters: str | Path | None = None,
+                    highlight: list[str] | None = None,
+                    highlight_file: str | Path | None = None,
+                    theme: str = "light",
+                    show_labels: bool = False,
+                    point_size: float = 4.5) -> tuple[Path, str]:
+    """Write a lightweight self-contained SVG scatter (no images, no Bokeh).
+
+    This is the dependency-free helper used programmatically and as the ``svg``
+    fallback. The user-facing ``mole viz`` command renders the full map + charter
+    viewer bipanel through :func:`mole.review.render.render_review` (same renderer
+    as ``mole review``), so the two commands share one interactive interface.
 
     Returns ``(output_path, method_used)``. Default projection is PCA(``pca_dim``)
     → UMAP. ``color`` is ``dataset`` | ``hand`` | ``none``; ``color_regex`` overrides
-    it, colouring by a capture group extracted from each filename (e.g. ``r'_(\\d{4})-'``
-    to colour by year). ``clusters`` adds one switchable colour scheme per FINCH level
-    from a ``mole cluster`` report, so discovered clusters can be flipped against the
-    ground-truth colouring on the same projection.
+    it. ``clusters`` adds one switchable colour scheme per FINCH level. ``highlight``
+    / ``highlight_file`` ring specific documents (Sluis target pattern).
     """
     embeddings = Path(embeddings)
     X, meta, rows = _load_embeddings(embeddings)
-    coords, used = reduce_2d(X, method, seed, pca_dim=pca_dim)
+    coords, used = reduce_2d(X, method, seed, pca_dim=pca_dim, pca_whiten=pca_whiten,
+                            umap_neighbors=umap_neighbors, umap_min_dist=umap_min_dist)
     cats = _categories(rows, color, color_regex)
     color_desc = f"regex {color_regex}" if color_regex else color
     schemes = [(color_desc, cats)]
     if clusters:
         schemes.extend(_cluster_schemes(clusters, rows))
-    html = _build_html(coords, schemes, rows, meta, used)
+    highlights = _parse_highlights(highlight, highlight_file)
+    html = _build_html(coords, schemes, rows, meta, used,
+                       highlights=highlights, theme=theme,
+                       show_labels=show_labels, point_size=point_size)
     out = Path(out) if out else embeddings.with_suffix(".viz.html")
     out.write_text(html, encoding="utf-8")
     return out, used
