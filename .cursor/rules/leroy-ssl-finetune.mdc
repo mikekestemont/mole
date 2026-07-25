@@ -1,0 +1,29 @@
+---
+description: Leroy SSL finetune results and fair eval protocol
+alwaysApply: true
+---
+
+# Leroy SSL finetune (sluis_leroy_ssl)
+
+Warm-start from raven (`checkpoints/raven_checkpoint.pth`), train on `data/leroy-bin` with `configs/pooled_bin.yaml` (20 epochs). Run dir: `runs/sluis_leroy_ssl`.
+
+## Fair retrieval protocol
+
+Compare with raven under the same recipe:
+
+- embed: `--set window_size=224 --set overlap=0 --set use_zones=false` (invert inherited)
+- eval: `--cross-doc-only --topk 1,5` (435 queries on Leroy)
+
+Inference now defaults to `overlap=0` in `mole embed` / `mole codebook`; keep `window_size=224` explicit when matching this protocol. Do not compare runs that omit `--cross-doc-only` or use dense `overlap=0.5` windows to this table.
+
+## Results (cross-doc, Leroy)
+
+| checkpoint | mAP | macro-mAP | Top-1 | Top-5 |
+|---|---:|---:|---:|---:|
+| raven raw (`step0`) | 0.796 | 0.782 | 0.897 | 0.949 |
+| ssl mid (`step26000`, ~epoch 10) | 0.831 | 0.809 | 0.901 | 0.945 |
+| ssl final (`step48760`, epoch 20) | 0.835 | 0.811 | 0.897 | 0.945 |
+
+## Takeaway
+
+Finetune clearly beats raven (~+4 pp mAP). **Most of the gain is already there by step 26000**; epoch 10→20 is nearly flat (+0.4 pp mAP). Prefer the mid checkpoint unless a later metric says otherwise. Early stopping / shorter schedules are justified for this archive.
