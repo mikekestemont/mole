@@ -25,7 +25,13 @@ from typing import Protocol, runtime_checkable
 # family (the part before the first "_"), so "Text" covers {Text, Text_Main}.
 # Everything else — Initial (drop capitals), Paratext (marginalia/headers),
 # Decoration, Marks, Damage — stays EXCLUDED. Add a family here to include it.
-ZONE_FAMILIES: tuple[str, ...] = ("Text",)
+# "MainZone" is the single class emitted by our own OBB fine-tunes (the name
+# comes from the Label Studio config, see scripts/ls_to_yolo.py). It is safe in
+# the default: no class of the off-the-shelf YOLO_manuscripts model is in that
+# family, so listing it cannot change what the hub weights select — whereas
+# leaving it out makes every locally fine-tuned checkpoint detect the zone
+# perfectly and then fall back to the whole page on every single image.
+ZONE_FAMILIES: tuple[str, ...] = ("Text", "MainZone")
 DEFAULT_YOLO_REPO = "magistermilitum/YOLO_manuscripts"
 DEFAULT_YOLO_WEIGHTS = "best.pt"
 
@@ -112,9 +118,32 @@ def pad_bbox(b: BBox, padding: int, width: int = 0, height: int = 0) -> BBox:
     return (x0, y0, x1, y1)
 
 
+def effective_padding(padding: int, padding_frac: float, image_size: tuple[int, int]) -> int:
+    """Resolve absolute and size-relative padding into one pixel amount.
+
+    Takes the LARGER of the two, so ``padding`` is a floor in px and
+    ``padding_frac`` (a share of the SHORT side) is what scales with the page.
+    A corpus of mixed provenance easily spans an order of magnitude in
+    resolution — Fragmentarium fragments run 509 to 6640 px on the short side —
+    and one absolute value cannot serve both ends: it either clips text off the
+    large scans or swallows the small ones whole. The short side is the
+    reference because that is the dimension a text block is usually tight
+    against.
+    """
+    w, h = image_size
+    short = min(w, h)
+    if padding_frac > 0 and short > 0:
+        return max(padding, round(padding_frac * short))
+    return padding
+
+
 def main_text_zone(dets: list[Detection], families: tuple[str, ...] = ZONE_FAMILIES,
-                   image_size: tuple[int, int] = (0, 0), padding: int = 0) -> BBox | None:
+                   image_size: tuple[int, int] = (0, 0), padding: int = 0,
+                   padding_frac: float = 0.0) -> BBox | None:
     """Union of detections whose class FAMILY is in ``families``, padded + clipped.
+
+    ``padding`` is in pixels; ``padding_frac`` pads by a share of the image's
+    short side instead when that comes out larger (see :func:`effective_padding`).
 
     Returns ``None`` when no in-family region was found (caller decides whether to
     fall back to the whole page).
@@ -132,8 +161,7 @@ def main_text_zone(dets: list[Detection], families: tuple[str, ...] = ZONE_FAMIL
     # the box to (x0, y0, 0, 0). prep_folder always passes img.size; anything that
     # doesn't (a scoring harness, a notebook) used to get a silently zeroed zone.
     w, h = image_size
-    x0, y0, x1, y1 = box
-    return pad_bbox(box, padding, w, h)
+    return pad_bbox(box, effective_padding(padding, padding_frac, image_size), w, h)
 
 
 # --------------------------------------------------------------------------- #

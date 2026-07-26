@@ -14,7 +14,8 @@ Format::
 
     {
       "meta": {"detector": "yolo", "model": "magistermilitum/YOLO_manuscripts:best.pt",
-               "padding": 16, "zone_families": ["Text", "Initial"], "created": "..."},
+               "padding": 16, "padding_frac": 0.0,
+               "zone_families": ["Text", "Initial"], "created": "..."},
       "images": {
         "H041r30801r.TIF": {"bbox": [481, 202, 2373, 1564], "size": [2560, 1920],
                             "fell_back": false,

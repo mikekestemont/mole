@@ -141,6 +141,32 @@ def test_zone_family_match_is_case_insensitive():
     assert main_text_zone([Detection((0, 0, 5, 5), "Decoration", 0.9)]) is None
 
 
+def test_mainzone_is_in_the_default_families():
+    """REGRESSION: our own OBB fine-tunes emit a single class named 'MainZone'.
+
+    Same silent failure as the casing bug above, from the other direction: the
+    class name comes from the Label Studio config (scripts/ls_to_yolo.py), so a
+    checkpoint scoring mAP50 0.95 detected the zone on every page and then had
+    every detection dropped, falling back to the whole page 51 times out of 51.
+    """
+    from mole.prep.detect import Detection, main_text_zone
+
+    dets = [Detection((10, 20, 90, 60), "MainZone", 0.97)]
+    assert main_text_zone(dets) == (10, 20, 90, 60)
+
+
+def test_padding_frac_scales_with_the_page_and_acts_as_a_floor():
+    """A fixed px margin cannot serve a corpus spanning 500..6000 px pages."""
+    from mole.prep.detect import effective_padding
+
+    # Relative wins on a big page, absolute floor wins on a small one.
+    assert effective_padding(16, 0.02, (8000, 4000)) == 80
+    assert effective_padding(16, 0.02, (600, 500)) == 16
+    # Off by default, and unusable (hence ignored) when the size is unknown.
+    assert effective_padding(16, 0.0, (8000, 4000)) == 16
+    assert effective_padding(16, 0.02, (0, 0)) == 16
+
+
 def test_val_split_is_stable_across_calls(tmp_path):
     """--eval-only must score the SAME held-out pages the run trained around.
 

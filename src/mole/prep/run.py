@@ -42,7 +42,8 @@ def _list_images(folder: Path) -> list[Path]:
 
 
 def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
-                method: str = "yolo", padding: int = 16, conf: float = 0.25,
+                method: str = "yolo", padding: int = 16, padding_frac: float = 0.0,
+                conf: float = 0.25,
                 sample: int | None = None, zone_families: tuple[str, ...] = ZONE_FAMILIES,
                 qc_html: str | Path | None = None, write_crops: str | Path | None = None,
                 seed: int = 0, detector: TextZoneDetector | None = None,
@@ -54,6 +55,9 @@ def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
     zones_out:
         Where to write ``zones.json``. Defaults to ``<input_dir>/zones.json`` so it
         is auto-discovered by augview/training.
+    padding / padding_frac:
+        Margin around the detected zone, in px and as a share of the page's short
+        side respectively; the larger of the two wins per page.
     write_crops:
         If given, also materialise cropped images into this folder (opt-in).
     method:
@@ -81,7 +85,8 @@ def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
     for f in track(files, "Detecting text zones", unit="page"):
         img = load_rgb(f)
         dets = det.detect(f)
-        zone = main_text_zone(dets, zone_families, img.size, padding=padding)
+        zone = main_text_zone(dets, zone_families, img.size, padding=padding,
+                              padding_frac=padding_frac)
         fell_back = zone is None
 
         crop_path = None
@@ -102,6 +107,7 @@ def prep_folder(input_dir: str | Path, zones_out: str | Path | None = None,
             "detector": det.name,
             "model": getattr(det, "model_id", det.name),
             "padding": padding,
+            "padding_frac": padding_frac,
             "zone_families": list(zone_families),
             "created": _dt.datetime.now().isoformat(timespec="seconds"),
         },

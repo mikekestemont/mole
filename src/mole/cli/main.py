@@ -65,6 +65,12 @@ def prep(
     zones_out: Optional[Path] = typer.Option(None, help="zones.json path (default: <input_dir>/zones.json)."),
     method: str = typer.Option("yolo", help="Detector: 'yolo' (mole[detect]) or 'heuristic'."),
     padding: int = typer.Option(16, help="Padding (px) around the detected text zone."),
+    padding_frac: float = typer.Option(
+        0.0, "--padding-frac",
+        help="Pad by this share of the page's SHORT side instead, when that is larger "
+             "than --padding (0 = off). Use it when a corpus mixes resolutions: a fixed "
+             "px margin that suits a 6000 px scan clips text off a 500 px one. ~0.02 "
+             "recovers the text our fine-tuned zone detectors shave off the block edges."),
     conf: float = typer.Option(0.25, help="YOLO confidence threshold."),
     yolo_weights: Optional[str] = typer.Option(
         None, "--yolo-weights",
@@ -144,7 +150,8 @@ def prep(
             if yolo_weights:
                 det_kwargs["weights"] = yolo_weights
         manifest, records = prep_folder(input_dir, zones_out=zones_out, method=method,
-                                        padding=padding, sample=sample, qc_html=qc,
+                                        padding=padding, padding_frac=padding_frac,
+                                        sample=sample, qc_html=qc,
                                         write_crops=write_crops, **det_kwargs)
     except ImportError as e:
         console.print(f"[red]Missing dependency for method '{method}': {e}[/red]")

@@ -38,11 +38,30 @@ with model) into the dataset folder. No images are duplicated.
 ```bash
 mole prep data/samples                       # → data/samples/zones.json (+ QC)
 # options: --method yolo|heuristic  --padding 16  --conf 0.25  --sample N
+#          --padding-frac 0.05  (pad by a share of the SHORT side when that is
+#                                larger than --padding; for mixed-resolution corpora)
 #          --write-crops DIR   (opt-in: also materialise cropped images)
 #          --zones-out PATH    (default: <input_dir>/zones.json)
 ```
 
 Artifacts: `data/samples/zones.json`, `outputs/prep_qc.html`.
+
+**Padding is a coverage dial, and coverage is the metric that matters** — a zone with
+extra background is nearly free (the foreground filter drops blank parchment anyway),
+while a zone that clips text destroys writer signal nothing downstream can recover. On
+a corpus whose pages span 500–6600 px, prefer `--padding-frac`: matched for coverage,
+it over-crops the small pages far less than the equivalent absolute `--padding`.
+
+### Fine-tuned zone detectors
+
+`scripts/ls_to_yolo.py` + `scripts/train_zone_obb.py` produce an OBB detector emitting
+a single `MainZone` class (the Label Studio class name), which is in `ZONE_FAMILIES`
+alongside `Text`:
+
+```bash
+mole prep data/frags --yolo-weights runs/zones/frag-obb-v2/train/weights/best.pt \
+    --padding-frac 0.05
+```
 
 ### 2b. Binarize + normalize the script scale ✅
 
