@@ -50,7 +50,7 @@ for A in $ARCHIVES; do
   echo "===== fold: $A held out  (fit on ${TRAIN_DIRS[*]}) ====="
 
   # -- the target, from the TRAINING archives only ---------------------------
-  TARGET=$(python -c "
+  TARGET=$("$PYTHON" -c "
 import sys
 from mole.prep.scale import corpus_target
 t, scales = corpus_target(sys.argv[1:], sample=$SAMPLE, progress=False)
@@ -64,7 +64,7 @@ print(f'{t:.2f}')
   # -- arm 1: baseline, no scale treatment -----------------------------------
   echo "-- [base]  fitting codebook"
   mole codebook "$CKPT" "${TRAIN_DIRS[@]}" --out "$OUT/$A.base.codebook.npy" \
-      --clusters "$CLUSTERS" $GEOM
+      --clusters "$CLUSTERS" --max-descriptors "$MAXDESC" $GEOM
   mole embed "$CKPT" "$DATA/$A" "$OUT/$A.base.npy" --pooling vlad \
       --codebook-from "$OUT/$A.base.codebook.npy" $GEOM
   mole eval "$OUT/$A.base.npy" "$DATA/$A" --topk 1,5 --cross-doc-only --per-hand \
@@ -73,7 +73,7 @@ print(f'{t:.2f}')
   # -- arm 2: everything normalized to the training target -------------------
   echo "-- [scale] fitting codebook at ${TARGET}px"
   mole codebook "$CKPT" "${TRAIN_DIRS[@]}" --out "$OUT/$A.scale.codebook.npy" \
-      --clusters "$CLUSTERS" --scale-target "$TARGET" $GEOM
+      --clusters "$CLUSTERS" --max-descriptors "$MAXDESC" --scale-target "$TARGET" $GEOM
   # no --scale-normalize flag needed: the codebook carries the target
   mole embed "$CKPT" "$DATA/$A" "$OUT/$A.scale.npy" --pooling vlad \
       --codebook-from "$OUT/$A.scale.codebook.npy" $GEOM
