@@ -12,6 +12,10 @@ Detectors (pluggable):
 * ``heuristic`` -- classical ink-density CV; no learned weights, CPU-only.
 * ``yolo``      -- ``magistermilitum/YOLO_manuscripts`` (MIT YOLOv11x-OBB),
   opt-in via the ``mole[detect]`` extra.
+
+:mod:`mole.prep.scale` adds the second normalization axis: after binarizing,
+resample every page to a constant *script* scale, so a 224 px window spans the
+same amount of writing regardless of how the page was digitized.
 """
 
 from __future__ import annotations
@@ -19,9 +23,14 @@ from __future__ import annotations
 from mole.prep.detect import (Detection, HeuristicTextZoneDetector,
                               TextZoneDetector, YoloTextZoneDetector, get_detector)
 from mole.prep.run import PrepRecord, prep_folder, qc_from_zones
+from mole.prep.scale import (CorpusScale, ModuleEstimate, PageScaler, ScaleManifest,
+                             corpus_target, estimate_module, measure_corpus, resample,
+                             scale_factor, script_module)
 
 __all__ = [
     "Detection", "TextZoneDetector", "HeuristicTextZoneDetector",
     "YoloTextZoneDetector", "get_detector", "PrepRecord", "prep_folder",
-    "qc_from_zones",
+    "qc_from_zones", "CorpusScale", "ModuleEstimate", "PageScaler", "ScaleManifest",
+    "corpus_target", "estimate_module", "measure_corpus", "resample", "scale_factor",
+    "script_module",
 ]

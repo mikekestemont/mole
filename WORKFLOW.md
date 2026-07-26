@@ -44,6 +44,78 @@ mole prep data/samples                       # → data/samples/zones.json (+ QC
 
 Artifacts: `data/samples/zones.json`, `outputs/prep_qc.html`.
 
+### 2b. Binarize + normalize the script scale ✅
+
+Camera photographs of manuscripts differ in two ways that have nothing to do with the
+hand: **tone** (parchment colour, lighting, microfilm vs. colour) and **scale** (how many
+pixels one letter is, which is set by camera distance and DPI, not by the scribe). Both
+are removed here, before any windowing.
+
+```bash
+# tone: adaptive Sauvola threshold → black ink on white
+mole prep data/samples --binarize sauvola --binarize-out data/samples-bin
+
+# scale: also resample every page to a constant script module (this corpus's own median)
+mole prep data/samples --binarize sauvola --binarize-out data/samples-bin \
+    --normalize-scale profile
+```
+
+The **script module** is the height of the body of the writing (roughly the x-height),
+measured by folding the page's row-ink profile onto one line period — a whole-page
+statistic, so it does not depend on finding individual words. `--normalize-scale profile`
+measures it per page and resamples the *grayscale* original before re-thresholding, so the
+ink stays clean rather than being rescaled as a bitmap. `word` (word-blob heights) exists
+for ablation and is considerably noisier.
+
+This matters because a 224px window is a *physical* crop: at 12px/letter it sees a
+paragraph, at 40px/letter a few characters. `--max-side` does **not** substitute for it —
+that normalizes page size, and two pages of equal pixel size can still hold script at
+wildly different scales. Note that normalizing may **upscale** pages past `--max-side`.
+
+To bring several corpora into one shared scale, measure them first and pass one target:
+
+```bash
+mole scale-target data/leroy-bin data/utrecht-bin data/sluis-bin     # prints a pooled median
+mole prep data/utrecht --binarize sauvola --binarize-out data/utrecht-bin \
+    --normalize-scale profile --target-module 22.0
+```
+
+Artifacts: the binarized folder, plus `scale.json` inside it recording the target, the
+method, and each page's module before/after. The QC sheet gains per-page module and
+scale-factor columns and a header line reporting the collapse (spread before → after).
+
+Downstream this is automatic: `mole embed` reads `scale.json` and skips re-measuring
+pages `prep` already normalized. For a corpus that was *not* prepped this way, normalize
+at embed time instead — and pin the target into a codebook so every later embed inherits
+it:
+
+```bash
+mole codebook <ckpt> data/train outputs/cb.npy --scale-target auto   # records the target
+mole embed <ckpt> data/new outputs/new.npy --codebook-from outputs/cb.npy   # applies it
+mole embed <ckpt> data/new outputs/new.npy --no-scale-normalize            # or opt out
+```
+
+**Check it worked.** Re-run `mole scale-target` on the normalized folders: the per-corpus
+medians should sit on the target, and the internal IQR/median spread should collapse too.
+Measured on 60-page samples of three corpora, normalized to 45.4px:
+
+| corpus | median before | after | spread before | after |
+|---|---:|---:|---:|---:|
+| leroy-bin | 27.8 | 45.5 | 0.31 | 0.02 |
+| utrecht | 45.4 | 45.4 | 0.45 | 0.03 |
+| brackley-set | 58.2 | 45.5 | 0.23 | 0.01 |
+
+A 2.1× spread between corpora becomes 1.00×, and — the part that matters more — the
+variation *within* each corpus drops by an order of magnitude, so it is genuinely
+per-page, not a per-corpus constant. Note that `utrecht` was the median corpus and so
+barely moves overall, yet its internal spread still falls from 0.45 to 0.03.
+
+Then confirm retrieval did not regress, comparing like with like
+(`mole eval outputs/emb.npy data/<dataset> --cross-doc-only --topk 1,5`), and skim the QC
+sheet for pages with an implausible factor. The same handful of pages is reported
+unmeasurable before and after (3/4/1 above) — those are failed binarizations or blank
+leaves, and they are passed through untouched rather than guessed at.
+
 ## 3. Inspect / re-view the QC sheet ✅
 
 Open `outputs/prep_qc.html` in a browser (original + detections | chosen zone | crop).

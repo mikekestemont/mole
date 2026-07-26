@@ -34,7 +34,7 @@ CUDA server for training.
 
 ```
 data/        loaders, dataset manifests + partial labels, patch-windows, augmentations, augview
-prep/        (PARKED) main-text-zone isolation + QC contact sheet
+prep/        main-text-zone isolation, Sauvola binarization, script-scale normalization, QC sheet
 selfsup/     AttMask pretraining (vit/head/attmask/wrapper/loss/dataset/train/checkpoint) [Phase 4 DONE]
 supervised/  triplet/metric + probes (SCAFFOLD ONLY, interfaces fixed early)
 embed/       pooling (mean/cls/vlad/patches), reproducible VLAD, extraction  [Phase 5 DONE]
@@ -77,6 +77,7 @@ through `track` so the look is consistent and the backend is swappable in one pl
 | Flips | none, ever | per brief (orientation is signal) |
 | Normalize | ToTensor only (no ImageNet mean/std) | matches the ported checkpoint's training domain; left as a future config switch |
 | Env split | training vs `prep` in separate envs | kraken (if ever used) pins conflicting torch; `requirements-prep.txt` is separate |
+| Script scale | normalize to a constant **script module** (folded row-profile band height), opt-in via `prep --normalize-scale` | px-per-letter is a property of the camera, not the hand; a 224px window means nothing without it. Measured on the page, resampled from grayscale + re-binarized |
 
 **Augmentation presets** (`data/augment.py::PRESETS`): `mild` / `default` /
 `aggressive`. `augview` samples a **random window per view** from across the page
@@ -129,6 +130,43 @@ Phase 4 (training) can proceed without it.
   [--batch-size N] [--vlad-clusters K] [--seed S] [--device ...] [--set window_size=..]`.
 - **Verified** on CPU with `runs/smoke` (vit_tiny) + `runs/base_v1` (vit_small): all
   four poolings produce correct shapes, VLAD reproducible, version warning fires.
+
+### Script-scale normalization (`prep/scale.py`) — BUILT
+
+A 224px window is a *physical* crop, so the number of pixels per letter decides what the
+encoder sees: a paragraph or three characters. That ratio is set by camera distance and
+DPI, i.e. by the photographer, not the scribe — so it is nuisance variance, and it is the
+dominant one across archives (measured: 27.8 / 45.4 / 58.2 px median module on three of
+our corpora, a 2.1× span). `--max-side` does not address it: it normalizes *page* size,
+and two pages of equal pixel size can hold script at very different scales.
+
+- **What is measured.** The *script module*: the height of the body of the writing (≈
+  x-height). Estimated by folding the page's row-ink profile onto one line period —
+  period from the autocorrelation of the (smoothed) profile, body height from the **IQR**
+  of the folded profile. This is a whole-page statistic: no word or letter segmentation,
+  nothing to get wrong per blob. The earlier word-blob estimator survives as
+  `method="word"` for ablation; it was rejected because its RLSA kernel carries fixed
+  pixel constants and so is *not scale-equivariant* — measurements drifted by up to 3×
+  on the same page at different resolutions, which is disqualifying for the one job here.
+- **Equivariance is the correctness property.** `estimate_module(rescale(page, s)) ≈
+  s · estimate_module(page)`. Every smoothing constant is therefore expressed as a
+  fraction of the detected pitch, never in absolute pixels. Tested directly.
+- **Where it runs.** In `prep`, after binarizing: the page is *measured* on its
+  binarization but *resampled from the grayscale original* and re-thresholded (rescaling
+  a bitonal image aliases the strokes), with the Sauvola window scaled along with it so
+  thresholding sees the same amount of script. Lanczos down, bicubic up.
+- **Refusal beats guessing.** Blank leaves, failed binarizations and pages shot against
+  black backgrounds are detected via ink coverage (with a "support box" rescue that
+  isolates the physical leaf first) and reported unmeasurable — those pages pass through
+  untouched instead of receiving a fabricated factor.
+- **Provenance.** `prep` writes `scale.json` (target, method, per-page module before and
+  after). `mole embed` reads it and does not re-measure; the target can also be pinned
+  into a codebook's `<out>.npy.json`, so `--codebook-from` carries the scale of the space
+  the vocabulary was learned in. Resampling is skipped below `RESIZE_EPS` (3%), which is
+  the estimator's own repeatability — chasing corrections inside the noise floor would
+  cost a resample and buy nothing.
+- **Validated end to end**: three corpora onto one module, cross-corpus span 2.1× → 1.00×
+  and within-corpus IQR/median 0.23–0.45 → 0.01–0.03. Commands and table in `WORKFLOW.md`.
 
 ### Foreign-checkpoint warm-start (interop with Raven's original checkpoints)
 

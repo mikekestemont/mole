@@ -80,6 +80,17 @@ def prep(
     sauvola_window: int = typer.Option(25, help="Sauvola local window in px (odd)."),
     sauvola_k: float = typer.Option(0.2, help="Sauvola k — higher = more aggressive/thinner ink."),
     max_side: int = typer.Option(0, help="Downscale longest side to <= N px before binarizing (0 = off, never upsamples)."),
+    normalize_scale: str = typer.Option(
+        "none", "--normalize-scale",
+        help="Resample every page to a constant SCRIPT scale after binarizing: 'none' "
+             "(default), 'profile' (folded row-profile band height — the reliable one) "
+             "or 'word' (word-blob heights; kept for ablation, far noisier). Needed for "
+             "cross-material retrieval: --max-side normalizes page size, not script size."),
+    target_module: float = typer.Option(
+        0.0, "--target-module",
+        help="Script module to normalize to, in px (0 = this corpus's own median). Pass "
+             "the value a codebook was fitted at to bring a new corpus into its space; "
+             "`mole scale-target` prints it. NB pages may be UPSCALED past --max-side."),
 ) -> None:
     """Detect the main handwritten text zone of each page and store coordinates.
 
@@ -89,13 +100,17 @@ def prep(
 
     With --binarize sauvola, instead binarizes the images (black-on-white) into a
     new folder + a QC sheet; combine with --sample N to preview before committing.
+    Add --normalize-scale profile to also equalise the script scale across pages;
+    the per-page factors land in <out>/scale.json and in the QC sheet.
     """
     if binarize != "none":
         from mole.prep.binarize import binarize_folder
 
         out_dir = binarize_out or input_dir.parent / f"{input_dir.name}-bin"
         recs = binarize_folder(input_dir, out_dir, method=binarize, window=sauvola_window,
-                               k=sauvola_k, max_side=max_side or None, sample=sample, qc_html=qc)
+                               k=sauvola_k, max_side=max_side or None, sample=sample, qc_html=qc,
+                               normalize_scale=normalize_scale,
+                               target_module=target_module or None)
         if sample is not None:
             console.print(f"[yellow]preview only ({len(recs)} images) — nothing written; "
                           f"tune --sauvola-window/--sauvola-k, then re-run without --sample[/yellow]")
@@ -103,8 +118,15 @@ def prep(
             console.print(f"[green]✓ binarized {len(recs)} images → {out_dir}[/green]")
             if (out_dir / "labels.csv").is_file():
                 console.print(f"[green]✓ labels.csv carried over (extensions → .png) → {out_dir}/labels.csv[/green]")
+            if normalize_scale != "none":
+                console.print(f"[green]✓ scale factors → {out_dir}/scale.json[/green]")
         console.print(f"[green]✓ QC sheet → {qc}[/green]")
         return
+
+    if normalize_scale != "none":
+        console.print("[red]--normalize-scale needs --binarize sauvola: the module is measured "
+                      "on the binarization and the resampled pages are what gets written.[/red]")
+        raise typer.Exit(code=1)
 
     from mole.prep import prep_folder, qc_from_zones
 
@@ -136,6 +158,59 @@ def prep(
     if write_crops:
         console.print(f"[green]✓ cropped images → {write_crops}[/green]")
     console.print(f"[green]✓ QC sheet → {qc}[/green]")
+
+
+# -------------------------------------------------------------------- scale-target
+@app.command(name="scale-target")
+def scale_target(
+    datasets: list[Path] = typer.Argument(..., help="One or more dataset dirs to measure."),
+    sample: int = typer.Option(200, help="Pages per dataset (deterministic, evenly spaced)."),
+    method: str = typer.Option("profile", help="profile (default) | word — see mole.prep.scale."),
+    max_side: int = typer.Option(0, help="Cap the longest side first (match your prep run)."),
+    write_codebook: Optional[Path] = typer.Option(
+        None, "--write-codebook",
+        help="Record the pooled target in an existing codebook provenance sidecar "
+             "(<codebook>.npy.json), so `mole embed --codebook-from` applies it."),
+) -> None:
+    """Measure the script module (px) of one or more corpora.
+
+    This is the instrument behind scale normalization, and it answers two
+    questions. Before: how far apart are these corpora, and how uniform is each
+    one internally (IQR/median)? After: did normalization actually collapse them
+    onto one module? The pooled median — one vote per corpus — is the target to
+    pass to `mole prep --target-module` or to pin into a codebook.
+    """
+    import json as _json
+
+    from mole.prep.scale import corpus_target
+
+    pooled, scans = corpus_target(datasets, sample=sample, method=method,
+                                  max_side=max_side or None)
+    from rich.table import Table
+
+    table = Table(title=f"script module ({method})")
+    for col in ("dataset", "median px", "IQR/median", "pages", "unmeasurable", "→ target ×"):
+        table.add_column(col, justify="right" if col != "dataset" else "left")
+    for s in scans:
+        factor = f"{pooled / s.median:.2f}" if (pooled and s.median) else "—"
+        table.add_row(Path(s.directory).name,
+                      f"{s.median:.1f}" if s.median else "—",
+                      f"{s.spread:.2f}" if s.spread is not None else "—",
+                      str(s.n_measured), str(s.n_failed), factor)
+    console.print(table)
+    if not pooled:
+        console.print("[red]nothing measurable — is this a folder of text pages?[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]pooled target: {pooled:.1f} px[/green]  "
+                  f"(median of the per-corpus medians)")
+
+    if write_codebook:
+        prov = _json.loads(write_codebook.read_text(encoding="utf-8"))
+        prov["script_module_target"] = round(float(pooled), 2)
+        prov["scale_method"] = method
+        write_codebook.write_text(_json.dumps(prov, indent=2), encoding="utf-8")
+        console.print(f"[green]✓ pinned script_module_target={pooled:.1f} → {write_codebook}"
+                      f"[/green]\n  `mole embed --codebook-from` will now normalize to it.")
 
 
 # ------------------------------------------------------------------------ augview
@@ -265,6 +340,16 @@ def embed(
         None, "--head",
         help="Apply a trained Tier-1 head.pt (linear v0): projects foreground patch tokens "
              "into the learned space before pooling. Must match the checkpoint it was trained on."),
+    scale_normalize: Optional[bool] = typer.Option(
+        None, "--scale-normalize/--no-scale-normalize",
+        help="Resample each page to a constant script module before tiling. Default: on "
+             "when a target is available (--target-module, or one recorded by the "
+             "--codebook-from provenance), off otherwise. Pages already normalized by "
+             "`mole prep` are recognised via scale.json and not touched again."),
+    target_module: float = typer.Option(
+        0.0, "--target-module", help="Script module in px to normalize to (overrides the "
+                                     "codebook's). `mole scale-target` prints it."),
+    scale_method: str = typer.Option("profile", help="Module estimator: profile | word."),
     set_: list[str] = typer.Option([], "--set", help="Override embed geometry, e.g. window_size=384."),
 ) -> None:
     """Extract page embeddings (mean/cls/vlad/patches) with lineage stamping.
@@ -291,7 +376,8 @@ def embed(
            window_foreground_threshold=window_foreground_threshold,
            vlad_intra_norm=vlad_intra_norm,
            invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim,
-           whiten_from=whiten_from)
+           whiten_from=whiten_from, scale_normalize=scale_normalize,
+           target_module=target_module or None, scale_method=scale_method)
 
 
 # ----------------------------------------------------------------------- codebook
@@ -317,6 +403,13 @@ def codebook(
     window_foreground_threshold: float = typer.Option(0.025, help="Window foreground floor."),
     invert: Optional[bool] = typer.Option(None, "--invert/--no-invert",
                                           help="Override the checkpoint's polarity."),
+    scale_target: Optional[str] = typer.Option(
+        None, "--scale-target",
+        help="Pin the SCRIPT SCALE this vocabulary is defined at: 'auto' (measure this "
+             "corpus's median module and record it — nothing is resampled) or a number in "
+             "px (resample the fit pages to it first). Either way `mole embed "
+             "--codebook-from` then normalizes every corpus to that module. Default: off."),
+    scale_method: str = typer.Option("profile", help="Module estimator: profile | word."),
     set_: Optional[list[str]] = typer.Option(
         None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0.5."),
 ) -> None:
@@ -327,6 +420,9 @@ def codebook(
     comparable space. Descriptors are streamed into a reservoir, so peak RAM is set
     by --max-descriptors, not by corpus size. Same geometry defaults as ``mole embed``
     (overlap=0 unless overridden).
+
+    --scale-target additionally couples the vocabulary to a script scale, so a
+    corpus imaged at another magnification is brought to it before being encoded.
     """
     from mole.embed import fit_corpus_codebook
 
@@ -335,12 +431,16 @@ def codebook(
         overrides=set_, batch_size=batch_size, seed=seed, device=device, head=head,
         foreground=foreground, foreground_threshold=foreground_threshold,
         foreground_method=foreground_method, window_foreground=window_foreground,
-        window_foreground_threshold=window_foreground_threshold, invert=invert)
+        window_foreground_threshold=window_foreground_threshold, invert=invert,
+        scale_target=scale_target, scale_method=scale_method)
     console.print(
         f"[green]✓ {prov['clusters']}-cluster codebook → {out}[/green]\n"
         f"  sampled {prov['descriptors_sampled']:,} of {prov['descriptors_seen']:,} descriptors "
         f"from {prov['n_pages']} pages / {len(prov['datasets'])} dataset(s)\n"
         f"  provenance → {out}.json")
+    if prov.get("script_module_target"):
+        console.print(f"  script module pinned at {prov['script_module_target']}px "
+                      f"— embeds against this codebook normalize to it")
 
 
 # ------------------------------------------------------------------- codebook-viz

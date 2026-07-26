@@ -21,6 +21,7 @@ import datetime as _dt
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -110,8 +111,20 @@ def _list_images(folder: Path) -> list[Path]:
                   if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS)
 
 
+class PageEntry(NamedTuple):
+    """One indexed page: its path, its window grid, and the text zone they came from.
+
+    The zone travels with the entry because scale normalization has to recompute
+    the grid on a resampled page, and the bbox must be carried along with it.
+    """
+
+    path: Path
+    windows: list[Window]
+    zone: tuple[int, int, int, int] | None = None
+
+
 def _page_index(input_dir: Path, window_size: int, overlap: float,
-                use_zones: bool) -> list[tuple[Path, list[Window]]]:
+                use_zones: bool) -> list[PageEntry]:
     """Per-page window locations, zone-restricted, mirroring PatchWindowDataset.
 
     Auto-discovers ``zones.json`` (like training) and computes windows from image
@@ -123,7 +136,7 @@ def _page_index(input_dir: Path, window_size: int, overlap: float,
     Image.MAX_IMAGE_PIXELS = None       # trusted local scans can exceed PIL's ~179MP bomb limit
     folders = ([input_dir] + [p for p in sorted(input_dir.iterdir()) if p.is_dir()]
                if input_dir.is_dir() else [])
-    pages: list[tuple[Path, list[Window]]] = []
+    pages: list[PageEntry] = []
     for folder in folders:
         images = _list_images(folder)
         if not images:
@@ -136,10 +149,116 @@ def _page_index(input_dir: Path, window_size: int, overlap: float,
             if not size:
                 size = Image.open(img).size
             wins = window_coords(size[0], size[1], window_size, overlap, bbox)
-            pages.append((img, wins))
+            pages.append(PageEntry(img, wins, bbox))
     if not pages:
         raise FileNotFoundError(f"No images/windows found under {input_dir!r}")
     return pages
+
+
+# --------------------------------------------------------------- scale normalize
+def codebook_module_target(codebook_from: str | Path | None) -> float | None:
+    """The script module a codebook's vocabulary was fitted at, if it declares one.
+
+    ``mole codebook --scale-target`` writes it into the ``<codebook>.json``
+    provenance sidecar precisely so it travels with the codebook: the centroids
+    only mean what they meant if the pages encoded against them are sampled at
+    the same script scale. (``word_height_target`` is accepted as an alias — the
+    name the original plan used.)
+    """
+    if codebook_from is None:
+        return None
+    sidecar = Path(str(codebook_from) + ".json")
+    if not sidecar.is_file():
+        return None
+    try:
+        prov = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    target = prov.get("script_module_target", prov.get("word_height_target"))
+    return float(target) if target else None
+
+
+def _merged_scale_manifest(dirs: Sequence[Path]):
+    """Union of the ``scale.json`` manifests of these folders (page names are unique)."""
+    from mole.prep.scale import ScaleManifest, find_scale, load_scale
+
+    merged = None
+    for d in dirs:
+        path = find_scale(d)
+        if path is None:
+            continue
+        found = load_scale(path)
+        if merged is None:
+            merged = ScaleManifest(meta=dict(found.meta))
+        merged.images.update(found.images)
+    return merged
+
+
+def _resolve_scaler(input_dirs: Sequence[Path], *, codebook_from=None,
+                    scale_normalize: bool | None, target_module: float | None,
+                    scale_method: str = "profile"):
+    """Build the :class:`PageScaler` for this run, or ``None`` if not normalizing.
+
+    Off unless a target exists: an explicit ``target_module``, or one carried by
+    the codebook. ``scale_normalize=False`` disables it even then;
+    ``scale_normalize=True`` demands a target rather than silently doing nothing.
+    Pages already normalized in prep cost nothing here — their ``scale.json``
+    supplies the measurement and the residual factor comes out at ~1.
+    """
+    from mole.prep.scale import PageScaler
+
+    if scale_normalize is False:
+        return None, None
+    target = float(target_module) if target_module else codebook_module_target(codebook_from)
+    if not target:
+        if scale_normalize:
+            raise ValueError(
+                "--scale-normalize needs a target script module: pass --target-module PX, "
+                "or use a --codebook-from whose .json provenance records one "
+                "(fit it with `mole codebook --scale-target auto`).")
+        return None, None
+    scaler = PageScaler(target, method=scale_method,
+                        manifest=_merged_scale_manifest(input_dirs))
+    return scaler, target
+
+
+def _fit_scale_target(dirs: Sequence[Path], scale_target: str | float | None,
+                      scale_method: str):
+    """Resolve ``mole codebook --scale-target`` into ``(target, scaler_or_None)``."""
+    from mole.prep.scale import PageScaler, corpus_target
+
+    if scale_target in (None, "", "none"):
+        return None, None
+    if str(scale_target).strip().lower() == "auto":
+        # The fit corpus IS the reference scale, so measure it and resample nothing.
+        # A folder normalized in prep answers from its scale.json, for free.
+        target, scans = corpus_target(dirs, method=scale_method)
+        if not target:
+            raise RuntimeError("could not measure a script module on the fit corpus; "
+                               "pass --scale-target PX explicitly")
+        for s in scans:
+            print(f"[mole] scale: {Path(s.directory).name} module median "
+                  f"{s.median:.1f}px (IQR/median {s.spread:.2f}, {s.n_measured} pages, "
+                  f"{s.n_failed} unmeasurable)")
+        print(f"[mole] scale: codebook vocabulary pinned to a {target:.1f}px module")
+        return target, None
+    target = float(scale_target)
+    print(f"[mole] scale: fitting at a {target:.1f}px module (pages resampled on the fly)")
+    return target, PageScaler(target, method=scale_method,
+                              manifest=_merged_scale_manifest(dirs))
+
+
+def _rescale_page(scaler, page, entry: PageEntry, settings: dict) -> tuple:
+    """Resample a page to the target module and re-tile it. Returns ``(page, windows)``."""
+    from mole.prep.scale import scaled_zone
+
+    result = scaler.rescale(page, name=entry.path.name, zone=entry.zone)
+    if not result.changed:
+        return page, entry.windows
+    page = result.image
+    zone = scaled_zone(entry.zone, result.factor)
+    return page, window_coords(page.size[0], page.size[1], settings["window_size"],
+                               settings["overlap"], zone)
 
 
 # ------------------------------------------------------------------- transform
@@ -419,7 +538,9 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
                         foreground_method: str = "contrast",
                         window_foreground: bool = False,
                         window_foreground_threshold: float = 0.025,
-                        invert: bool | None = None) -> dict:
+                        invert: bool | None = None,
+                        scale_target: str | float | None = None,
+                        scale_method: str = "profile") -> dict:
     """Fit ONE VLAD codebook over several datasets, in bounded memory.
 
     This is the index primitive: fit a codebook once over a pooled corpus, freeze it,
@@ -431,6 +552,15 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
     resolved exactly as in :func:`embed`, so a codebook cannot drift from the
     descriptors it will be applied to. Writes ``out`` (the ``[K, dim]`` codebook) plus
     ``<out>.json`` recording the provenance a frozen production codebook needs.
+
+    ``scale_target`` records — and thereby fixes — the **script module** this
+    vocabulary is defined at (:mod:`mole.prep.scale`), so ``mole embed
+    --codebook-from`` can bring any other corpus to the same scale:
+
+    * ``"auto"``: measure this fit corpus's own median module and record it. The
+      pages are the reference, so nothing is resampled.
+    * a number: resample the fit pages to that module first, then record it.
+    * ``None`` (default): record nothing, change nothing.
     """
     import torch
 
@@ -468,12 +598,14 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
             raise KeyError(f"embed override {key!r} not in {sorted(_OVERRIDABLE)}")
         settings[key] = _OVERRIDABLE[key](raw)
 
-    pages: list = []
+    pages: list[PageEntry] = []
     per_dataset: dict[str, int] = {}
     for d in dirs:
         p = _page_index(d, settings["window_size"], settings["overlap"], settings["use_zones"])
         per_dataset[d.name] = len(p)
         pages.extend(p)
+
+    module_target, scaler = _fit_scale_target(dirs, scale_target, scale_method)
 
     transform = _build_transform(meta["model_size"])
     nct = meta["num_class_tokens"]
@@ -486,8 +618,11 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
           f"device={dev} | {len(pages)} pages from {len(dirs)} dataset(s)")
     print(f"[mole] reservoir cap {max_descriptors:,} descriptors (~{cap_gb:.1f} GB peak)")
 
-    for img, wins in track(pages, "Scanning pages", unit="page"):
+    for entry in track(pages, "Scanning pages", unit="page"):
+        img, wins = entry.path, entry.windows
         page = load_rgb(img, invert=settings["invert"])
+        if scaler is not None:
+            page, wins = _rescale_page(scaler, page, entry, settings)
         crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
         if window_foreground and crops:
             keep_win = _window_foreground_mask(crops, window_foreground_threshold,
@@ -532,6 +667,11 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
         "window_foreground": bool(window_foreground),
         "head": str(head) if head else None, "head_id": head_id,
     }
+    if module_target:
+        provenance["script_module_target"] = round(float(module_target), 2)
+        provenance["scale_method"] = scale_method
+        if scaler is not None:
+            provenance["scale_applied"] = scaler.summary()
     Path(str(out) + ".json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     return provenance
 
@@ -547,7 +687,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           window_foreground: bool = False, window_foreground_threshold: float = 0.025,
           vlad_intra_norm: bool = False, invert: bool | None = None,
           codebook_from: str | Path | None = None, whiten_dim: int | None = None,
-          whiten_from: str | Path | None = None):
+          whiten_from: str | Path | None = None, scale_normalize: bool | None = None,
+          target_module: float | None = None, scale_method: str = "profile"):
     """Extract page embeddings for a folder of images.
 
     Grayscale inputs are replicated to 3 channels transparently. Output is a
@@ -560,6 +701,12 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     ``use_zones`` and ``invert`` default from the checkpoint; ``overlap`` defaults
     to 0 (non-overlapping inference tiles) — use ``--set overlap=0.5`` to match a
     dense training grid.
+
+    Script-scale normalization (:mod:`mole.prep.scale`) is applied when a target
+    module is available — given as ``target_module``, or carried by the codebook's
+    provenance — so the 224 px window spans the same amount of *script* on every
+    page. Pages already normalized by ``mole prep`` are recognised and left
+    untouched. ``scale_normalize=False`` disables it; ``True`` requires a target.
     """
     import torch
 
@@ -605,6 +752,9 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 
     pages = _page_index(Path(input_dir), settings["window_size"], settings["overlap"],
                         settings["use_zones"])
+    scaler, module_target = _resolve_scaler(
+        [Path(input_dir)], codebook_from=codebook_from, scale_normalize=scale_normalize,
+        target_module=target_module, scale_method=scale_method)
     transform = _build_transform(meta["model_size"])
     nct = meta["num_class_tokens"]
 
@@ -617,8 +767,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     fg_note = (f" foreground[{foreground_method}>{foreground_threshold:g}]" if foreground else "")
     wfg_note = (f" window-fg[>{window_foreground_threshold:g}]" if window_foreground else "")
     inv_note = " inverted" if settings["invert"] else ""
+    scale_note = f" scale[{module_target:g}px]" if scaler is not None else ""
     print(f"[mole] embed model={meta['model_id']} dim={meta['embed_dim']} "
-          f"pooling={pooling.value}{fg_note}{wfg_note}{inv_note} device={dev} | {len(pages)} pages")
+          f"pooling={pooling.value}{fg_note}{wfg_note}{inv_note}{scale_note} device={dev} "
+          f"| {len(pages)} pages")
     n_win_total = n_win_kept = 0             # window pre-filter accounting
 
     rows: list[dict] = []
@@ -644,8 +796,11 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
               f"codebook from {codebook_from} (per-page, low memory)", flush=True)
     vlad_vecs: list[np.ndarray] = []
 
-    for img, wins in track(pages, "Embedding pages", unit="page"):
+    for entry in track(pages, "Embedding pages", unit="page"):
+        img, wins = entry.path, entry.windows
         page = load_rgb(img, invert=settings["invert"])
+        if scaler is not None:
+            page, wins = _rescale_page(scaler, page, entry, settings)
         crops = [transform(page.crop((w.x, w.y, w.x + w.size, w.y + w.size))) for w in wins]
         n_win_total += len(crops)
         if window_foreground and crops:      # Raven's pre-ViT window filter (saves compute)
@@ -737,6 +892,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         meta["whitened"] = True
         meta["whiten_dim"] = int(matrix.shape[1])
 
+    if scaler is not None:
+        print(f"[mole] {scaler.note()}", flush=True)
+        meta["scale_normalized"] = True
+        meta["scale"] = scaler.summary()
     if window_foreground:
         meta["window_foreground"] = True
         meta["window_foreground_threshold"] = float(window_foreground_threshold)

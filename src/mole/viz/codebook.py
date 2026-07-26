@@ -135,6 +135,7 @@ def _collect(embeddings: Path, checkpoint: str | Path | None, *, per_word: int,
         # windows per page, mirroring extraction geometry
         from mole.data.patches import window_coords
         from mole.data.zones import find_zones, load_zones
+        from mole.embed.extract import PageEntry
         pages = []
         zcache: dict = {}
         for p in page_paths:
@@ -147,7 +148,7 @@ def _collect(embeddings: Path, checkpoint: str | Path | None, *, per_word: int,
             bbox = manifest.bbox_for(p.name) if manifest else None
             size = (manifest.images[p.name].size
                     if (manifest and p.name in manifest.images) else Image.open(p).size)
-            pages.append((p, window_coords(size[0], size[1], ws, ov, bbox)))
+            pages.append(PageEntry(p, window_coords(size[0], size[1], ws, ov, bbox), bbox))
     else:
         pages = _page_index(Path(sidecar["rows"][0]["image"]).parent, ws, ov, uz)
 
@@ -167,7 +168,7 @@ def _collect(embeddings: Path, checkpoint: str | Path | None, *, per_word: int,
     ctr = 0
 
     from mole.progress import track
-    for pi, (img, wins) in enumerate(track(pages, "Scanning pages", unit="page")):
+    for pi, (img, wins, _zone) in enumerate(track(pages, "Scanning pages", unit="page")):
         if not wins:
             continue
         page = load_rgb(img, invert=invert)
