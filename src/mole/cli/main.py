@@ -380,8 +380,10 @@ def viz(
     out: Optional[Path] = typer.Option(None, help="Output HTML (default: <embeddings>.viz.html)."),
     method: str = typer.Option("auto", help="2D projection: auto (PCA→UMAP) | pca | tsne | umap."),
     pca_whiten: bool = typer.Option(
-        True, "--pca-whiten/--no-pca-whiten",
-        help="Whiten PCA scores before UMAP (Sluis charter-viz recipe; default on)."),
+        False, "--pca-whiten/--no-pca-whiten",
+        help="Whiten PCA scores before UMAP. Default OFF: UMAP already handles scale, "
+             "and whitening amplifies noisy low-variance dims → fuzzier maps (cf. the "
+             "Antwerp whitening finding). Pass --pca-whiten for the old Sluis recipe."),
     umap_neighbors: int = typer.Option(
         15, "--umap-neighbors", help="UMAP n_neighbors (local vs global structure)."),
     umap_min_dist: float = typer.Option(
