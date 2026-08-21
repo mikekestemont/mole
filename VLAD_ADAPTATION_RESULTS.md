@@ -92,7 +92,42 @@ the naive baseline, hardest archive).
 but re-flipping `--vlad-intra-norm` on the frozen/adapt codebooks (Flanders suffices) is the confirmation,
 and it directly tests whether **adapt + intra stack**.
 
-## Still open
-- Confirm intra-norm on the frozen/adapt codebooks + the adapt+intra stack on Flanders (see caveat above).
+## Intra-norm confirmation on the deployable codebooks (2026-08-21, `scripts/run_intranorm_codebooks.sh`)
+
+The A/B above ran on `.trans` codebooks; the deployable index uses frozen/adapted. It transfers — with a
+wrinkle. macro-mAP Δ (intra − plain) on each codebook:
+
+| archive  | on FROZEN | on ADAPTED (the stack) |
+|----------|-----------|------------------------|
+| Antwerp  | −0.0081   | −0.0093                |
+| Brackley | +0.0027   | −0.0100                |
+| Flanders | **+0.1277** | **+0.1417**          |
+| Leroy    | **−0.0123 ⚠** | −0.0090            |
+| Utrecht  | +0.0597   | +0.0384                |
+| **mean** | +0.0340 (CI [+0.018,+0.051]) | +0.0304 (CI [+0.015,+0.048]) |
+| guardrail| **FAILED — Leroy −0.0123** | passed (all ≥ −0.01) |
+
+**The intra-norm effect is real and transfers (Flanders +0.13 on the frozen codebook), but it is genuinely
+burstiness-dependent, not universal:** big wins on skewed collections (Flanders, Utrecht), mild losses on the
+balanced ones (Antwerp, Leroy, Brackley). On the **frozen** codebook the Leroy loss (−0.0123) trips the §4.2
+guardrail — Leroy is 98 hands, macro≈micro, *no* dominant hand, so it has nothing to gain from burst
+suppression and mildly loses from cluster equalisation. So intra-norm-ON is **not** a clean unconditional
+default: it fails the guardrail in the global-frozen-index config.
+
+### The deployable stack IS a clean win
+
+frozen+plain → **adapt+intra**, the full recipe vs the naive baseline: **mean +0.0663, CI [+0.0439,+0.0907],
+guardrail passed** (Antwerp +0.031 · Brackley +0.019 · **Flanders +0.2014** · Leroy −0.0045 · Utrecht +0.085;
+hand-weighted +0.0465). Adaptation lifts Leroy enough (+0.005) that intra's −0.009 nets to −0.0045 — inside
+the guardrail. So **adapt + intra together is guardrail-safe and strong even though intra-alone-on-frozen is
+not.** Flanders goes 0.397 → 0.598 (+0.20) end to end.
+
+## Decision / still open
+- **Default flip (`intra-norm-default` branch):** justified for the adapted/transductive pipelines (guardrail
+  clean), NOT clean for the global frozen index (Leroy −0.012). Options: (a) conditional default keyed on an
+  unsupervised burstiness signal (VLAD cluster-mass concentration) — the principled fix; (b) keep opt-in +
+  ship the recipe (intra ON for skewed archives, paired with adaptation); (c) flip anyway, accepting a small
+  balanced-collection regression. DECISION PENDING.
+- Deployable recommendation regardless: **adapted codebook + intra-norm** (the stack, +0.066, guardrail-safe).
 - Union-adaptation is a NO-OP on the current (already-clustered) corpus; only relevant when a genuinely new
   archive is onboarded — then adapt the universal codebook to (corpus ∪ new) instead of re-clustering.
