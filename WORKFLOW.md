@@ -275,6 +275,32 @@ fit on the **training** split and apply to test (Raven's protocol), embed the
 train set first (that saves `<out>.codebook.npy`), then pass it to the test embed
 with `--codebook-from <train>.codebook.npy`.
 
+### Two levers for a new / hard collection (from `VLAD_ADAPTATION_RESULTS.md`)
+
+When you add an archive to a frozen index, or want to squeeze a hard collection, two
+cheap embed-time levers help — most on the hardest sets, and they stack:
+
+1. **Vocabulary adaptation** (`mole codebook --adapt-from`): move a frozen codebook's
+   centres onto the new archive without re-clustering (keeps cell identities, so the
+   space stays coherent). Worth ~+0.036 macro on average, biggest on hard collections.
+2. **Intra-normalization** (`mole embed --vlad-intra-norm`): a burstiness fix. **Opt-in,
+   not the default** — it lifts *skewed* collections with a dominant hand a lot
+   (Flanders +0.09..+0.13, Utrecht +0.06) but mildly *hurts* balanced ones (e.g. Leroy),
+   so turn it on per collection, not globally. All embeddings in one index must agree on
+   the flag (the embed guard warns if they don't).
+
+```bash
+# adapt the frozen universal codebook to a new archive, then embed with both levers
+mole codebook <ckpt> data/new-bin --adapt-from outputs/universal.codebook.npy \
+    --out outputs/new.adapt.codebook.npy --set window_size=224 --set overlap=0
+mole embed <ckpt> data/new-bin outputs/new.npy --pooling vlad \
+    --codebook-from outputs/new.adapt.codebook.npy --vlad-intra-norm \
+    --set window_size=224 --set overlap=0
+```
+
+On the one-dominant-hand Flanders set this stack ran macro 0.397 → 0.598 end to end.
+Skip `--vlad-intra-norm` for balanced collections (macro ≈ micro, no dominant hand).
+
 ---
 
 ## Artifact locations (all git-ignored)

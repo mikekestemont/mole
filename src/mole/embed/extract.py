@@ -808,7 +808,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             raise KeyError(f"embed override {key!r} not in {sorted(_OVERRIDABLE)}")
         settings[key] = _OVERRIDABLE[key](raw)
 
-    _warn_on_version_mismatch(output.parent, meta["model_id"])
+    _warn_on_version_mismatch(output.parent, meta["model_id"], pooling=pooling,
+                              vlad_intra_norm=vlad_intra_norm)
 
     pages = _page_index(Path(input_dir), settings["window_size"], settings["overlap"],
                         settings["use_zones"])
@@ -1067,17 +1068,36 @@ def _l2(x: np.ndarray) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------- output
-def _warn_on_version_mismatch(out_dir: Path, model_id: str) -> None:
-    """Warn if the output dir already holds embeddings from a different model."""
+def _warn_on_version_mismatch(out_dir: Path, model_id: str, pooling: "Pooling | None" = None,
+                              vlad_intra_norm: bool | None = None) -> None:
+    """Warn if the output dir already holds INCOMPARABLE embeddings.
+
+    Retrieval only makes sense within one embedding space, so an index must not mix
+    embeddings that differ in anything that moves that space. The model version is the
+    obvious axis; the VLAD normalisation is a subtler one — plain and intra-normalised
+    VLAD are different spaces, so opting into ``--vlad-intra-norm`` for some archives
+    of an index but not others silently breaks it. (Intra-norm helps skewed
+    collections — see VLAD_ADAPTATION_RESULTS.md — but the *whole* index must agree.)
+    """
     for sidecar in sorted(out_dir.glob("*.mapping.json")):
         try:
-            other = json.loads(sidecar.read_text())["model_id"]
-        except (json.JSONDecodeError, KeyError, OSError):
+            meta = json.loads(sidecar.read_text())
+        except (json.JSONDecodeError, OSError):
             continue
-        if other != model_id:
+        other = meta.get("model_id")
+        if other is not None and other != model_id:
             print(f"[mole] WARNING: {sidecar.name} was produced by a DIFFERENT model "
                   f"({other} != {model_id}); mixing model versions in one index breaks "
                   f"retrieval. Use a separate output directory.")
+        # VLAD normalisation only matters when both sides are VLAD.
+        if (pooling is Pooling.VLAD and meta.get("pooling") == "vlad"
+                and vlad_intra_norm is not None and "vlad_intra_norm" in meta
+                and bool(meta["vlad_intra_norm"]) != bool(vlad_intra_norm)):
+            print(f"[mole] WARNING: {sidecar.name} used vlad_intra_norm="
+                  f"{bool(meta['vlad_intra_norm'])} but this run uses {bool(vlad_intra_norm)}; "
+                  f"plain and intra-normalised VLAD are different spaces — mixing them in one "
+                  f"index breaks retrieval. Use a separate output directory or re-embed both "
+                  f"the same way.")
 
 
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,

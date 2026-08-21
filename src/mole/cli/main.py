@@ -324,8 +324,12 @@ def embed(
                     "the per-patch t_fg above."),
     vlad_intra_norm: bool = typer.Option(
         False, "--vlad-intra-norm/--no-vlad-intra-norm",
-        help="Per-cluster intra-normalisation in VLAD. Default OFF = Raven's plain VLAD; "
-             "--vlad-intra-norm restores mole's own variant."),
+        help="Per-cluster intra-normalisation in VLAD (All About VLAD, CVPR 2013): a "
+             "burstiness fix. Default OFF (Raven's plain VLAD). Turn it ON for SKEWED "
+             "collections with a dominant hand (measured +0.09..+0.13 macro on Flanders, "
+             "+0.06 Utrecht) — but it mildly HURTS balanced ones (e.g. Leroy), so it is "
+             "opt-in, not the default. See the recipe in VLAD_ADAPTATION_RESULTS.md / "
+             "WORKFLOW.md. All embeddings in one index must agree on this flag."),
     invert: Optional[bool] = typer.Option(
         None, "--invert/--no-invert",
         help="Negate intensity at load (white-on-black -> black-on-white). Default: inherit "
