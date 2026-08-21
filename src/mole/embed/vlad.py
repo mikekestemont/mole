@@ -110,6 +110,51 @@ def _numpy_kmeans(x: np.ndarray, k: int, seed: int, max_iter: int) -> np.ndarray
     return centers.astype(np.float32)
 
 
+def adapt_codebook(codebook, descriptors, min_assigned: int = 50):
+    """Vocabulary adaptation (Arandjelović & Zisserman, "All About VLAD", CVPR 2013).
+
+    Given a FROZEN codebook fitted elsewhere and the descriptors of a *target*
+    corpus, keep the codebook's Voronoi cells (assignment is still nearest-centre
+    against the ORIGINAL centres) but move each centre to the mean of the target
+    descriptors that fall in its cell. This corrects the residual bias that appears
+    when a vocabulary is applied to data it was not clustered on — cheaply, with no
+    re-clustering (one assignment pass, no Lloyd iterations).
+
+    It is the middle ground between the two endpoints mole already had: a fully
+    frozen codebook (no move) and a full transductive k-means refit (cells AND
+    centres re-estimated). Assignments are unchanged, so — unlike a refit — the
+    adapted centres stay in one-to-one correspondence with the original ones and an
+    index built on the frozen codebook keeps the same cluster identities.
+
+    A cell that collects fewer than ``min_assigned`` target descriptors keeps its
+    ORIGINAL centre: too few points give a noisy mean, and a barely-populated cell
+    is exactly where over-fitting the centre to the target would hurt. Returns
+    ``(adapted_codebook [K, dim] float32, counts [K] int)`` so the caller can record
+    how many cells actually moved.
+    """
+    x = np.asarray(descriptors, dtype=np.float32)
+    c = np.asarray(codebook, dtype=np.float32)
+    if c.ndim != 2:
+        raise ValueError(f"codebook must be 2-D [K, dim], got shape {c.shape}")
+    if x.ndim != 2 or x.shape[1] != c.shape[1]:
+        raise ValueError(
+            f"descriptors {x.shape} do not match the codebook's {c.shape[1]} dims")
+    k, dim = c.shape
+    adapted = c.copy()
+    counts = np.zeros(k, dtype=np.int64)
+    if len(x) == 0:
+        return adapted, counts
+    # Assign against the ORIGINAL centres (same [P,K] distance trick as vlad_encode).
+    d = (x * x).sum(1)[:, None] + (c * c).sum(1)[None, :] - 2.0 * (x @ c.T)
+    assign = d.argmin(1)
+    for i in range(k):
+        members = x[assign == i]
+        counts[i] = len(members)
+        if len(members) >= min_assigned:
+            adapted[i] = members.mean(0)
+    return adapted, counts
+
+
 def vlad_encode(descriptors, codebook, powernorm: bool = True,
                 intra_norm: bool = True) -> np.ndarray:
     """VLAD-encode a page's descriptors against a fitted codebook.

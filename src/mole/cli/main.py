@@ -417,6 +417,16 @@ def codebook(
              "px (resample the fit pages to it first). Either way `mole embed "
              "--codebook-from` then normalizes every corpus to that module. Default: off."),
     scale_method: str = typer.Option("profile", help="Module estimator: profile | word."),
+    adapt_from: Optional[Path] = typer.Option(
+        None, "--adapt-from",
+        help="VOCABULARY ADAPTATION (All About VLAD, CVPR 2013): instead of clustering, "
+             "load this frozen codebook and move each centre to the mean of DATASETS' "
+             "descriptors in its cell. K and script scale are inherited from it. Cheap "
+             "middle ground between a frozen codebook and a full transductive refit."),
+    adapt_min_assigned: int = typer.Option(
+        50, "--adapt-min-assigned",
+        help="With --adapt-from: cells collecting fewer target descriptors keep their "
+             "frozen centre (a noisy mean would hurt)."),
     set_: Optional[list[str]] = typer.Option(
         None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0.5."),
 ) -> None:
@@ -439,12 +449,18 @@ def codebook(
         foreground=foreground, foreground_threshold=foreground_threshold,
         foreground_method=foreground_method, window_foreground=window_foreground,
         window_foreground_threshold=window_foreground_threshold, invert=invert,
-        scale_target=scale_target, scale_method=scale_method)
+        scale_target=scale_target, scale_method=scale_method,
+        adapt_from=adapt_from, adapt_min_assigned=adapt_min_assigned)
+    verb = "adapted" if prov.get("adapted_from") else "fitted"
     console.print(
-        f"[green]✓ {prov['clusters']}-cluster codebook → {out}[/green]\n"
+        f"[green]✓ {prov['clusters']}-cluster codebook ({verb}) → {out}[/green]\n"
         f"  sampled {prov['descriptors_sampled']:,} of {prov['descriptors_seen']:,} descriptors "
         f"from {prov['n_pages']} pages / {len(prov['datasets'])} dataset(s)\n"
         f"  provenance → {out}.json")
+    if prov.get("adapted_from"):
+        console.print(f"  adapted from {prov['adapted_from']} — moved "
+                      f"{prov['adapted_centres']}/{prov['clusters']} centres "
+                      f"({prov['kept_frozen_centres']} kept frozen)")
     if prov.get("script_module_target"):
         console.print(f"  script module pinned at {prov['script_module_target']}px "
                       f"— embeds against this codebook normalize to it")

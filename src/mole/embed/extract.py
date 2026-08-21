@@ -540,7 +540,9 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
                         window_foreground_threshold: float = 0.025,
                         invert: bool | None = None,
                         scale_target: str | float | None = None,
-                        scale_method: str = "profile") -> dict:
+                        scale_method: str = "profile",
+                        adapt_from: str | Path | None = None,
+                        adapt_min_assigned: int = 50) -> dict:
     """Fit ONE VLAD codebook over several datasets, in bounded memory.
 
     This is the index primitive: fit a codebook once over a pooled corpus, freeze it,
@@ -561,6 +563,15 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
       pages are the reference, so nothing is resampled.
     * a number: resample the fit pages to that module first, then record it.
     * ``None`` (default): record nothing, change nothing.
+
+    ``adapt_from`` switches this from *fitting* to **vocabulary adaptation** (see
+    :func:`mole.embed.vlad.adapt_codebook`): load that frozen codebook and, instead
+    of running k-means, move each of its centres to the mean of THESE datasets'
+    descriptors in its cell. ``clusters`` is then taken from the frozen codebook, and
+    its recorded ``script_module_target`` is inherited unless ``scale_target``
+    overrides it — so the target corpus is scanned at the scale the vocabulary lives
+    at. Cells with < ``adapt_min_assigned`` target descriptors keep their frozen
+    centre.
     """
     import torch
 
@@ -569,6 +580,25 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
     dirs = [Path(d) for d in input_dirs]
     if not dirs:
         raise ValueError("fit_corpus_codebook needs at least one dataset directory")
+
+    # Vocabulary adaptation: load the frozen parent codebook + its provenance up
+    # front. K comes from it, and its script scale is inherited so the descriptors
+    # we gather to move the centres are sampled where the vocabulary was defined.
+    parent_codebook = parent_prov = None
+    if adapt_from is not None:
+        parent_codebook = np.load(adapt_from).astype(np.float32)
+        clusters = int(parent_codebook.shape[0])
+        sidecar = Path(str(adapt_from) + ".json")
+        if sidecar.is_file():
+            try:
+                parent_prov = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                parent_prov = None
+        if scale_target in (None, "", "none") and parent_prov:
+            inherited = parent_prov.get("script_module_target")
+            if inherited:
+                scale_target = float(inherited)
+                print(f"[mole] adapt: inheriting the parent's {inherited}px script module")
 
     dev = torch.device(device) if device else _pick_device()
     model, meta = load_backbone(checkpoint, map_location=str(dev))
@@ -647,11 +677,29 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
 
     import time
 
-    print(f"[mole] VLAD: fitting {clusters}-cluster codebook on {reservoir.filled:,} of "
-          f"{reservoir.seen:,} descriptors (seed {seed})…", flush=True)
-    t0 = time.perf_counter()
-    codebook = _vlad.fit_codebook(reservoir.sample, n_clusters=clusters, seed=seed)
-    print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
+    adapt_counts = None
+    if parent_codebook is not None:
+        if parent_codebook.shape[1] != pool_dim:
+            raise ValueError(
+                f"--adapt-from codebook is {parent_codebook.shape[1]}-dim but these "
+                f"descriptors are {pool_dim}-dim (check --head / foreground / geometry "
+                f"match the frozen codebook)")
+        print(f"[mole] VLAD: adapting {clusters}-cluster vocabulary from {adapt_from} on "
+              f"{reservoir.filled:,} of {reservoir.seen:,} target descriptors "
+              f"(min {adapt_min_assigned}/cell)…", flush=True)
+        t0 = time.perf_counter()
+        codebook, adapt_counts = _vlad.adapt_codebook(
+            parent_codebook, reservoir.sample, min_assigned=adapt_min_assigned)
+        moved = int((adapt_counts >= adapt_min_assigned).sum())
+        print(f"[mole] VLAD: adapted {moved}/{clusters} centres in "
+              f"{time.perf_counter() - t0:.1f}s ({clusters - moved} kept frozen: too few "
+              f"target descriptors)", flush=True)
+    else:
+        print(f"[mole] VLAD: fitting {clusters}-cluster codebook on {reservoir.filled:,} of "
+              f"{reservoir.seen:,} descriptors (seed {seed})…", flush=True)
+        t0 = time.perf_counter()
+        codebook = _vlad.fit_codebook(reservoir.sample, n_clusters=clusters, seed=seed)
+        print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
 
     np.save(out, codebook)
     provenance = {
@@ -667,6 +715,18 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
         "window_foreground": bool(window_foreground),
         "head": str(head) if head else None, "head_id": head_id,
     }
+    if adapt_counts is not None:                     # vocabulary adaptation, not a fresh fit
+        moved = int((adapt_counts >= adapt_min_assigned).sum())
+        provenance["adapted_from"] = str(adapt_from)
+        provenance["adapt_min_assigned"] = int(adapt_min_assigned)
+        provenance["adapted_centres"] = moved
+        provenance["kept_frozen_centres"] = int(clusters - moved)
+        provenance["min_cell_count"] = int(adapt_counts.min())
+        provenance["median_cell_count"] = int(np.median(adapt_counts))
+        if parent_prov and parent_prov.get("model_id") not in (None, meta["model_id"]):
+            print(f"[mole] WARNING: parent codebook was fit with model "
+                  f"{parent_prov.get('model_id')} but adapting with {meta['model_id']} — "
+                  f"the vocabulary is only meaningful on its own backbone", flush=True)
     if module_target:
         provenance["script_module_target"] = round(float(module_target), 2)
         provenance["scale_method"] = scale_method
