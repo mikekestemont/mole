@@ -56,15 +56,36 @@ Deployed backbone: `runs/pooled_bin_ft/checkpoint.pth` (`vit_small@6ffcd327+step
   pipeline is faithful (the residual gap is not a bug in feature extraction).
 - **Polarity:** the model is white-on-black (Raven's regime); binarized input needs `--invert`.
 
-## The biggest remaining feature-side lever (not yet realised)
+## Layout cropping / the zone detector — MEASURED, and it's a null for retrieval (2026-08-23)
 
-**Layout cropping / the zone detector.** Ground-truth layout cropping is worth **+0.053 macro on
-Antwerp** — and Antwerp is the *only* archive with it applied; the other four run `use_zones=false`
-and are plausibly leaving ~0.05 each on the table. This is a *feature-quality* lever (it controls
-what pixels the ViT sees per window), and it is arguably bigger than anything in the VLAD thread.
-The in-domain OBB zone detector (`frag-obb-v2`, 342 pages) is built and integrated into `mole prep
---yolo-weights`; the open step is to crop the four archives with it, re-embed, and measure
-(`scripts/train_zone_obb.py`, `scripts/ls_to_yolo.py`).
+An earlier draft of this file called layout cropping "the biggest unrealised feature-side lever,"
+extrapolating ~+0.05/archive from the fact that ground-truth cropping was worth **+0.053 macro on
+Antwerp**. **That extrapolation was wrong**, and we now have the measurement (`scripts/run_zones_ab.sh`,
+`outputs/zones_ab/`, fine-tuned `frag-obb-v3` detector, per archive: whole-page vs zone-restricted
+windows, transductive codebook per arm):
+
+| archive | off | on | Δmacro |
+|---|---|---|---|
+| Antwerp | 0.8171 | 0.8172 | +0.0001 (pre-cropped — N/A) |
+| Brackley | 0.7758 | 0.7725 | −0.0033 |
+| Flanders | 0.5109 | 0.5155 | +0.0046 |
+| Leroy | 0.8126 | 0.8120 | −0.0006 |
+| Utrecht | 0.6207 | 0.6263 | +0.0056 |
+| **mean** | | | **+0.0013, CI [−0.008, +0.010] — indistinguishable from 0** |
+
+**The detector does not move charter retrieval.** Hard archives (Flanders, Utrecht) lean marginally
+positive, balanced ones marginally negative, all in the noise; guardrail passes (it doesn't hurt).
+WHY: binarization + the contrast foreground filter already strip the background, so the detector's
+extra crop is redundant — a little more background removed on hard archives, offset by mild clipping
+on rare hands (the small-n hands wobble in both directions). The **+0.053 on Antwerp was
+archive-specific** (its full pages carried unusually much removable background; `data/antwerp-bin`
+is itself GT-cropped, so its A/B is a null by construction), NOT a general lever.
+
+CONSEQUENCES: (1) charter writer-retrieval **does not need zones** — `use_zones=false` is the right
+default, one fewer moving part. (2) The zone detector's value is **layout-dependent work** (the
+scripy multi-column codices Lancelot/LTK191, per-column crops), not this pipeline. The detector
+itself is strong (`frag-obb-v3`: mAP50 0.964, generalises to unseen multi-column layouts) — it just
+isn't a retrieval lever here.
 
 _Numbers are the canonical project results (some from runs of mid-2026); re-measurable from
 `runs/pooled_bin_ft` and the archive datasets under the protocol above._
