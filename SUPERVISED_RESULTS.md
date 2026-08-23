@@ -11,7 +11,7 @@ and `VLAD_ADAPTATION_RESULTS.md` (codebook levers). The recurring finding: super
 | Tier-1 (head on window descriptors) | pre-aggregation | **fails under VLAD** (−0.013 LOAO); +0.066 under mean — the aggregator discards it |
 | Tier-2 (NetVLAD on a frozen token cache) | the aggregation, backbone frozen | **null** (+0.006) — ≈ hard VLAD by construction; literature trains it jointly |
 | Post-aggregation metric learning | the finished VLAD doc vector | **real but small** (+0.015 over whitening) — see below |
-| Joint differentiable VLAD (backbone + NetVLAD) | features *through* the aggregator | **built, not yet measured** — the literature-faithful test |
+| Joint differentiable VLAD (backbone + NetVLAD) | features *through* the aggregator | **positive** — Antwerp fold +0.038 (LOAO), the best signal yet — see below |
 
 ## Post-aggregation metric learning (2026-08-23)
 
@@ -49,11 +49,27 @@ gain survives removing the tuning; the effect is real, the swept number was ~40%
    shared cross-archive space that *generalizes* (trained on four archives, tested on the fifth), is a
    real **deployment** win for a large index (storage/latency), independent of accuracy.
 
-## Joint differentiable VLAD — pending
+## Joint differentiable VLAD — positive (2026-08-23, first fold)
 
-Built and runnable (`src/mole/supervised/jointvlad.py`, `scripts/run_joint_vlad.py`; a masked-SupCon
-loss on page doc-vectors backprops into both the ViT and the NetVLAD centroids). Its rationale, given the
-above: capture the +0.015 supervised signal **without** the compression tax — by moving the *features*
-through the aggregator rather than projecting a fixed 38,400-d vector down. Weak-green motivation: there
-is learnable signal, but the ceiling looks modest. If it flatlines like Tier-1/2, the frozen features are
-the ceiling and the answer is to ship the current descriptor. First fold (Antwerp) is the deciding read.
+`src/mole/supervised/jointvlad.py` + `scripts/run_joint_vlad.py`: a masked-SupCon loss on page
+document-vectors backprops into both the ViT and the NetVLAD centroids. Rationale: capture the +0.015
+supervised signal **without** the compression tax — move the *features* through the aggregator rather than
+project a fixed 38,400-d vector down.
+
+**Antwerp fold (held out, trained on the other four):** frozen **0.7214** → trained **0.7598** =
+**+0.0384**, LOAO — genuine generalization.
+
+- **Beats post-aggregation supervision (+0.015) and pays no compression tax** — the full descriptor, so
+  this is a real accuracy gain, not a 128-d parity trade. Matches vocabulary adaptation (+0.036). The
+  best supervised signal in the project.
+- **The literature-faithful NetVLAD working as advertised** — gradients into the backbone, which the
+  frozen Tier-2 version (+0.006) structurally could not do.
+
+⚠️ **Learning rate is everything.** `lr 1e-4` **destroys** the pretrained features (0.72 → 0.11 ≈ chance
+in one epoch; the training loss falls while held-out retrieval collapses — a wrecking ball on a strong
+backbone). `lr 1e-6` is stable and **still climbing** at epoch 5 (best = last), so +0.038 is a **floor**.
+
+Caveats: one fold (Antwerp is a strong-baseline archive — Flanders is the headroom test), still climbing
+(raise epochs), page-level proxy eval (delta valid, absolute ≠ the transductive number), and the NetVLAD
+`alpha` calibrated low (~0.5) so the gain may be conservative. Next: longer Antwerp run to find the
+ceiling, then the other four folds (Flanders especially) for the LOAO mean.
