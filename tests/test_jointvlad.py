@@ -79,6 +79,42 @@ def test_token_and_window_caps_bound_the_input():
     assert v.requires_grad
 
 
+def _synthetic_index():
+    from pathlib import Path
+    from mole.supervised.datasets import SupItem, SupervisedIndex
+    idx = SupervisedIndex()
+    for h in ["a/H0", "a/H1", "a/H2", "a/H3"]:          # 4 hands, 2 docs each, 1 page/doc
+        for d in range(2):
+            doc = f"{h}#d{d}"
+            idx.items.append(SupItem(path=Path(f"{h.replace('/', '_')}_{d}.png"),
+                                     archive="a", hand=h, doc=doc, confidence=None))
+    return idx._reindex()
+
+
+def test_train_joint_vlad_runs_and_selects(tmp_path):
+    from mole.supervised.jointvlad import train_joint_vlad
+    model, netvlad, dim = _tiny_setup()
+    index = _synthetic_index()
+    rng = np.random.default_rng(0)
+
+    def load_crops(item):                                # disk-free: random crops per page
+        return _page(rng, 2)
+
+    fwd = dict(num_class_tokens=1, patch_size=16, fg_threshold=0.0, fg_method="contrast",
+               embed_dim=dim, max_tokens=16, max_windows=0)
+    model, netvlad, report = train_joint_vlad(
+        model, netvlad, index, load_crops=load_crops, fwd=fwd,
+        holdout_hands={"a/H2", "a/H3"}, epochs=2, lr=1e-3, device="cpu", seed=0,
+        sampler_cfg=dict(hands_per_batch=2, docs_per_hand=2, batches_per_epoch=3),
+        progress=False)
+
+    assert report["epochs"] == 2
+    assert report["best_epoch"] in (0, 1)
+    assert 0.0 <= report["best_holdout_macro"] <= 1.0    # a real macro-mAP
+    assert len(report["history"]) == 2
+    assert report["history"][0]["loss"] is not None       # a batch with positives ran
+
+
 def test_empty_foreground_is_graph_attached_not_nan():
     # A very high contrast threshold drops every token; the fallback zero token must
     # keep the vector finite and differentiable (grad flows via the centroids).
