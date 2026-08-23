@@ -201,10 +201,11 @@ def train_joint_vlad(model, netvlad, index, *, load_crops, fwd, holdout_hands: s
     rng = np.random.default_rng(seed)
 
     best_macro, best_epoch, best_state, history = -1.0, -1, None, []
-    for ep in track(range(epochs), "Joint NetVLAD finetune", unit="epoch", disable=not progress):
+    for ep in range(epochs):
         model.train(); netvlad.train()
         losses = []
-        for items, hands, docs in sampler:
+        for items, hands, docs in track(sampler, f"epoch {ep + 1}/{epochs}",
+                                        total=sampler.batches, unit="batch", disable=not progress):
             crops = [load_crops(index.items[i]) for i in items]
             z = batch_docvectors(model, netvlad, crops, rng=rng, device=dev, **fwd)
             pos, neg = pair_masks(hands, docs)
@@ -215,8 +216,12 @@ def train_joint_vlad(model, netvlad, index, *, load_crops, fwd, holdout_hands: s
             opt.zero_grad(); loss.backward(); opt.step()
             losses.append(float(loss.detach()))
         macro = holdout_doc_macro_map(model, netvlad, index, holdout_hands, load_crops, fwd, dev)
-        history.append({"epoch": ep, "loss": float(np.mean(losses)) if losses else None,
-                        "holdout_macro": macro})
+        loss_mean = float(np.mean(losses)) if losses else None
+        history.append({"epoch": ep, "loss": loss_mean, "holdout_macro": macro})
+        if progress:
+            lt = f"{loss_mean:.4f}" if loss_mean is not None else "—"
+            print(f"[joint] epoch {ep + 1}/{epochs}: loss {lt}  holdout-macro {macro:.4f}"
+                  + ("  ← best" if macro > best_macro else ""), flush=True)
         if macro > best_macro:
             best_macro, best_epoch = macro, ep
             best_state = ({k: v.detach().cpu().clone() for k, v in model.state_dict().items()},

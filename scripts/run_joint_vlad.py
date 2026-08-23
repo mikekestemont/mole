@@ -33,18 +33,36 @@ def _load_trainable_backbone(ckpt, device):
     return model, meta
 
 
-def _make_load_crops(meta, window_size, overlap):
+def _make_load_crops(meta, window_size, overlap, cache_windows):
+    """Cached page → transformed window crops.
+
+    Each page is loaded and transformed ONCE and memoised (the same pages recur every
+    epoch, and disk I/O on big scans is the training bottleneck on a CPU-bound box).
+    ``cache_windows`` caps the windows kept per page (deterministic even spacing), which
+    bounds RAM (~cache_windows × 0.6 MB × #pages) and fixes each page's windows across
+    epochs — cheap, and fine as sampling for a finetune.
+    """
     from mole.data.patches import load_rgb, window_coords
     from mole.embed.extract import _build_transform
     transform = _build_transform(meta["model_size"])
     invert = bool(meta.get("invert", False))
+    cache: dict[str, list] = {}
 
     def load_crops(item):
+        key = str(item.path)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
         page = load_rgb(item.path, invert=invert)
         w, h = page.size
         wins = window_coords(w, h, window_size, overlap, None)
-        return [transform(page.crop((win.x, win.y, win.x + win.size, win.y + win.size)))
-                for win in wins]
+        if cache_windows and len(wins) > cache_windows:          # even subsample, deterministic
+            idx = np.linspace(0, len(wins) - 1, cache_windows).round().astype(int)
+            wins = [wins[i] for i in idx]
+        crops = [transform(page.crop((win.x, win.y, win.x + win.size, win.y + win.size)))
+                 for win in wins]
+        cache[key] = crops
+        return crops
     return load_crops
 
 
@@ -112,8 +130,8 @@ def main() -> None:
     fwd = dict(num_class_tokens=meta["num_class_tokens"], patch_size=meta["patch_size"],
                fg_threshold=args.fg_threshold, fg_method=args.fg_method,
                embed_dim=meta["embed_dim"], max_tokens=args.max_tokens,
-               max_windows=args.max_windows)
-    load_crops = _make_load_crops(meta, args.window_size, args.overlap)
+               max_windows=0)                             # the crop cache already caps windows
+    load_crops = _make_load_crops(meta, args.window_size, args.overlap, args.max_windows)
 
     index = load_labeled_pairs(args.root)
     holdout = {h for h in index.hands if h.startswith(f"{args.holdout_archive}/")}
