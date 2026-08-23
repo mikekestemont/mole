@@ -105,7 +105,7 @@ def main() -> None:
     from mole.supervised.jointvlad import holdout_doc_macro_map, train_joint_vlad
     from mole.supervised.netvlad import NetVLAD, alpha_for_codebook
 
-    dev = torch.device(args.device)
+    dev = torch.device(f"cuda:{args.device}" if str(args.device).isdigit() else args.device)
     args.out.mkdir(parents=True, exist_ok=True)
 
     model, meta = _load_trainable_backbone(args.checkpoint, dev)
