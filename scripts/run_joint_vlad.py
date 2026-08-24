@@ -66,6 +66,39 @@ def _make_load_crops(meta, window_size, overlap, cache_windows):
     return load_crops
 
 
+def _make_load_view(meta, window_size, overlap, view_windows, preset):
+    """A page → ONE augmented view (random window subset, each window augmented).
+
+    The PIL window crops are cached (superset of ``view_windows``) so disk+crop happen
+    once; each view then draws a random subset and augments it, so two calls give two
+    different views (different windows AND different augmentation). Uses the SAME mild
+    augmentation the backbone was pretrained with — gentle enough to preserve writer
+    strokes (the make-or-break requirement for this SSL objective).
+    """
+    from mole.data.augment import MoleMultiCropAugmentation, resolve_config
+    from mole.data.patches import load_rgb, window_coords
+    aug = MoleMultiCropAugmentation(resolve_config(preset, model_size=meta["model_size"]))
+    invert = bool(meta.get("invert", False))
+    cap = max(view_windows * 2, view_windows)                # cache a superset per page
+    crops_pil: dict[str, list] = {}
+
+    def load_view(path, rng):
+        pil = crops_pil.get(str(path))
+        if pil is None:
+            page = load_rgb(Path(path), invert=invert)
+            w, h = page.size
+            wins = window_coords(w, h, window_size, overlap, None)
+            if cap and len(wins) > cap:
+                idx = np.linspace(0, len(wins) - 1, cap).round().astype(int)
+                wins = [wins[i] for i in idx]
+            pil = [page.crop((win.x, win.y, win.x + win.size, win.y + win.size)) for win in wins]
+            crops_pil[str(path)] = pil
+        k = min(view_windows, len(pil))
+        pick = rng.choice(len(pil), k, replace=False) if len(pil) > k else list(range(len(pil)))
+        return [aug.global_transfo1(pil[i]) for i in pick]   # augment each -> tensor
+    return load_view
+
+
 def _sample_page_tokens(model, load_crops, items, n, fwd, device, seed=0):
     """Foreground tokens for n sample pages (no grad) — to calibrate NetVLAD's alpha."""
     import torch
@@ -113,6 +146,12 @@ def main() -> None:
     ap.add_argument("--docs-per-hand", type=int, default=2)
     ap.add_argument("--batches-per-epoch", type=int, default=100)
     ap.add_argument("--learn", default="both", help="NetVLAD trainable: both|assign|centroids.")
+    ap.add_argument("--self-supervised", action="store_true",
+                    help="LABEL-FREE: two augmented views of a page are the positive pair "
+                         "(no writer labels; labels used only for held-out selection). Trains "
+                         "on ALL training-archive pages.")
+    ap.add_argument("--aug-preset", default="mild", help="SSL augmentation strength (mild|default).")
+    ap.add_argument("--batch-pages", type=int, default=8, help="SSL: pages per batch (×2 views).")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -120,7 +159,8 @@ def main() -> None:
     import torch
 
     from mole.supervised.datasets import load_labeled_pairs
-    from mole.supervised.jointvlad import holdout_doc_macro_map, train_joint_vlad
+    from mole.supervised.jointvlad import (holdout_doc_macro_map, train_joint_vlad,
+                                           train_joint_vlad_ssl)
     from mole.supervised.netvlad import NetVLAD, alpha_for_codebook
 
     dev = torch.device(f"cuda:{args.device}" if str(args.device).isdigit() else args.device)
@@ -153,15 +193,34 @@ def main() -> None:
     frozen = holdout_doc_macro_map(model, netvlad, index, holdout, load_crops, fwd, dev)
     print(f"[joint] frozen held-out macro-mAP: {frozen:.4f}")
 
-    model, netvlad, report = train_joint_vlad(
-        model, netvlad, index, load_crops=load_crops, fwd=fwd, holdout_hands=holdout,
-        epochs=args.epochs, lr=args.lr, device=str(dev), seed=args.seed,
-        sampler_cfg=dict(hands_per_batch=args.hands_per_batch,
-                         docs_per_hand=args.docs_per_hand,
-                         batches_per_epoch=args.batches_per_epoch))
+    if args.self_supervised:
+        from mole.data.datasets import IMAGE_EXTENSIONS, discover_datasets
+        ssl_paths = []
+        for m in discover_datasets(args.root):
+            if m.name == args.holdout_archive:
+                continue                                   # LOAO: held-out archive unseen
+            ssl_paths += [p for p in sorted(m.root.iterdir())
+                          if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+        print(f"[joint] SELF-SUPERVISED: {len(ssl_paths)} training pages (label-free, "
+              f"{args.aug_preset} aug, 2 views/page)")
+        load_view = _make_load_view(meta, args.window_size, args.overlap, args.max_windows,
+                                    args.aug_preset)
+        model, netvlad, report = train_joint_vlad_ssl(
+            model, netvlad, ssl_paths, load_view, holdout_index=index, holdout_hands=holdout,
+            holdout_load_crops=load_crops, fwd=fwd, epochs=args.epochs, lr=args.lr,
+            batch_pages=args.batch_pages, batches_per_epoch=args.batches_per_epoch,
+            device=str(dev), seed=args.seed)
+    else:
+        model, netvlad, report = train_joint_vlad(
+            model, netvlad, index, load_crops=load_crops, fwd=fwd, holdout_hands=holdout,
+            epochs=args.epochs, lr=args.lr, device=str(dev), seed=args.seed,
+            sampler_cfg=dict(hands_per_batch=args.hands_per_batch,
+                             docs_per_hand=args.docs_per_hand,
+                             batches_per_epoch=args.batches_per_epoch))
 
     report.update({"holdout_archive": args.holdout_archive, "frozen_macro": frozen,
-                   "delta": report["best_holdout_macro"] - frozen, "alpha": alpha})
+                   "delta": report["best_holdout_macro"] - frozen, "alpha": alpha,
+                   "self_supervised": bool(args.self_supervised)})
     torch.save({"backbone": model.state_dict(), "netvlad": netvlad.state_dict(),
                 "meta": meta, "report": report}, args.out / "joint.pt")
     (args.out / "report.json").write_text(json.dumps(report, indent=2))

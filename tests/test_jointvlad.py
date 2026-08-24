@@ -115,6 +115,35 @@ def test_train_joint_vlad_runs_and_selects(tmp_path):
     assert report["history"][0]["loss"] is not None       # a batch with positives ran
 
 
+def test_train_joint_vlad_ssl_runs_and_selects():
+    # Label-free: two augmented views of a page = positive; different pages = negative.
+    # Labels are used ONLY for the held-out selection metric.
+    from mole.supervised.jointvlad import train_joint_vlad_ssl
+    model, netvlad, dim = _tiny_setup()
+    index = _synthetic_index()
+    rng0 = np.random.default_rng(0)
+    ssl_paths = [f"page_{i}.png" for i in range(8)]           # 8 unlabeled "pages"
+
+    def load_view(path, rng):                                 # random windows = a random view
+        return _page(rng0, 2)
+
+    def load_crops(item):                                     # deterministic eval crops
+        return _page(rng0, 2)
+
+    fwd = dict(num_class_tokens=1, patch_size=16, fg_threshold=0.0, fg_method="contrast",
+               embed_dim=dim, max_tokens=16, max_windows=0)
+    model, netvlad, report = train_joint_vlad_ssl(
+        model, netvlad, ssl_paths, load_view, holdout_index=index,
+        holdout_hands={"a/H2", "a/H3"}, holdout_load_crops=load_crops, fwd=fwd,
+        epochs=2, lr=1e-3, batch_pages=4, batches_per_epoch=3, device="cpu", seed=0,
+        progress=False)
+
+    assert report["objective"] == "self-supervised"
+    assert report["epochs"] == 2 and report["best_epoch"] in (0, 1)
+    assert 0.0 <= report["best_holdout_macro"] <= 1.0
+    assert report["history"][0]["loss"] is not None           # a contrastive batch ran
+
+
 def test_empty_foreground_is_graph_attached_not_nan():
     # A very high contrast threshold drops every token; the fallback zero token must
     # keep the vector finite and differentiable (grad flows via the centroids).

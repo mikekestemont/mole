@@ -231,3 +231,88 @@ def train_joint_vlad(model, netvlad, index, *, load_crops, fwd, holdout_hands: s
     report = {"best_holdout_macro": best_macro, "best_epoch": best_epoch,
               "epochs": epochs, "history": history}
     return model, netvlad, report
+
+
+# =============================== SELF-SUPERVISED ================================
+# Label-free NetVLAD: two AUGMENTED views of the same page are the positive pair
+# (SimCLR-style instance discrimination), different pages the negatives. No writer
+# labels, no pseudo-labels (so no circularity) — the invariance comes from the
+# augmentation, which must be gentle enough to preserve stroke identity (mild preset).
+# Writer labels are still used, but ONLY for the held-out model-selection metric.
+
+class SSLPageSampler:
+    """Yield batches of page paths (over ALL training pages, labeled or not)."""
+
+    def __init__(self, page_paths, *, batch_pages: int = 8, batches_per_epoch: int = 100,
+                 seed: int = 0):
+        self.paths = list(page_paths)
+        self.n, self.batches = batch_pages, batches_per_epoch
+        self._rng = np.random.default_rng(seed)
+
+    def __iter__(self):
+        for _ in range(self.batches):
+            k = min(self.n, len(self.paths))
+            idx = self._rng.choice(len(self.paths), k, replace=False)
+            yield [self.paths[i] for i in idx]
+
+
+def train_joint_vlad_ssl(model, netvlad, ssl_paths, load_view, *, holdout_index,
+                         holdout_hands: set[str], holdout_load_crops, fwd, epochs: int = 20,
+                         lr: float = 1e-6, weight_decay: float = 0.05, batch_pages: int = 8,
+                         batches_per_epoch: int = 100, temperature: float = 0.07,
+                         device: str = "cpu", seed: int = 0, progress: bool = True):
+    """Self-supervised joint finetune: two augmented views of a page = a positive pair.
+
+    ``load_view(path, rng)`` returns one AUGMENTED view (a random window subset, each
+    window augmented) — called twice per page for the two views. ``holdout_*`` drive the
+    label-based model-selection metric only (the same held-out macro-mAP as the supervised
+    run, so the numbers are directly comparable). Returns ``(model, netvlad, report)``.
+    """
+    import torch
+
+    from mole.progress import track
+
+    dev = torch.device(device)
+    model.to(dev).train(); netvlad.to(dev).train()
+    params = [p for p in list(model.parameters()) + list(netvlad.parameters())
+              if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    sampler = SSLPageSampler(ssl_paths, batch_pages=batch_pages,
+                             batches_per_epoch=batches_per_epoch, seed=seed)
+    rng = np.random.default_rng(seed)
+
+    best_macro, best_epoch, best_state, history = -1.0, -1, None, []
+    for ep in range(epochs):
+        model.train(); netvlad.train()
+        losses = []
+        for paths in track(sampler, f"ssl epoch {ep + 1}/{epochs}", total=sampler.batches,
+                           unit="batch", disable=not progress):
+            za = batch_docvectors(model, netvlad, [load_view(p, rng) for p in paths],
+                                  rng=rng, device=dev, **fwd)          # view A [N, D]
+            zb = batch_docvectors(model, netvlad, [load_view(p, rng) for p in paths],
+                                  rng=rng, device=dev, **fwd)          # view B [N, D]
+            z = torch.cat([za, zb], 0)                                 # [2N, D]
+            n = len(paths)
+            page = np.concatenate([np.arange(n), np.arange(n)])        # view→page id
+            same = page[:, None] == page[None, :]
+            pos = torch.from_numpy(same & ~np.eye(2 * n, dtype=bool)).to(dev)
+            neg = torch.from_numpy(~same).to(dev)
+            loss = masked_supcon(z, pos, neg, temperature=temperature)
+            opt.zero_grad(); loss.backward(); opt.step()
+            losses.append(float(loss.detach()))
+        macro = holdout_doc_macro_map(model, netvlad, holdout_index, holdout_hands,
+                                      holdout_load_crops, fwd, dev)
+        loss_mean = float(np.mean(losses)) if losses else None
+        history.append({"epoch": ep, "loss": loss_mean, "holdout_macro": macro})
+        if progress:
+            lt = f"{loss_mean:.4f}" if loss_mean is not None else "—"
+            print(f"[ssl] epoch {ep + 1}/{epochs}: loss {lt}  holdout-macro {macro:.4f}"
+                  + ("  ← best" if macro > best_macro else ""), flush=True)
+        if macro > best_macro:
+            best_macro, best_epoch = macro, ep
+            best_state = ({k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
+                          {k: v.detach().cpu().clone() for k, v in netvlad.state_dict().items()})
+    if best_state is not None:
+        model.load_state_dict(best_state[0]); netvlad.load_state_dict(best_state[1])
+    return model, netvlad, {"best_holdout_macro": best_macro, "best_epoch": best_epoch,
+                            "epochs": epochs, "history": history, "objective": "self-supervised"}
