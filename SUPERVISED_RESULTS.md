@@ -69,7 +69,29 @@ project a fixed 38,400-d vector down.
 in one epoch; the training loss falls while held-out retrieval collapses — a wrecking ball on a strong
 backbone). `lr 1e-6` is stable and **still climbing** at epoch 5 (best = last), so +0.038 is a **floor**.
 
-Caveats: one fold (Antwerp is a strong-baseline archive — Flanders is the headroom test), still climbing
-(raise epochs), page-level proxy eval (delta valid, absolute ≠ the transductive number), and the NetVLAD
-`alpha` calibrated low (~0.5) so the gain may be conservative. Next: longer Antwerp run to find the
-ceiling, then the other four folds (Flanders especially) for the LOAO mean.
+### Confirmed at full window (2026-08-23, `scripts/run_joint_eval.py` + standard `mole eval`)
+
+The in-loop proxy (8-window cap) inflated the gain ~2×; the full-window, standard `--cross-doc-only` LOAO
+verdict is smaller but real:
+
+| archive | frozen | trained | Δmacro |
+|---|---|---|---|
+| Antwerp | 0.7995 | 0.8145 | +0.0149 |
+| Brackley | 0.7629 | 0.7557 | −0.0071 |
+| Flanders | 0.4159 | 0.5044 | **+0.0885** |
+| Leroy | 0.8164 | 0.8141 | −0.0024 |
+| Utrecht | 0.5859 | 0.5892 | +0.0034 |
+| **mean** | | | **+0.0195** (CI [+0.010, +0.030], REAL, guardrail passed) |
+
+- **The +0.043 proxy was the 8-window artifact** — Brackley's frozen baseline is 0.763 at full window,
+  not the 0.26 the capped proxy showed.
+- **α is faithful** — frozen-NetVLAD absolutes match the known hard-VLAD numbers, so `alpha 0.5` was never
+  the bottleneck (no fix needed).
+- **Real but modest, and almost entirely Flanders** (+0.088; others flat-to-slightly-negative;
+  hand-weighted only +0.007). Still climbing at 30 epochs, so a longer run might reach ~+0.025–0.03.
+
+**Verdict:** the literature-faithful NetVLAD works — the first lever to show supervision helping on the
+*full* descriptor (no compression tax) — but it lands **mid-pack and is the most expensive lever**, below
+vocabulary adaptation (+0.036, cheap, no retraining) which wins on both accuracy and cost. Worth pushing
+(longer run) only if **Flanders specifically** matters, where its +0.088 is the standout. Otherwise the
+backbone remains the dominant lever and adaptation the best downstream one.
