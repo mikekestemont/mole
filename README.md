@@ -10,8 +10,10 @@ MOLE is a clean, packaged rewrite of Tim Raven's adaptation of **AttMask**
 extracting embeddings for handwriting identification on premodern documents, and
 later a similarity-search engine over large image collections.
 
-> ⚠️ **Under construction** — being built in reviewable phases. Full documentation
-> (config tables, CLI reference, recipes) lands in the final phase.
+> **v0.1.0** is the first tagged release: self-supervised training, VLAD retrieval,
+> and vocabulary adaptation. The supported recipe is in the GitHub release notes.
+> Later phases (continual replay, a `finetune` CLI, lineage registry) are still
+> in progress.
 
 ## Install
 
@@ -39,7 +41,8 @@ pip install -e .
 mole --help
 ```
 
-Commands: `prep`, `augview`, `train`, `finetune`, `embed`, `eval`, `models`.
+Commands: `prep`, `augview`, `train`, `embed`, `codebook`, `eval`, `viz`,
+`cluster`, `review`.
 
 See **[WORKFLOW.md](WORKFLOW.md)** for the recommended end-to-end pipeline and exact
 commands, and **[ARCHITECTURE.md](ARCHITECTURE.md)** for design/decisions/build state.

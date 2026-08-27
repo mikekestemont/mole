@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mole"
-version = "0.0.1"
+version = "0.1.0"
 description = "Continual self-supervised handwriting embeddings for premodern documents (AttMask-based)."
 readme = "README.md"
 requires-python = ">=3.10"
