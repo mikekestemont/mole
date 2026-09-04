@@ -47,6 +47,10 @@ Commands: `prep`, `augview`, `train`, `embed`, `codebook`, `eval`, `viz`,
 See **[WORKFLOW.md](WORKFLOW.md)** for the recommended end-to-end pipeline and exact
 commands, and **[ARCHITECTURE.md](ARCHITECTURE.md)** for design/decisions/build state.
 
+`mole prep --binarize sauvola` percentile-stretches each page (p2→20, p98→255) before
+Sauvola by default — the same tone equalisation used on the Sluis/Leroy scans.
+`--no-stretch` turns it off. Already-bitonal pages are skipped.
+
 ## Acknowledgements
 
 - **AttMask** — Kakogeorgiou et al., *What to Hide from Your Students:

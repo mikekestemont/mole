@@ -85,6 +85,11 @@ def prep(
     binarize_out: Optional[Path] = typer.Option(None, help="Output dir for binarized images (default: <input_dir>-bin)."),
     sauvola_window: int = typer.Option(25, help="Sauvola local window in px (odd)."),
     sauvola_k: float = typer.Option(0.2, help="Sauvola k — higher = more aggressive/thinner ink."),
+    stretch: bool = typer.Option(
+        True, "--stretch/--no-stretch",
+        help="Percentile-stretch grayscale before Sauvola (p2→20, p98→255). "
+             "On by default; skipped on bitonal pages. When zones.json is present, "
+             "percentiles are estimated inside the text zone so mounts do not set the range."),
     max_side: int = typer.Option(0, help="Downscale longest side to <= N px before binarizing (0 = off, never upsamples)."),
     normalize_scale: str = typer.Option(
         "none", "--normalize-scale",
@@ -106,6 +111,7 @@ def prep(
 
     With --binarize sauvola, instead binarizes the images (black-on-white) into a
     new folder + a QC sheet; combine with --sample N to preview before committing.
+    Grayscale is percentile-stretched first (p2→20, p98→255; --no-stretch to skip).
     Add --normalize-scale profile to also equalise the script scale across pages;
     the per-page factors land in <out>/scale.json and in the QC sheet.
     """
@@ -116,7 +122,7 @@ def prep(
         recs = binarize_folder(input_dir, out_dir, method=binarize, window=sauvola_window,
                                k=sauvola_k, max_side=max_side or None, sample=sample, qc_html=qc,
                                normalize_scale=normalize_scale,
-                               target_module=target_module or None)
+                               target_module=target_module or None, stretch=stretch)
         if sample is not None:
             console.print(f"[yellow]preview only ({len(recs)} images) — nothing written; "
                           f"tune --sauvola-window/--sauvola-k, then re-run without --sample[/yellow]")

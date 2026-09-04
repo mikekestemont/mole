@@ -4,6 +4,11 @@ Sauvola local thresholding is the historical-document standard: it adapts the
 threshold per pixel from the local mean/std, so it survives the uneven
 illumination and stains of camera photos where a global Otsu threshold fails.
 
+By default a **percentile stretch** runs on the grayscale page first (interior
+p2→20, p98→255; :mod:`mole.prep.stretch`). That is a per-page linear fit, so a
+washed plate and a dark scan land in the same ink/paper range before the
+local threshold sees them. Already-bitonal pages are skipped.
+
 Output is conventional **black ink on white** (so no `--invert` is needed
 downstream and Raven's intensity foreground filter works). Binarized copies are
 written once (cache-friendly) rather than recomputed per window at load. A QC
@@ -69,21 +74,33 @@ def downscale_max_side(pil_img, max_side: int | None):
 
 
 def binarize_image(pil_img, method: str = "sauvola", window: int = 25, k: float = 0.2,
-                   max_side: int | None = None):
+                   max_side: int | None = None, stretch: bool = True,
+                   stretch_mask=None):
     """Return a black-ink-on-white PIL ``L`` image for ``pil_img``.
 
     If ``max_side`` is set, the image is downscaled (longest side, never upsampled)
     *before* thresholding, so the Sauvola window operates at the final resolution.
+
+    ``stretch`` (default on) applies a robust percentile contrast stretch on the
+    grayscale page *before* Sauvola: interior p2→20, p98→255. Faint camera plates
+    get a usable ink/paper gap; already-bitonal pages are skipped. ``stretch_mask``
+    is an optional boolean array (text-zone interior) used only to *estimate* the
+    percentiles; the linear map is applied to the whole page.
     """
     import numpy as np
     from PIL import Image
 
+    from mole.prep.stretch import stretch_gray
+
     if method != "sauvola":
         raise ValueError(f"unknown binarization method {method!r} (only 'sauvola')")
     pil_img = downscale_max_side(pil_img, max_side)
-    gray = np.asarray(pil_img.convert("L"), dtype=np.float32)
-    thresh = sauvola_threshold(gray, window=window, k=k)
-    binary = np.where(gray > thresh, 255, 0).astype(np.uint8)  # bg white, ink black
+    gray = np.asarray(pil_img.convert("L"), dtype=np.uint8)
+    if stretch:
+        gray, _ = stretch_gray(gray, stretch_mask)
+    gray_f = gray.astype(np.float32)
+    thresh = sauvola_threshold(gray_f, window=window, k=k)
+    binary = np.where(gray_f > thresh, 255, 0).astype(np.uint8)  # bg white, ink black
     return Image.fromarray(binary, mode="L")
 
 
@@ -185,12 +202,16 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
                     window: int = 25, k: float = 0.2, max_side: int | None = None,
                     sample: int | None = None, qc_html: str | Path | None = None,
                     normalize_scale: str = "none", target_module: float | None = None,
-                    scale_sample: int | None = None):
+                    scale_sample: int | None = None, stretch: bool = True):
     """Binarize every image in ``input_dir`` into ``out_dir`` (same filenames as PNG).
 
     ``max_side`` optionally caps the longest side (downscale-before-threshold, never
     upsample) to strip wasteful resolution. ``sample`` limits to N random images (a
     quick QC preview, writes nothing to ``out_dir`` unless you run the full pass).
+
+    ``stretch`` (default True) percentile-stretches grayscale before Sauvola
+    (p2→20, p98→255; skipped on bitonal pages). When ``zones.json`` is present,
+    percentiles are estimated inside the text-zone bbox.
 
     ``normalize_scale`` (``"profile"`` / ``"word"``, see :mod:`mole.prep.scale`)
     additionally resamples each page to a constant script module: ``target_module``
@@ -203,6 +224,7 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
     from mole.data.patches import load_rgb  # robust loader (multi-frame TIFF etc.)
     from mole.data.zones import find_zones, load_zones
     from mole.prep import scale as _scale
+    from mole.prep.stretch import bbox_mask
     from mole.progress import track
 
     input_dir, out_dir = Path(input_dir), Path(out_dir)
@@ -227,7 +249,7 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
             input_dir, target_module, method=normalize_scale, max_side=max_side,
             window=window, k=k, sample=scale_sample or _scale.DEFAULT_SAMPLE)
         print(f"[mole] scale: normalizing to a {target:.1f}px script module ({target_source})")
-    zpath = find_zones(input_dir) if normalizing else None
+    zpath = find_zones(input_dir)
     zones = load_zones(zpath) if zpath else None
 
     # Only keep the (heavy) orig/binary images for the rows the QC sheet will show:
@@ -244,21 +266,26 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
     for i, p in enumerate(track(files, "Binarizing", unit="img")):
         orig = load_rgb(p)
         capped = downscale_max_side(orig, max_side)
-        binary = binarize_image(capped, method=method, window=window, k=k)
+        zone = _scale.zone_for(zones, p.name, capped.size)
+        mask = bbox_mask(capped.size[::-1], zone) if stretch else None
+        binary = binarize_image(capped, method=method, window=window, k=k,
+                                stretch=stretch, stretch_mask=mask)
         rec = {"src": p, "dst": out_dir / f"{p.stem}.png", "orig_size": orig.size,
-               "final_size": binary.size}
+               "final_size": binary.size, "stretched": bool(stretch)}
         if normalizing:
-            zone = _scale.zone_for(zones, p.name, capped.size)
             est = _scale.estimate_module(binary, zone, method=normalize_scale)
             factor = _scale.scale_factor(est.module, target)
             if est.module is not None and abs(factor - 1.0) >= _scale.RESIZE_EPS:
                 # Resample the GRAYSCALE original and threshold again: resampling a
                 # bitonal image aliases its strokes. The Sauvola window rides along
                 # with the page so it still spans the same amount of script.
-                binary = binarize_image(_scale.resample(capped, factor), method=method,
-                                        window=_odd(window * factor), k=k)
-                out_est = _scale.estimate_module(binary, _scale.scaled_zone(zone, factor),
-                                                 method=normalize_scale)
+                resampled = _scale.resample(capped, factor)
+                rzone = _scale.scaled_zone(zone, factor)
+                rmask = bbox_mask(resampled.size[::-1], rzone) if stretch else None
+                binary = binarize_image(resampled, method=method,
+                                        window=_odd(window * factor), k=k,
+                                        stretch=stretch, stretch_mask=rmask)
+                out_est = _scale.estimate_module(binary, rzone, method=normalize_scale)
             else:
                 factor, out_est = 1.0, est
             rec.update(module=est.module, scale=factor, module_out=out_est.module,
@@ -283,7 +310,8 @@ def binarize_folder(input_dir: str | Path, out_dir: str | Path, *, method: str =
         shown = [r for r in records if "orig" in r]
         _write_qc(shown, Path(qc_html), method, window, k, max_side, preview,
                   total=len(records), scale_target=target,
-                  scale_stats=_collapse_stats(records) if normalizing else None)
+                  scale_stats=_collapse_stats(records) if normalizing else None,
+                  stretch=stretch)
     for r in records:                            # free the images we kept for QC
         r.pop("orig", None)
         r.pop("binary", None)
@@ -324,7 +352,8 @@ def _scale_cell(rec: dict) -> str:
 
 def _write_qc(records, out: Path, method: str, window: int, k: float,
               max_side: int | None, preview: bool, total: int | None = None,
-              scale_target: float | None = None, scale_stats: dict | None = None):
+              scale_target: float | None = None, scale_stats: dict | None = None,
+              stretch: bool = True):
     rows = []
     for r in records:
         ow, oh = r["orig_size"]
@@ -338,6 +367,7 @@ def _write_qc(records, out: Path, method: str, window: int, k: float,
             f'<td><img class=detail src="data:image/png;base64,{_detail_b64(_ink_detail_crop(r["binary"]))}"></td></tr>')
     tag = "PREVIEW (nothing written)" if preview else "full run"
     cap = f"max_side={max_side}px" if max_side else "max_side=off (native resolution)"
+    cap += " · stretch p2→20/p98→255" if stretch else " · stretch off"
     shown = (f"{len(records)} of {total} images (evenly-spaced sample)"
              if total and total > len(records) else f"{len(records)} images")
     if scale_target:

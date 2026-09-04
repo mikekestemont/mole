@@ -71,9 +71,20 @@ pixels one letter is, which is set by camera distance and DPI, not by the scribe
 are removed here, before any windowing.
 
 ```bash
-# tone: adaptive Sauvola threshold → black ink on white
+# tone: percentile stretch (p2→20, p98→255) then adaptive Sauvola → black ink on white
 mole prep data/samples --binarize sauvola --binarize-out data/samples-bin
 
+# skip the stretch (already-contrast scans, or A/B against the default)
+mole prep data/samples --binarize sauvola --no-stretch --binarize-out data/samples-bin
+```
+
+The stretch is a per-page linear map of the interior 2nd–98th gray percentiles onto a
+fixed ink/paper range. It costs a histogram, so it scales to other archives with no
+training. Already-bitonal pages are left alone. When `zones.json` is present, the
+percentiles are estimated inside the text-zone box so a black mount does not set the
+black point. `--no-stretch` turns it off.
+
+```bash
 # scale: also resample every page to a constant script module (this corpus's own median)
 mole prep data/samples --binarize sauvola --binarize-out data/samples-bin \
     --normalize-scale profile

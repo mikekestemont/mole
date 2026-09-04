@@ -725,7 +725,12 @@ def measure_corpus(directory: str | Path, *, sample: int | None = DEFAULT_SAMPLE
     for f in it:
         page = downscale_max_side(load_rgb(f), max_side)
         if binarize == "sauvola" or (binarize == "auto" and not _is_bitonal(page)):
-            page = binarize_image(page, window=sauvola_window, k=sauvola_k)
+            from mole.prep.stretch import bbox_mask
+            zone = zone_for(zones, f.name, page.size)
+            page = binarize_image(
+                page, window=sauvola_window, k=sauvola_k,
+                stretch_mask=bbox_mask(page.size[::-1], zone),
+            )
         value = manifest.module_for(f.name, size=page.size) if manifest else None
         if value is None:
             value = estimate_module(page, zone_for(zones, f.name, page.size),

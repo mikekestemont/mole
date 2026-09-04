@@ -78,6 +78,7 @@ through `track` so the look is consistent and the backend is swappable in one pl
 | Normalize | ToTensor only (no ImageNet mean/std) | matches the ported checkpoint's training domain; left as a future config switch |
 | Env split | training vs `prep` in separate envs | kraken (if ever used) pins conflicting torch; `requirements-prep.txt` is separate |
 | Script scale | normalize to a constant **script module** (folded row-profile band height), opt-in via `prep --normalize-scale` | px-per-letter is a property of the camera, not the hand; a 224px window means nothing without it. Measured on the page, resampled from grayscale + re-binarized |
+| Tone | percentile stretch (p2→20, p98→255) **before** Sauvola, on by default; `--no-stretch` to skip | camera/microfilm exposure is not the hand; a linear per-page fit scales to other archives with no training. Bitonal pages skipped; text-zone bbox sets the percentiles when `zones.json` is present |
 
 **Augmentation presets** (`data/augment.py::PRESETS`): `mild` / `default` /
 `aggressive`. `augview` samples a **random window per view** from across the page
