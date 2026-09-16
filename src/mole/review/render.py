@@ -521,7 +521,8 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   umap_neighbors: int = 15, umap_min_dist: float = 0.1,
                   theme: str = "dark", show_labels: bool = False,
                   neighbors: int = 5, false_positives: bool = True,
-                  highlight_labels: bool = True) -> tuple[Path, str]:
+                  highlight_labels: bool = True,
+                  neighbor_lines: bool = False) -> tuple[Path, str]:
     """Build the review sheet or the viz map. Returns ``(path, summary_line)``.
 
     ``mode="viz"`` is the map + charter viewer only (``mole viz``). ``mode="review"``
@@ -531,7 +532,9 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
     charters to list under the viewer when a document is selected.
     ``false_positives=False`` drops the false-positive tab from the review.
     ``highlight_labels=False`` rings the highlighted charters without printing
-    their names on the map.
+    their names on the map. ``neighbor_lines`` sets the initial state of the
+    "neighbour lines" toggle (connectors from a selected charter to its nearest
+    neighbours); off by default, the reader can switch it on in the page.
     """
     from mole.review.images import ImageBudget
     from mole.review.suggest import build_review, document_table
@@ -658,6 +661,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                 .replace("__KIND__", kind_title) \
                 .replace("__THEMECHK__", " checked" if theme == "light" else "") \
                 .replace("__LABELCHK__", " checked" if show_labels else "") \
+                .replace("__NNCHK__", " checked" if neighbor_lines else "") \
                 .replace("__PSIZE__", f"{float(point_size):.1f}") \
                 .replace("__TITLE__", escape(", ".join(report.datasets) or "archive")) \
                 .replace("__SUBTITLE__", subtitle) \
@@ -1725,6 +1729,7 @@ __ZOOM_CSS__
 <div class="ctl">
   <label title="Publication light background"><input type="checkbox" id="theme"__THEMECHK__> light theme</label>
   <label title="Print the active category id inside each point"><input type="checkbox" id="labels"__LABELCHK__> class IDs</label>
+  <label title="When a charter is selected, draw lines to its nearest neighbours in the underlying space (not the map)"><input type="checkbox" id="nnlines"__NNCHK__> neighbour lines</label>
   <label>point size <input type="range" id="psize" min="3" max="26" step="0.5" value="__PSIZE__"></label>
   __PICKER__
   <input type="text" id="search" placeholder="find charter…" title="Type a filename, then Enter, to jump to that charter">
@@ -1807,9 +1812,22 @@ function showDoc(i){
     '</div>';
   MOLE.showImage(uri || '', dim[0], dim[1]);
   if(MOLE.select) MOLE.select(i);
-  if(MOLE.markNeighbors) MOLE.markNeighbors(i, (D.nn && D.nn[i]) || []);
+  shownDoc = i;
+  drawNNLines();
   renderNN(i);
 }
+var shownDoc = null;
+var nnBox = document.getElementById('nnlines');
+// connector lines from the selected charter to its true nearest neighbours are
+// off by default: the thumbnails under the viewer carry the same information
+// and the lines confuse first-time readers of the map
+function drawNNLines(){
+  if(!MOLE.markNeighbors) return;
+  if(nnBox && nnBox.checked && shownDoc != null)
+    MOLE.markNeighbors(shownDoc, (D.nn && D.nn[shownDoc]) || []);
+  else if(MOLE.clearNeighbors) MOLE.clearNeighbors();
+}
+if(nnBox) nnBox.addEventListener('change', drawNNLines);
 function renderNN(i){
   var box = document.getElementById('nn'); if(!box) return;
   var list = (D.nn && D.nn[i]) || [];

@@ -545,6 +545,12 @@ def viz(
     show_labels: bool = typer.Option(
         False, "--labels/--no-labels",
         help="Start with the active category id printed inside each point."),
+    neighbor_lines: bool = typer.Option(
+        False, "--neighbor-lines/--no-neighbor-lines",
+        help="Start with connector lines from a selected charter to its nearest "
+             "neighbours switched on. Off by default (a 'neighbour lines' toggle in "
+             "the page switches them on); the thumbnails under the viewer show the "
+             "same neighbours either way."),
     images: bool = typer.Option(
         True, "--images/--no-images",
         help="Embed charter images so any point opens in the viewer (bipanel)."),
@@ -571,7 +577,7 @@ def viz(
         point_size=point_size, pca_whiten=pca_whiten, pca_dim=pca_dim,
         umap_neighbors=umap_neighbors,
         umap_min_dist=umap_min_dist, theme=theme, show_labels=show_labels,
-        highlight_labels=highlight_labels)
+        highlight_labels=highlight_labels, neighbor_lines=neighbor_lines)
     console.print(f"[green]✓ viz → {path}[/green]\n  {summary}")
 
 
