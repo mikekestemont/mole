@@ -596,6 +596,9 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
         # hand (Antwerp's hand R alone has 217) would encode hundreds of pages that
         # nothing can show.
         wanted: list[int] = []
+        # ring-highlighted charters are the reason the map was built: they get
+        # a page before anything else, so they open under any --max-mb
+        wanted.extend(highlight_idx)
         for _kind, _h, _b, rws in sections:
             for r in rws:
                 wanted.extend(r.get("focus", [])[:4])
