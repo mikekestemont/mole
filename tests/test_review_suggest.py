@@ -51,6 +51,8 @@ def _corpus(tmp_path: Path):
         add(v, f"S2{i}_1.png", "SPLITME")
     # a mislabel: sits inside B's cloud but carries hand A's label
     add(centers["B"] + 0.05 * rng.standard_normal(dim), "MIS_1.png", "A")
+    # an isolation outlier: labeled A but far from A and from every other hand
+    add(centers["FAR"] + 0.05 * rng.standard_normal(dim), "ISOL_1.png", "A")
     # an unlabeled document drawn from A -> attribution to A
     add(centers["A"] + 0.05 * rng.standard_normal(dim), "UNL_1.png", "")
     # a group of unlabeled documents unlike anything known -> possible new hand
@@ -79,7 +81,7 @@ def test_every_list_surfaces_its_planted_case(tmp_path):
     r = build_review(_corpus(tmp_path), limit=20)
 
     assert r.n_hands == 5                       # A, B, TWIN1, TWIN2, SPLITME
-    assert r.n_documents == 28
+    assert r.n_documents == 29
 
     # 1. the unlabeled document drawn from A is attributed to A.
     # Hands are namespaced by dataset folder, so two archives' hand "A" can never
@@ -98,9 +100,10 @@ def test_every_list_surfaces_its_planted_case(tmp_path):
     groups = (set(r.splits[0]["group_a"]), set(r.splits[0]["group_b"]))
     assert any(g == {"S10_1.png", "S11_1.png", "S12_1.png"} for g in groups)
 
-    # 4. the mislabeled document tops the doubts list, pointing at B
-    d = r.doubts[0]
-    assert d["document"] == "MIS_1.png" and d["closer_hand"] == "arch1/B"
+    # 4. the mislabeled document is a false-positive (closer to B than to A)
+    d = next(o for o in r.outliers if o["document"] == "MIS_1.png")
+    assert d["hand"] == "arch1/A" and d["closer_hand"] == "arch1/B"
+    assert d["gap"] >= 0.05 and d["z"] >= 3.0
 
     # 5. the duplicated charter is found, and known siblings are not
     assert r.duplicates
@@ -147,3 +150,128 @@ def test_sibling_scans_are_not_evidence(tmp_path):
     # and the near-identical sibling pair is NOT reported as a duplicate
     assert not any({d["document_a"], d["document_b"]} == {"7_1_x.png", "7_2_x.png"}
                    for d in r.duplicates)
+
+
+def test_build_review_does_not_write_labels(tmp_path):
+    """labels.csv is the reference throughout — the engine must only read it."""
+    npy = _corpus(tmp_path)
+    lab = next(tmp_path.rglob("labels.csv"))
+    before = lab.read_text()
+    build_review(npy, limit=20)
+    assert lab.read_text() == before
+
+
+def test_lists_false_skips_suggestions_but_keeps_clusters(tmp_path):
+    r = build_review(_corpus(tmp_path), lists=False)
+    assert r.outliers == [] and r.attributions == []
+    assert r.cluster_levels                          # viz still colours by FINCH
+
+
+def test_outlier_cap_is_per_hand_not_global(tmp_path):
+    """A dominant hand must not flood the queue and bury a small hand's outlier."""
+    rng = np.random.default_rng(4)
+    dim = 16
+    ds = tmp_path / "arch1"
+    ds.mkdir()
+    vecs, names, hands = [], [], []
+
+    def add(v, name, hand):
+        vecs.append(v)
+        names.append(name)
+        hands.append(hand)
+
+    big = rng.standard_normal(dim)
+    small = rng.standard_normal(dim)
+    for i in range(20):
+        add(big + (0.35 if i < 12 else 0.05) * rng.standard_normal(dim),
+            f"BIG{i}.png", "BIG")
+    for i in range(4):
+        add(small + 0.05 * rng.standard_normal(dim), f"S{i}.png", "SMALL")
+    add(big + 0.05 * rng.standard_normal(dim), "SMALL_OUT.png", "SMALL")
+
+    for n in names:
+        (ds / n).touch()
+    rows = [{"row": i, "image": str(ds / n)} for i, n in enumerate(names)]
+    npy = tmp_path / "e.npy"
+    np.save(npy, np.asarray(vecs, dtype=np.float32))
+    (tmp_path / "e.mapping.json").write_text(json.dumps({"rows": rows}))
+    (ds / "labels.csv").write_text(
+        "filename,hand_id\n" + "".join(f"{n},{h}\n" for n, h in zip(names, hands)))
+
+    r = build_review(npy, limit=40, per_hand_cap=8)
+    by_hand = {}
+    for o in r.outliers:
+        by_hand.setdefault(o["hand"], []).append(o)
+    assert all(len(v) <= 8 for v in by_hand.values())
+    assert any(o["document"] == "SMALL_OUT.png" for o in r.outliers)
+
+
+def test_false_negatives_skip_pages_that_would_be_outliers(tmp_path):
+    """Keep on a false negative must not recreate a false positive."""
+    r = build_review(_corpus(tmp_path), limit=40)
+    assert any(a["document"] == "UNL_1.png" and a["hand"].endswith("/A")
+               for a in r.attributions)
+    # the unlabeled NEW cloud is unlike every known hand
+    assert not any(a["document"].startswith("N") for a in r.attributions)
+    for a in r.attributions:
+        assert a["join_z"] < 1.0
+
+
+def test_mild_closer_hand_is_not_a_misidentification(tmp_path):
+    """A page still typical of its recorded hand must not enter stage 1 just
+    because another hand is a hair closer. Recorded labels are the prior."""
+    rng = np.random.default_rng(7)
+    dim = 16
+    ds = tmp_path / "arch1"
+    ds.mkdir()
+    vecs, names, hands = [], [], []
+    a = rng.standard_normal(dim)
+    b = rng.standard_normal(dim)
+    for i in range(6):
+        vecs.append(a + 0.04 * rng.standard_normal(dim))
+        names.append(f"A{i}.png")
+        hands.append("A")
+    for i in range(6):
+        vecs.append(b + 0.04 * rng.standard_normal(dim))
+        names.append(f"B{i}.png")
+        hands.append("B")
+    # still inside A's cloud, nudged a little toward B
+    vecs[0] = a + 0.03 * (b - a)
+    for n in names:
+        (ds / n).touch()
+    rows = [{"row": i, "image": str(ds / n)} for i, n in enumerate(names)]
+    npy = tmp_path / "e.npy"
+    np.save(npy, np.asarray(vecs, dtype=np.float32))
+    (npy.with_suffix(".mapping.json")).write_text(json.dumps({"rows": rows}))
+    (ds / "labels.csv").write_text(
+        "filename,hand_id\n" + "".join(f"{n},{h}\n" for n, h in zip(names, hands)))
+    r = build_review(npy, limit=40)
+    assert not any(o["document"] == "A0.png" for o in r.outliers)
+
+
+def test_pick_partition_prefers_finch_ari_over_hdbscan():
+    from mole.review.suggest import _pick_partition_for_new_hands
+
+    levels = [
+        {"level": "FINCH L0", "n_clusters": 12, "ari": 0.21, "labels": [0, 1, 2]},
+        {"level": "FINCH L1", "n_clusters": 5, "ari": 0.77, "labels": [0, 0, 1]},
+        {"level": "HDBSCAN min-size 2", "n_clusters": 4, "ari": 0.99, "labels": [9, 9, 9]},
+    ]
+    lab, meta = _pick_partition_for_new_hands(levels)
+    assert meta["level"] == "FINCH L1" and meta["criterion"] == "ari"
+    assert list(lab) == [0, 0, 1]
+
+
+def test_new_hands_skip_clusters_that_overlap_labels():
+    """A cluster that already contains a recorded hand is not a missed scribe."""
+    from mole.review.suggest import _new_hands
+
+    sim = np.eye(6, dtype=np.float32) * 0.2 + 0.8
+    labels = np.array([0, 0, 0, 1, 1, 1])
+    labeled = np.array([True, False, False, False, False, False])
+    docs = np.asarray([f"d{i}" for i in range(6)], dtype=object)
+    names = [f"p{i}.png" for i in range(6)]
+    scores = np.full((6, 1), 0.1, dtype=np.float32)
+    out = _new_hands(sim, labels, labeled, scores, docs, names, [0.5], 10)
+    assert all(c["cluster"] == 1 for c in out)
+    assert not any(c["cluster"] == 0 for c in out)

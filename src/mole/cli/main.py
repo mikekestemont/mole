@@ -517,6 +517,9 @@ def viz(
         help="Whiten PCA scores before UMAP. Default OFF: UMAP already handles scale, "
              "and whitening amplifies noisy low-variance dims → fuzzier maps (cf. the "
              "Antwerp whitening finding). Pass --pca-whiten for the old Sluis recipe."),
+    pca_dim: int = typer.Option(
+        150, "--pca-dim",
+        help="PCA dimensions before UMAP/t-SNE. Capped at N-1 (and D). Default 150."),
     umap_neighbors: int = typer.Option(
         15, "--umap-neighbors", help="UMAP n_neighbors (local vs global structure)."),
     umap_min_dist: float = typer.Option(
@@ -530,6 +533,11 @@ def viz(
     highlight_file: Optional[Path] = typer.Option(
         None, "--highlight-file",
         help="Text file of stems/filenames to ring-highlight, one per line (# comments ok)."),
+    highlight_labels: bool = typer.Option(
+        True, "--highlight-labels/--no-highlight-labels",
+        help="Print the name next to each ring-highlighted charter (default). "
+             "--no-highlight-labels keeps only the red ring — for many targets "
+             "with long names, where the labels would drown the map."),
     point_size: float = typer.Option(
         9.0, "--point-size", help="Initial map marker size in px (slider in the page)."),
     theme: str = typer.Option(
@@ -549,19 +557,21 @@ def viz(
 ) -> None:
     """Interactive 2D map of an embeddings file — map + charter viewer bipanel.
 
-    Same renderer as ``mole review`` (opened in expert mode: just the map and the
-    charter viewer, no suggestion lists). Colour by hand/dataset/FINCH level with the
-    in-page picker; ring target documents with --highlight / --highlight-file.
+    Separate from ``mole review``: this file has no suggestion lists and never
+    writes decisions. Colour by hand/dataset/FINCH level with the in-page picker;
+    ring target documents with --highlight / --highlight-file.
     """
     from mole.review.render import render_review
 
     out = out or embeddings.with_suffix(".viz.html")
     path, summary = render_review(
         embeddings, out=out, clusters=clusters, method=method, seed=seed,
-        map_backend=map_backend, expert=True, images=images, image_scope="all",
+        map_backend=map_backend, mode="viz", images=images, image_scope="all",
         max_mb=max_mb, highlight=highlight, highlight_file=highlight_file,
-        point_size=point_size, pca_whiten=pca_whiten, umap_neighbors=umap_neighbors,
-        umap_min_dist=umap_min_dist, theme=theme, show_labels=show_labels)
+        point_size=point_size, pca_whiten=pca_whiten, pca_dim=pca_dim,
+        umap_neighbors=umap_neighbors,
+        umap_min_dist=umap_min_dist, theme=theme, show_labels=show_labels,
+        highlight_labels=highlight_labels)
     console.print(f"[green]✓ viz → {path}[/green]\n  {summary}")
 
 
@@ -694,10 +704,6 @@ def review(
         help="Discovered-cluster colour schemes: 'finch' (parameter-free hierarchy) "
              "| 'hdbscan' (density-based, marks unclusterable charters as noise and "
              "copes better with very uneven hand sizes) | 'both'."),
-    expert: bool = typer.Option(
-        False, "--expert",
-        help="Open in expert view: map + charter viewer only, suggestion lists "
-             "hidden (still toggleable in the page)."),
     map_backend: str = typer.Option(
         "auto", "--map",
         help="Map backend: 'bokeh' (dark, zoom/pan/box-zoom tools, and the same "
@@ -705,22 +711,31 @@ def review(
              "(bokeh when installed)."),
     method: str = typer.Option("auto", help="2D projection: auto | pca | tsne | umap."),
     seed: int = typer.Option(0, help="Projection and split seed."),
+    false_positives: bool = typer.Option(
+        True, "--false-positives/--no-false-positives",
+        help="Build the false-positive tab (recorded pages that may be "
+             "misidentified). --no-false-positives drops it: in these archives a "
+             "recorded identification is rarely wrong."),
 ) -> None:
-    """Build a self-contained label-review sheet for a partially labeled archive.
+    """Build a case-by-case hand-review sheet for a partially labeled archive.
 
-    Six ranked lists — attributions, doubtful labels, hands that may merge, hands
-    that may split, possible new hands, duplicates — beside a map of the archive,
-    with the actual handwriting inline. Written for a colleague with no software:
-    one HTML file, no folder beside it, nothing installed. It never writes
-    labels.csv; decisions leave as a CSV the user downloads.
+    Three tabs — false positives (a recorded charter against its hand), false
+    negatives (an unattributed charter against the known hand it sits with) and
+    new hands (an unlabeled cluster from the FINCH cut that best recovers the
+    recorded scribes, shown as a grid of pages with a checkbox each: untick the
+    pages that do not belong, deselect all to reject the hand). Cosine
+    distances stay on screen. Decisions are Keep / Reject / Not sure and leave
+    as a CSV; labels.csv is never written. There is no map in this file (use
+    ``mole viz`` for that).
     """
     from mole.review.render import render_review
 
     path, summary = render_review(
         embeddings, out=out, clusters=clusters, limit=limit, max_mb=max_mb,
         image_cache=image_cache, image_url=image_url, images=images,
-        image_scope=image_scope, map_backend=map_backend, expert=expert,
-        cluster_method=cluster_method, method=method, seed=seed)
+        image_scope=image_scope, map_backend=map_backend, mode="review",
+        cluster_method=cluster_method, method=method, seed=seed,
+        false_positives=false_positives)
     console.print(f"[green]✓ review sheet → {path}[/green]\n  {summary}")
 
 

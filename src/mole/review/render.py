@@ -1,20 +1,24 @@
-"""The review sheet: one self-contained HTML a non-technical colleague can use.
+"""The review sheet and the viz map: one self-contained HTML each.
 
-Left, the familiar 2D map of the archive. Right, the six suggestion lists. Hover
-a suggestion and the map answers it — everything dims except the charters that
-row is about. Click to open the actual handwriting, stacked at one scale, and
-record a decision. Decisions leave as a CSV; ``labels.csv`` is never touched.
+``mole viz`` is the map + charter viewer. ``mole review`` is a separate file
+with a three-tab case queue: false positives (recorded page vs its hand), false
+negatives (unattributed page vs a known hand) and new hands (an unlabeled
+cluster shown as a grid of pages with a checkbox each — tick the pages that are
+one scribe; nothing ticked rejects the hand). Decisions are Keep / Reject /
+Unsure and leave as a CSV; ``labels.csv`` is never written.
 
 Design rules, all of which have a reason:
 
 * **Plain language by default.** No cosine appears unless "show the numbers" is
-  ticked. Attributions state a calibrated fact ("of 40 suggestions this
-  confident, 36 were correct"); everything else asks a QUESTION, because nothing
-  else here has ground truth behind it.
+  ticked. Uncalibrated lists ask a QUESTION, because they have no ground truth.
 * **Whole pages, losslessly.** See :mod:`mole.review.images` — thumbnails are too
   fuzzy to judge letterforms and lossy coding is *bigger* on bilevel scans.
 * **One file.** Images are inlined, so there is no folder to keep alongside it and
   nothing to break when it is emailed.
+* **labels.csv is the reference.** Suggested attributions never overwrite it.
+* **Cosine distances are always on screen.** Similarity is the retrieval metric;
+  the reviewer sees ``1 - cosine`` to the visible neighbour and to the hand
+  (mean of the two closest pages).
 """
 
 from __future__ import annotations
@@ -25,27 +29,18 @@ from pathlib import Path
 
 import numpy as np
 
-# how many suggestions per list end up in the sheet (D1: ~180 documents, ~10 MB)
+# how many other pages of the recorded hand the reviewer can flip through
+CLASS_NEIGHBOR_CAP = 12
 DEFAULT_LIMIT = 25
 DEFAULT_MAX_MB = 10.0
 
 _SECTIONS = [
-    ("attributions", "Unattributed charters that match a known hand",
-     "Each of these has no scribe recorded, but its handwriting matches one that does."),
-    ("doubts", "Recorded attributions worth re-checking",
-     "These charters are recorded under one scribe but sit closer to another."),
-    ("merges", "Two names that may be one scribe",
-     "The charters under these two names are as alike as each name is to itself."),
-    ("splits", "One name that may cover two scribes",
-     "The charters under this name fall into two groups that do not resemble each other."),
-    ("new_hands", "Groups of unattributed charters that hang together",
-     "None of these match a recorded scribe, but they closely match each other — "
-     "possibly one hand nobody has named yet."),
-    ("duplicates", "The same charter twice?",
-     "These pairs are nearly identical images filed under different names."),
-    ("isolated", "Unlike anything else",
-     "These resemble nothing in the collection — often blank pages, covers or "
-     "photographs of something other than a charter."),
+    ("outliers", "False positives",
+     "Does this charter belong with the scribe it is recorded under?"),
+    ("attributions", "False negatives",
+     "Does this unattributed charter belong with a known scribe?"),
+    ("new_hands", "New hands",
+     "Do these unattributed charters form a scribe who is not yet named?"),
 ]
 
 
@@ -76,31 +71,139 @@ def _safe(v) -> float:
         return 0.0
 
 
+def _l2(X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=np.float32)
+    nrm = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / np.maximum(nrm, 1e-12)
+
+
+def _class_neighbors(Xn: np.ndarray, query: int, members: list[int],
+                     doc_ids: list | np.ndarray,
+                     cap: int = CLASS_NEIGHBOR_CAP
+                     ) -> tuple[list[int], list[int], list[float], list[float]]:
+    """Other pages of the hand, closest-to-query and furthest-to-query.
+
+    Sibling scans of the query are not comparison material (they are the same
+    charter). Returns indices plus the cosine *similarity* of each to the query.
+    """
+    qdoc = str(doc_ids[query])
+    others = [j for j in members if j != query and str(doc_ids[j]) != qdoc]
+    if not others:
+        others = [j for j in members if j != query]
+    if not others:
+        return [], [], [], []
+    sims = np.asarray(Xn[query] @ Xn[np.asarray(others)].T, dtype=np.float64)
+    order = np.argsort(-sims)
+    ranked = [int(others[i]) for i in order]
+    ranked_sims = [float(sims[i]) for i in order]
+    close, far = ranked[:cap], list(reversed(ranked))[:cap]
+    csim, fsim = ranked_sims[:cap], list(reversed(ranked_sims))[:cap]
+    return close, far, csim, fsim
+
+
+def _neighbor_pack(Xn, query: int, member_idx: list[int], doc_ids) -> dict:
+    """Closest/furthest pages of a hand, with cosine similarity and distance."""
+    closest, furthest, csim, fsim = [], [], [], []
+    if Xn is not None and doc_ids is not None and member_idx:
+        closest, furthest, csim, fsim = _class_neighbors(
+            Xn, query, [int(j) for j in member_idx], doc_ids)
+    if not closest:
+        closest = [int(j) for j in member_idx if int(j) != query][:CLASS_NEIGHBOR_CAP]
+        furthest = list(reversed(closest))
+        if Xn is not None and closest:
+            q = Xn[query]
+            csim = [float(q @ Xn[j]) for j in closest]
+            fsim = list(reversed(csim))
+        else:
+            csim = fsim = [0.0] * len(closest)
+    closest = [int(j) for j in closest]
+    furthest = [int(j) for j in furthest]
+    return {
+        "closest": closest,
+        "furthest": furthest,
+        "closest_cos": [float(x) for x in csim],
+        "furthest_cos": [float(x) for x in fsim],
+        "closest_dist": [float(1.0 - x) for x in csim],
+        "furthest_dist": [float(1.0 - x) for x in fsim],
+        "n_other": len(closest),
+    }
+
+
 def _rows_for(kind: str, items: list[dict], members: dict[str, list[int]],
-              cal: dict, name_of: list[str]) -> list[dict]:
+              cal: dict, name_of: list[str], *, Xn=None, doc_ids=None) -> list[dict]:
     """One UI row per suggestion: what to say, what to light up, what to show."""
     rows = []
     for n, it in enumerate(items):
         r = {"kind": kind, "id": f"{kind}-{n}", "numbers": ""}
-        if kind == "attributions":
+        if kind == "outliers":
             hand = it["hand"]
-            support = members.get(hand, [])[:3]
-            r.update(title=f"{it['document']} → <b>{escape(_short(hand))}</b>",
-                     text=_confidence_sentence(it.get("calibrated_p"), cal),
-                     focus=[it["row"]], docs=[it["row"], *support],
+            short = _short(hand)
+            pack = _neighbor_pack(Xn, int(it["row"]), members.get(hand, []), doc_ids)
+            closer = it.get("closer_hand")
+            closer_score = it.get("closer_score")
+            hand_cos = float(it["own_score"])
+            text = (f"Compare the left page with other pages already recorded as {short}. "
+                    f"Keep if it is the same scribe. Reject if that recorded name should "
+                    f"not stand (the charter is then unattributed; nothing is reassigned). "
+                    f"Not sure if you cannot decide.")
+            qrow = int(it["row"])
+            r.update(title=escape(it["document"]),
+                     text=text,
+                     ask=f"Does this charter belong with hand {short}?",
+                     keep_hint="Same scribe · 1",
+                     reject_hint="Unattribute · 2",
+                     query_kicker="Charter in question",
+                     hand_role="recorded",
+                     csv_kind="false_positive",
+                     focus=[qrow], docs=[qrow, *pack["closest"], *pack["furthest"]],
+                     document=it["document"], hand=short,
+                     n_class=int(len(members.get(hand, []))),
+                     hand_cos=hand_cos, hand_dist=float(1.0 - hand_cos),
+                     z=float(it["z"]),
+                     closer_hand=_short(closer) if closer else None,
+                     closer_dist=(None if closer_score is None
+                                  else float(1.0 - float(closer_score))),
+                     calibrated_p=None, runner_up=None, runner_dist=None,
+                     numbers=f"z {it['z']:.2f}, own {it['own_score']:.3f}"
+                             + (f", closer {_short(closer)} gap {it['gap']:.3f}"
+                                if closer else ""),
+                     **pack)
+        elif kind == "attributions":
+            hand = it["hand"]
+            short = _short(hand)
+            pack = _neighbor_pack(Xn, int(it["row"]), members.get(hand, []), doc_ids)
+            hand_cos = float(it["score"])
+            p = it.get("calibrated_p")
+            conf = _confidence_sentence(p, cal)
+            text = (f"This charter has no recorded scribe. Compare it with pages of "
+                    f"hand {short}. Keep to attribute it to {short}. Reject to leave "
+                    f"it unattributed (nothing else is assigned). Not sure if you "
+                    f"cannot decide. {conf}")
+            qrow = int(it["row"])
+            runner = it.get("runner_up")
+            runner_score = it.get("runner_up_score")
+            r.update(title=f"{it['document']} → {escape(short)}",
+                     text=text,
+                     ask=f"Does this unattributed charter belong with hand {short}?",
+                     keep_hint="Attribute to this hand · 1",
+                     reject_hint="Leave unattributed · 2",
+                     query_kicker="Unattributed charter",
+                     hand_role="proposed",
+                     csv_kind="false_negative",
+                     focus=[qrow], docs=[qrow, *pack["closest"], *pack["furthest"]],
+                     document=it["document"], hand=short,
+                     n_class=int(len(members.get(hand, []))),
+                     hand_cos=hand_cos, hand_dist=float(1.0 - hand_cos),
+                     z=float(it.get("join_z") or 0.0),
+                     closer_hand=None, closer_dist=None,
+                     calibrated_p=(None if p is None else float(p)),
+                     runner_up=_short(runner) if runner else None,
+                     runner_dist=(None if runner_score is None
+                                  else float(1.0 - float(runner_score))),
                      numbers=f"score {it['score']:.3f}, margin "
                              f"{(it['margin'] or 0):.3f}, {it['n_support']} charters "
-                             f"under this hand")
-        elif kind == "doubts":
-            hand, other = it["hand"], it["closer_hand"]
-            support = members.get(other, [])[:2] + members.get(hand, [])[:2]
-            r.update(title=f"{it['document']} — recorded as <b>{escape(_short(hand))}</b>, "
-                           f"resembles <b>{escape(_short(other))}</b>",
-                     text="Worth a second look: this charter sits closer to the other "
-                          "scribe's work than to the one it is filed under.",
-                     focus=[it["row"]], docs=[it["row"], *support],
-                     numbers=f"own {it['own_score']:.3f} vs {it['closer_score']:.3f} "
-                             f"(gap {it['gap']:.3f})")
+                             f"under this hand",
+                     **pack)
         elif kind == "merges":
             a, b = it["hand_a"], it["hand_b"]
             r.update(title=f"<b>{escape(_short(a))}</b> and <b>{escape(_short(b))}</b>",
@@ -123,12 +226,50 @@ def _rows_for(kind: str, items: list[dict], members: dict[str, list[int]],
                      groups=[it["rows_a"], it["rows_b"]],
                      numbers=f"separation {it['separation']:.3f}, percentile {pct:.0f}")
         elif kind == "new_hands":
-            r.update(title=f"{it['n_docs']} charters that match each other",
-                     text="None of these is attributed, and none matches a recorded "
-                          "scribe — they may be one hand that has not been named.",
-                     focus=it["rows"][:3], docs=it["rows"],
-                     numbers=f"cohesion {it['cohesion']:.3f} vs typical "
-                             f"{it['reference_cohesion']:.3f}")
+            # The cluster is a grid of pages with a checkbox each, ordered by
+            # distance to the medoid, so EVERY member ships (with the pairwise
+            # cosines, so the sheet can show each page's distance to the medoid).
+            cluster_rows = [int(i) for i in it["rows"]]
+            qrow = int(it.get("row", cluster_rows[0]))
+            pack = _neighbor_pack(Xn, qrow, cluster_rows, doc_ids)
+            if Xn is not None:
+                order = sorted(cluster_rows,
+                               key=lambda j: -float(Xn[qrow] @ Xn[j]))
+                sub = Xn[order] @ Xn[order].T          # indexed like ``members``
+                member_sim = [[float(v) for v in rowv] for rowv in sub]
+            else:
+                order = list(cluster_rows)
+                member_sim = [[1.0 if a == b else 0.0 for b in order]
+                              for a in order]
+            coh = float(it["cohesion"])
+            lvl = it.get("level") or "FINCH"
+            ari = it.get("ari")
+            text = (f"None of these {it['n_docs']} charters has a recorded scribe, and "
+                    f"the group does not overlap any named hand. Untick any page that "
+                    f"is not by the same scribe as the rest, then Confirm. Deselect all "
+                    f"and Confirm (or Reject) if this is not a hand at all. Click a page "
+                    f"to inspect it in the zoomable pane on the right.")
+            r.update(title=escape(it["document"]),
+                     text=text,
+                     ask=f"Which of these {it['n_docs']} unattributed charters are "
+                         f"one unnamed scribe?",
+                     keep_hint="Ticked = same scribe · 1",
+                     reject_hint="Not a hand: none of them · 2",
+                     query_kicker="Possible unnamed hand",
+                     hand_role="cluster",
+                     csv_kind="new_hand",
+                     focus=[qrow], docs=list(order),
+                     members=list(order), member_sim=member_sim,
+                     reference=qrow, group=f"new_hand_{n + 1}",
+                     document=it["document"], hand=f"new_hand_{n + 1}",
+                     n_class=int(it["n_docs"]),
+                     hand_cos=coh, hand_dist=float(1.0 - coh),
+                     z=0.0, closer_hand=None, closer_dist=None,
+                     calibrated_p=None, runner_up=None, runner_dist=None,
+                     numbers=(f"{it['n_docs']} pages, cohesion {coh:.3f} vs typical "
+                              f"{it['reference_cohesion']:.3f}, {lvl}"
+                              + (f" ARI {ari:.3f}" if ari is not None else "")),
+                     **pack)
         elif kind == "duplicates":
             r.update(title=f"{it['document_a']} ≈ {it['document_b']}",
                      text="These two images are nearly identical — probably the same "
@@ -171,7 +312,8 @@ def _nearest_neighbors(X: np.ndarray, k: int = 5) -> list[list[int]]:
 
 
 def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
-         names: list[str], size: int = 620, highlight_idx=None) -> str:
+         names: list[str], size: int = 620, highlight_idx=None,
+         highlight_labels: bool = True) -> str:
     """The map, with unlabeled documents crossed through as in ``mole viz``.
 
     The cross is a property of the DOCUMENT, not of the active colouring, so it is
@@ -208,10 +350,12 @@ def _svg(coords: np.ndarray, first_colors: list[str], base_cats: list[str],
         x, y = nx[i], ny[i]
         out.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="7.5" fill="none" '
-            f'stroke="{_HIGHLIGHT_STROKE}" stroke-width="2" pointer-events="none"/>'
-            f'<text x="{x + 9:.1f}" y="{y:.1f}" dominant-baseline="central" '
-            f'fill="{_HIGHLIGHT_STROKE}" font-size="10" font-weight="700" '
-            f'pointer-events="none">{escape(names[i])}</text>')
+            f'stroke="{_HIGHLIGHT_STROKE}" stroke-width="2" pointer-events="none"/>')
+        if highlight_labels:
+            out.append(
+                f'<text x="{x + 9:.1f}" y="{y:.1f}" dominant-baseline="central" '
+                f'fill="{_HIGHLIGHT_STROKE}" font-size="10" font-weight="700" '
+                f'pointer-events="none">{escape(names[i])}</text>')
     return (f'<svg id="map" viewBox="0 0 {size} {size}" width="{size}" '
             f'height="{size}">{"".join(out)}</svg>')
 
@@ -267,7 +411,7 @@ def _schemes(report, hands: list[str], paths, clusters) -> list[tuple[str, list[
     return out
 
 
-def _picker(schemes, scheme_data, hands, expert: bool = False) -> str:
+def _picker(schemes, scheme_data, hands) -> str:
     """Scheme dropdown + the show/hide-unlabeled toggle (both from `mole viz`)."""
     from mole.viz.scatter import _is_unlabeled
 
@@ -289,13 +433,78 @@ def _picker(schemes, scheme_data, hands, expert: bool = False) -> str:
     if n_unl:
         bits.append(f'<label><input type="checkbox" id="unl" checked> '
                     f'show unattributed <b>{n_unl}</b></label>')
-    # Reversed sense: ticking ADDS the review apparatus. Unticked is the bare
-    # map + charter viewer, which is what an expert wants by default.
-    checked = "" if expert else " checked"
-    bits.append('<label title="Show the suggestion lists below the map">'
-                f'<input type="checkbox" id="showlists"{checked}> '
-                'review suggestions</label>')
     return "".join(bits)
+
+
+def _render_cases(embeddings: Path, *, out, clusters, limit, max_mb, image_cache,
+                  image_url, images, cluster_method, seed,
+                  false_positives: bool = True) -> tuple[Path, str]:
+    """Case-by-case review sheet: no map, query vs recorded-hand exemplars.
+
+    ``false_positives=False`` drops that tab (a recorded identification is
+    rarely wrong in these archives, so some reviewers skip it).
+    """
+    from mole.review.images import ImageBudget
+    from mole.review.suggest import build_review, document_table
+
+    report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed,
+                          cluster_method=cluster_method, lists=True)
+    X, meta, rows_meta, names, paths, hands, docs = document_table(embeddings)
+    Xn = _l2(X)
+    members: dict[str, list[int]] = {}
+    for i, h in enumerate(hands):
+        if h:
+            members.setdefault(h, []).append(i)
+
+    sections = []
+    for kind, heading, blurb in _SECTIONS:
+        if kind == "outliers" and not false_positives:
+            continue
+        items = getattr(report, kind, [])[:limit]
+        rows = _rows_for(kind, items, members, report.calibration, names,
+                         Xn=Xn, doc_ids=docs)
+        sections.append((kind, heading, blurb, rows))
+
+    room = int(max_mb * 1024 * 1024) if max_mb else 0
+    budget = ImageBudget(room, cache_dir=image_cache)
+    if images:
+        wanted: list[int] = []
+        for _k, _h, _b, rws in sections:
+            for r in rws:
+                wanted.append(r["focus"][0] if r.get("focus") else r.get("docs", [None])[0])
+                wanted.extend(r.get("members") or [])     # new hands: every page
+                wanted.extend(r.get("closest") or [])
+                wanted.extend(r.get("furthest") or [])
+        seen = set()
+        for i in wanted:
+            if i is None or i in seen:
+                continue
+            seen.add(i)
+            budget.add(str(i), paths[i])
+
+    payload = {
+        "mode": "review",
+        "dims": {k: list(v) for k, v in budget.dims.items()},
+        "sections": [{"kind": k, "heading": h, "blurb": b, "rows": r}
+                     for k, h, b, r in sections],
+        "images": budget.uris,
+        "names": names,
+        "hands": [_short(h) for h in hands],
+        "urls": ([image_url.replace("{filename}", n) for n in names] if image_url
+                 else [p.resolve().as_uri() if p.is_file() else "" for p in paths]),
+        "n_documents": report.n_documents,
+        "n_labeled": report.n_labeled,
+        "n_hands": report.n_hands,
+    }
+    title = escape(", ".join(report.datasets) or "archive")
+    html = _CASE_HTML.replace("__TITLE__", title) \
+                     .replace("__ZOOM_CSS__", _ZOOM_CSS) \
+                     .replace("__ZOOM_JS__", _ZOOM_JS) \
+                     .replace("__PAYLOAD__", json.dumps(payload))
+    out_path = Path(out) if out else embeddings.with_suffix(".review.html")
+    out_path.write_text(html, encoding="utf-8")
+    mb = out_path.stat().st_size / (1024 * 1024)
+    return out_path, f"{budget.summary()} · {mb:.1f} MB total"
 
 
 def render_review(embeddings: str | Path, *, out: str | Path | None = None,
@@ -303,33 +512,46 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                   max_mb: float = DEFAULT_MAX_MB, image_cache: str | Path | None = None,
                   image_url: str | None = None, images: bool = True,
                   image_scope: str = "listed", map_backend: str = "auto",
-                  expert: bool = False, cluster_method: str = "both",
+                  mode: str = "review", cluster_method: str = "both",
                   method: str = "auto", seed: int = 0,
                   highlight: list[str] | None = None,
                   highlight_file: str | Path | None = None,
                   point_size: float = 9.0, pca_whiten: bool = True,
+                  pca_dim: int = 150,
                   umap_neighbors: int = 15, umap_min_dist: float = 0.1,
                   theme: str = "dark", show_labels: bool = False,
-                  neighbors: int = 5) -> tuple[Path, str]:
-    """Build the review / viz sheet. Returns ``(path, summary_line)``.
+                  neighbors: int = 5, false_positives: bool = True,
+                  highlight_labels: bool = True) -> tuple[Path, str]:
+    """Build the review sheet or the viz map. Returns ``(path, summary_line)``.
 
-    ``highlight`` / ``highlight_file`` ring specific documents (Sluis target
-    pattern). ``mole viz`` calls this in ``expert`` mode for the bare map + charter
-    viewer bipanel; the full review adds the suggestion lists. ``theme`` is ``dark``
+    ``mode="viz"`` is the map + charter viewer only (``mole viz``). ``mode="review"``
+    is a separate case-by-case file with no map (``mole review``). ``theme`` is ``dark``
     (review) or ``light`` (publication figure), toggleable live. ``show_labels``
     prints the active category id in each circle. ``neighbors`` is how many nearest
     charters to list under the viewer when a document is selected.
+    ``false_positives=False`` drops the false-positive tab from the review.
+    ``highlight_labels=False`` rings the highlighted charters without printing
+    their names on the map.
     """
     from mole.review.images import ImageBudget
     from mole.review.suggest import build_review, document_table
     from mole.viz.scatter import _is_highlighted, _parse_highlights, reduce_2d
 
+    mode = "viz" if str(mode).lower() == "viz" else "review"
     embeddings = Path(embeddings)
-    report = build_review(embeddings, clusters=clusters, limit=limit, seed=seed,
-                          cluster_method=cluster_method)
+    if mode == "review":
+        return _render_cases(
+            embeddings, out=out, clusters=clusters, limit=limit, max_mb=max_mb,
+            image_cache=image_cache, image_url=image_url, images=images,
+            cluster_method=cluster_method, seed=seed, false_positives=false_positives)
+
     X, meta, rows_meta, names, paths, hands, _docs = document_table(embeddings)
-    coords, used_method = reduce_2d(X, method, seed, pca_whiten=pca_whiten,
+    coords, used_method = reduce_2d(X, method, seed, pca_dim=pca_dim,
+                                    pca_whiten=pca_whiten,
                                     umap_neighbors=umap_neighbors, umap_min_dist=umap_min_dist)
+    report = build_review(
+        embeddings, clusters=clusters, limit=limit, lists=False,
+        cluster_method=cluster_method)
     schemes = _schemes(report, hands, paths, clusters)
 
     hl = _parse_highlights(highlight, highlight_file)
@@ -345,9 +567,9 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
             members.setdefault(h, []).append(i)
 
     sections = []
-    for kind, heading, blurb in _SECTIONS:
-        items = getattr(report, kind, [])[:limit]
-        if items:
+    if mode == "review":
+        for kind, heading, blurb in _SECTIONS:
+            items = getattr(report, kind, [])[:limit]
             sections.append((kind, heading, blurb,
                              _rows_for(kind, items, members, report.calibration, names)))
 
@@ -380,8 +602,8 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
         for _kind, _h, _b, rws in sections:
             for r in rws:
                 wanted.extend(r.get("docs", [])[:4])
-        if image_scope == "all":
-            # expert mode clicks arbitrary dots, so every document needs a page —
+        if image_scope == "all" or mode == "viz":
+            # viz clicks arbitrary dots, so every document needs a page —
             # still budget-capped, and still listed-documents-first.
             wanted.extend(range(len(names)))
         seen = set()
@@ -396,6 +618,7 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
     scheme_data = {n: _scheme_payload(c) for n, c in schemes}
     first = scheme_data[schemes[0][0]]
     payload = {
+        "mode": mode,
         "dims": {k: list(v) for k, v in budget.dims.items()},
         "schemes": {n: {"colors": p["colors"], "cats": p["cats"],
                         "legend": p["legend"]} for n, p in scheme_data.items()},
@@ -413,20 +636,23 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                 f"scribe · {report.n_hands} scribes · map: {used_method}")
 
     if use_bokeh:
-        bk_script, map_div, view_div, bk_css, bk_js = bokeh_map.build(
+        bk_script, map_div, bk_css, bk_js = bokeh_map.build(
             coords, names, [_short(h) for h in hands], first["colors"],
             highlight_idx=highlight_idx, point_size=point_size,
-            show_labels=show_labels, label_cats=schemes[0][1], theme=theme)
+            show_labels=show_labels, label_cats=schemes[0][1], theme=theme,
+            highlight_labels=highlight_labels)
         glue = bokeh_map.glue_js()
-        viewer_html = view_div
+        viewer_html = _ZOOM_VIEWER
     else:
         bk_script = map_div = bk_css = bk_js = ""
         map_div = _svg(coords, first["colors"], schemes[0][1], names,
-                       highlight_idx=highlight_idx)
+                       highlight_idx=highlight_idx, highlight_labels=highlight_labels)
         glue = _svg_glue_js()
-        viewer_html = '<img id="pageimg" style="display:none">' 
-    body_class = " ".join(c for c in (theme, "expert" if expert else "") if c)
+        viewer_html = _ZOOM_VIEWER
+    kind_title = "Embeddings" if mode == "viz" else "Hand review"
+    body_class = f"{theme}{'' if mode == 'review' else ' viz'}"
     html = _HTML.replace("__BODYCLASS__", body_class) \
+                .replace("__KIND__", kind_title) \
                 .replace("__THEMECHK__", " checked" if theme == "light" else "") \
                 .replace("__LABELCHK__", " checked" if show_labels else "") \
                 .replace("__PSIZE__", f"{float(point_size):.1f}") \
@@ -435,14 +661,19 @@ def render_review(embeddings: str | Path, *, out: str | Path | None = None,
                 .replace("__BOKEH_CSS__", bk_css) \
                 .replace("__MAP__", map_div) \
                 .replace("__VIEWER__", viewer_html) \
-                .replace("__PICKER__", _picker(schemes, scheme_data, hands, expert)) \
+                .replace("__PICKER__", _picker(schemes, scheme_data, hands)) \
                 .replace("__LEGEND__", first["legend"]) \
                 .replace("__PAYLOAD__", json.dumps(payload)) \
                 .replace("__BOKEH_JS__", bk_js) \
                 .replace("__BOKEH_SCRIPT__", bk_script) \
-                .replace("__MOLE_JS__", glue)
+                .replace("__MOLE_JS__", glue) \
+                .replace("__ZOOM_CSS__", _ZOOM_CSS) \
+                .replace("__ZOOM_JS__", _ZOOM_JS) \
+                .replace("__REVIEW_CHROME__", _REVIEW_CHROME if mode == "review" else "") \
+                .replace("__REVIEW_JS__", _REVIEW_JS if mode == "review" else "")
 
-    out_path = Path(out) if out else embeddings.with_suffix(".review.html")
+    out_path = Path(out) if out else embeddings.with_suffix(
+        ".viz.html" if mode == "viz" else ".review.html")
     out_path.write_text(html, encoding="utf-8")
     mb = out_path.stat().st_size / (1024 * 1024)
     return out_path, f"{budget.summary()} · {mb:.1f} MB total"
@@ -482,6 +713,7 @@ window.MOLE = (function(){
       if(!img) return;
       img.style.display = uri ? '' : 'none';
       if(uri) img.src = uri;
+      if(window.moleResetZoom) window.moleResetZoom(img.closest('.zoombox'));
     },
     onTap: function(cb){ tapcb = cb; },
     select: function(i){
@@ -523,9 +755,830 @@ window.MOLE = (function(){
 })();
 """
 
+
+_ZOOM_VIEWER = (
+    '<div class="zoombox" id="pagezoom" '
+    'title="Scroll to zoom, drag to pan, double-click to reset">'
+    '<div class="zoomstage"><img id="pageimg" alt=""></div></div>'
+)
+
+# Shared charter-viewer zoom: wheel to zoom on the cursor, drag to pan,
+# double-click to fit. Used by the review panes and the viz inspector.
+_ZOOM_CSS = r"""
+.zoombox{overflow:hidden;position:relative;touch-action:none;cursor:zoom-in;
+  background:#0b0b0d}
+.zoombox .zoomstage{transform-origin:0 0;width:100%;height:100%;
+  display:flex;align-items:center;justify-content:center;will-change:transform}
+.zoombox img{max-width:100%;max-height:100%;width:auto;height:auto;
+  object-fit:contain;display:block;user-select:none;-webkit-user-drag:none}
+.zoombox.zoomed{cursor:grab}
+.zoombox.dragging{cursor:grabbing}
+"""
+
+_ZOOM_JS = r"""
+window.moleResetZoom = function(box){
+  if(!box || !box._mz) return;
+  box._mz.s = 1; box._mz.x = 0; box._mz.y = 0;
+  box._mz.apply();
+};
+function bindZoom(box){
+  if(!box || box._mz) return;
+  var stage = box.querySelector('.zoomstage') || box;
+  var st = {s:1, x:0, y:0, drag:false, lx:0, ly:0};
+  st.apply = function(){
+    stage.style.transform = 'translate('+st.x+'px,'+st.y+'px) scale('+st.s+')';
+    box.classList.toggle('zoomed', st.s > 1.001);
+    if(!st.drag) box.classList.remove('dragging');
+  };
+  box._mz = st;
+  box.addEventListener('wheel', function(e){
+    e.preventDefault();
+    var r = box.getBoundingClientRect();
+    var mx = e.clientX - r.left, my = e.clientY - r.top;
+    var old = st.s;
+    var next = old * (e.deltaY < 0 ? 1.12 : 1/1.12);
+    st.s = Math.min(16, Math.max(1, next));
+    st.x = mx - (mx - st.x) * (st.s / old);
+    st.y = my - (my - st.y) * (st.s / old);
+    if(st.s === 1){ st.x = 0; st.y = 0; }
+    st.apply();
+  }, {passive:false});
+  box.addEventListener('pointerdown', function(e){
+    if(e.button !== 0 || st.s <= 1) return;
+    st.drag = true; st.lx = e.clientX; st.ly = e.clientY;
+    box.classList.add('dragging');
+    try{ box.setPointerCapture(e.pointerId); }catch(err){}
+  });
+  box.addEventListener('pointermove', function(e){
+    if(!st.drag) return;
+    st.x += e.clientX - st.lx; st.y += e.clientY - st.ly;
+    st.lx = e.clientX; st.ly = e.clientY;
+    st.apply();
+  });
+  function endDrag(){ st.drag = false; box.classList.remove('dragging'); }
+  box.addEventListener('pointerup', endDrag);
+  box.addEventListener('pointercancel', endDrag);
+  box.addEventListener('dblclick', function(e){
+    e.preventDefault();
+    window.moleResetZoom(box);
+  });
+  var img = box.querySelector('img');
+  if(img) img.addEventListener('load', function(){ window.moleResetZoom(box); });
+}
+document.querySelectorAll('.zoombox').forEach(bindZoom);
+"""
+
+_CASE_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hand review — __TITLE__</title>
+<style>
+:root{--bg:#121214;--panel:#1a1a1e;--elev:#24242a;--line:#32323a;--fg:#f0f0f4;
+  --dim:#9a9aa4;--accent:#7eb0ff;--accent-weak:rgba(126,176,255,.16);
+  --keep:#2f9e6a;--keep-d:#247a52;--reject:#e0554b;--reject-d:#b83d35}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+  background:var(--bg);color:var(--fg);display:flex;flex-direction:column;overflow:hidden}
+header{flex:0 0 auto;padding:12px 20px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+.top{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
+h1{font-size:15px;font-weight:650;margin:0;letter-spacing:-.02em;color:var(--dim)}
+.progress{margin:0;font-variant-numeric:tabular-nums;color:var(--fg);font-weight:650}
+.work{display:flex;flex-direction:column;gap:6px;min-width:min(420px,100%)}
+.workbar{height:10px;border-radius:99px;background:#2a2a32;overflow:hidden;border:1px solid var(--line)}
+.workfill{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;
+  transition:width .18s ease}
+.caseslider{width:100%;accent-color:var(--accent);cursor:pointer;margin:0;height:18px}
+.ask{font-size:22px;font-weight:700;margin:8px 0 4px;letter-spacing:-.03em}
+.how{color:var(--dim);margin:0 0 8px;max-width:78ch}
+.nums{margin:0 0 10px;font-variant-numeric:tabular-nums;font-size:13px;color:var(--fg);
+  display:flex;flex-wrap:wrap;gap:6px 14px}
+.nums b{font-weight:700}
+.nums .dim{color:var(--dim)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tabs button{background:var(--elev);color:var(--fg);border:1px solid var(--line);
+  border-radius:8px;padding:5px 11px;font:inherit;cursor:pointer}
+.tabs button.on{background:var(--accent-weak);border-color:var(--accent)}
+.tabs button:disabled{opacity:.4;cursor:not-allowed}
+main{flex:1 1 auto;min-height:0;display:flex}
+.pane{flex:1 1 50%;min-width:0;display:flex;flex-direction:column;padding:12px 16px 8px}
+.pane + .pane{border-left:1px solid var(--line)}
+.kicker{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--dim);margin:0 0 4px}
+.pane h2{font-size:16px;font-weight:700;margin:0 0 6px;letter-spacing:-.02em}
+.pane .meta{font-size:13px;color:var(--dim);margin:0 0 8px;word-break:break-all}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 8px}
+.sort{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--elev)}
+.sort button{background:transparent;color:var(--fg);border:0;padding:8px 14px;font:inherit;
+  cursor:pointer;margin:0}
+.sort button + button{border-left:1px solid var(--line)}
+.sort button.on{background:var(--accent-weak);font-weight:650}
+.flip{display:inline-flex;align-items:center;gap:6px}
+.flip button{background:var(--elev);color:var(--fg);border:1px solid var(--line);border-radius:9px;
+  padding:8px 14px;font:inherit;font-size:16px;cursor:pointer;min-width:44px}
+.flip button:hover,.flip button:focus-visible{border-color:var(--accent)}
+.flip .count{color:var(--dim);font-variant-numeric:tabular-nums;min-width:4.8em;text-align:center;font-weight:650}
+.dots{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.dots button{width:10px;height:10px;padding:0;border-radius:50%;border:0;background:#4a4a54;
+  cursor:pointer}
+.dots button.on{background:var(--accent);transform:scale(1.25)}
+.gridpane{flex:1 1 100%;min-width:0;display:flex;flex-direction:column;padding:12px 16px 8px}
+.pane[hidden],.gridpane[hidden]{display:none}
+.gridpane .tools{justify-content:space-between}
+.gridpane h2{font-size:16px;font-weight:700;margin:0;letter-spacing:-.02em}
+.gridwrap{flex:1;min-height:0;display:flex;gap:14px}
+.grid{flex:1 1 55%;min-width:0;min-height:0;overflow:auto;display:grid;gap:12px;align-content:start;
+  grid-template-columns:repeat(auto-fill,minmax(300px,1fr));padding:2px}
+.inspect{flex:1 1 45%;min-width:0;min-height:0;display:flex;flex-direction:column;
+  border-left:1px solid var(--line);padding-left:14px}
+.inspect .page{flex:1;min-height:0}
+.card{background:var(--panel);border:2px solid var(--line);border-radius:12px;padding:8px;
+  display:flex;flex-direction:column;gap:6px;cursor:pointer}
+.card.in{border-color:var(--keep)} .card.out{border-color:var(--reject);opacity:.62}
+.card.sel{box-shadow:0 0 0 3px var(--accent);opacity:1}
+.card .thumb{height:280px;background:#0b0b0d;border-radius:8px;overflow:hidden;
+  display:flex;align-items:center;justify-content:center}
+.card .thumb img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.card label{display:flex;align-items:center;gap:8px;font-weight:650;cursor:pointer}
+.card label input{width:18px;height:18px;accent-color:var(--keep);cursor:pointer}
+.card .cmeta{font-size:12px;color:var(--dim);word-break:break-all;margin:0}
+.card .badge{font-size:11px;color:var(--accent);font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.bar .selall{display:inline-flex;gap:6px} .bar .selall[hidden]{display:none}
+@media(max-width:1100px){.gridwrap{flex-direction:column}
+  .inspect{border-left:none;border-top:1px solid var(--line);padding:12px 0 0;min-height:45vh}}
+.page{flex:1;min-height:0;background:#0b0b0d;border:1px solid var(--line);border-radius:12px}
+__ZOOM_CSS__
+.ph{color:var(--dim);padding:24px;text-align:center}
+footer{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--line);
+  padding:12px 20px 14px;box-shadow:0 -10px 28px rgba(0,0,0,.28)}
+.dec{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-bottom:10px}
+.dec button[data-v]{flex:1 1 160px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:2px;font:inherit;font-size:20px;font-weight:750;padding:14px 18px;min-height:72px;
+  border-radius:14px;border:3px solid transparent;cursor:pointer;letter-spacing:-.02em}
+.dec button small{font-size:12px;font-weight:550;opacity:.9;letter-spacing:0}
+.dec .keep{background:var(--keep);color:#fff;border-color:var(--keep-d)}
+.dec .reject{background:var(--reject);color:#fff;border-color:var(--reject-d)}
+.dec .unsure{background:var(--elev);color:var(--fg);border-color:var(--line)}
+.dec button.on{box-shadow:0 0 0 3px var(--accent)}
+.dec .keep:hover,.dec .reject:hover{filter:brightness(1.07)}
+.dec .unsure:hover,.dec .unsure.on{border-color:var(--accent);background:var(--accent-weak)}
+.dec input{flex:1 1 180px;background:var(--elev);color:var(--fg);border:1px solid var(--line);
+  border-radius:12px;padding:12px 14px;font:inherit}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--dim);font-size:13px}
+.bar button{background:var(--elev);color:var(--fg);border:1px solid var(--line);border-radius:9px;
+  padding:7px 12px;font:inherit;cursor:pointer}
+.bar button:hover{border-color:var(--accent)}
+#tally b{color:var(--fg)}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+@media(max-width:860px){
+  body{overflow:auto} main{flex-direction:column;min-height:70vh}
+  .pane + .pane{border-left:none;border-top:1px solid var(--line)}
+  .pane{min-height:40vh}
+  .dec button[data-v]{flex:1 1 30%;min-width:0;min-height:64px;font-size:17px;padding:10px 8px}
+}
+</style></head><body>
+<header>
+  <div class="top">
+    <h1>Hand review — __TITLE__</h1>
+    <div class="work">
+      <div class="workbar" id="workbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="0" aria-label="Decisions in this tab">
+        <span class="workfill" id="workfill"></span>
+      </div>
+      <p class="progress" id="progress"></p>
+      <input type="range" class="caseslider" id="caseslider" min="1" max="1" value="1"
+             aria-label="Jump to case">
+    </div>
+  </div>
+  <p class="ask" id="ask">Look at one charter at a time.</p>
+  <p class="how" id="how">Left: the charter in question. Right: other pages of the relevant
+    hand. Scroll to zoom, drag to pan, double-click to reset. Closest = typical;
+    Furthest = the range.</p>
+  <p class="nums" id="nums"></p>
+  <nav class="tabs" id="tabs"></nav>
+</header>
+<main>
+  <section class="pane" id="querypane">
+    <p class="kicker">Charter in question</p>
+    <h2 id="qtitle">This page</h2>
+    <p class="meta" id="qmeta"></p>
+    <div class="page zoombox" title="Scroll to zoom, drag to pan, double-click to reset">
+      <div class="zoomstage"><img id="qimg" alt="charter in question"></div>
+    </div>
+  </section>
+  <section class="pane" id="exempane">
+    <p class="kicker" id="exkicker">Same recorded hand</p>
+    <h2><span id="exrole">Recorded as</span> <span id="exhand">—</span></h2>
+    <div class="tools">
+      <div class="sort" role="group" aria-label="Which neighbours to show">
+        <button type="button" id="sort-closest" class="on">Closest</button>
+        <button type="button" id="sort-furthest">Furthest</button>
+      </div>
+      <div class="flip">
+        <button type="button" id="prevEx" title="Previous neighbour (←)">←</button>
+        <span class="count" id="excount">—</span>
+        <button type="button" id="nextEx" title="Next neighbour (→)">→</button>
+      </div>
+      <div class="dots" id="exdots"></div>
+    </div>
+    <p class="meta" id="exmeta"></p>
+    <div class="page zoombox" id="expage" title="Scroll to zoom, drag to pan, double-click to reset">
+      <div class="zoomstage"><img id="eximg" alt="comparison charter"></div>
+    </div>
+  </section>
+  <section class="gridpane" id="gridpane" hidden>
+    <p class="kicker" id="gkicker">Possible unnamed hand</p>
+    <div class="tools">
+      <h2 id="gtitle">—</h2>
+      <span class="meta" id="gmeta"></span>
+    </div>
+    <div class="gridwrap">
+      <div class="grid" id="grid"></div>
+      <div class="inspect" id="ginsp">
+        <p class="kicker">Selected page — scroll to zoom, drag to pan, double-click to reset</p>
+        <h2 id="gititle">—</h2>
+        <p class="meta" id="gimeta"></p>
+        <div class="page zoombox" title="Scroll to zoom, drag to pan, double-click to reset">
+          <div class="zoomstage"><img id="giimg" alt="selected charter"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>
+  <div class="dec">
+    <button type="button" class="keep" data-v="keep" title="Keep (1)">Keep<small>Same scribe · 1</small></button>
+    <button type="button" class="reject" data-v="reject" title="Reject (2)">Reject<small>Unattribute · 2</small></button>
+    <button type="button" class="unsure" data-v="unsure" title="Not sure (3)">Not sure<small>Skip for now · 3</small></button>
+    <input type="text" id="note" placeholder="note (optional)">
+  </div>
+  <div class="bar">
+    <button type="button" id="prevCase">Previous case</button>
+    <button type="button" id="nextCase">Next case</button>
+    <span class="selall" id="selall" hidden>
+      <button type="button" id="selAll" title="Tick every page (a)">Select all</button>
+      <button type="button" id="selNone" title="Untick every page — confirming then rejects the hand (x)">Deselect all</button>
+    </span>
+    <span id="tally"></span>
+    <button type="button" id="dl">Download my decisions (CSV)</button>
+    <span>Never writes labels.csv · ←/→ flip pages · j/k cases · 1/2/3 decide · space tick · a/x all/none</span>
+  </div>
+</footer>
+<script>
+__ZOOM_JS__
+var D = __PAYLOAD__, decisions = {}, sel = {}, checks = {}, insp = {},
+    TAB = ((D.sections || [])[0] || {}).kind || 'attributions', selected = 0,
+    sort = 'closest', exi = 0;
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function section(){
+  var ss = D.sections || [];
+  for(var i=0;i<ss.length;i++) if(ss[i].kind === TAB) return ss[i];
+  return {rows:[], heading:''};
+}
+function rows(){ return section().rows || []; }
+function listFor(r){ return (sort === 'furthest' ? r.furthest : r.closest) || []; }
+function distFor(r){ return (sort === 'furthest' ? r.furthest_dist : r.closest_dist) || []; }
+function img(i){ return (D.images && D.images[i]) || ''; }
+function isGrid(r){ return !!(r && r.kind === 'new_hands' && r.members); }
+function nhKey(r, row){ return r.id + '#' + row; }
+function nhMembers(r){
+  // every page of the group, by distance to the most central page
+  var ri = r.members.indexOf(r.reference), out = [];
+  for(var k=0;k<r.members.length;k++){
+    var sim = (ri >= 0 && r.member_sim && r.member_sim[ri]) ? r.member_sim[ri][k] : 0;
+    out.push({row:r.members[k], dist:1 - sim, central:r.members[k] === r.reference});
+  }
+  out.sort(function(a,b){ return a.dist - b.dist; });
+  return out;
+}
+function nhChecks(r){
+  // ticked = same scribe. Defaults: the cluster's proposal (all ticked), or a
+  // recorded decision when the reviewer comes back to this case.
+  if(!checks[r.id]){
+    var c = {};
+    r.members.forEach(function(row){
+      var d = decisions[nhKey(r, row)];
+      c[row] = d ? (d.decision === 'keep') : true;
+    });
+    checks[r.id] = c;
+  }
+  return checks[r.id];
+}
+function nhDecided(r){
+  var n = 0;
+  for(var k=0;k<r.members.length;k++) if(decisions[nhKey(r, r.members[k])]) n++;
+  return {done:n, total:r.members.length};
+}
+function nhCount(r){
+  var c = nhChecks(r), n = 0;
+  r.members.forEach(function(row){ if(c[row]) n++; });
+  return n;
+}
+function nhInspected(r){ return (insp[r.id] != null) ? insp[r.id] : r.reference; }
+function inspect(r, row){
+  insp[r.id] = row;
+  var c = nhChecks(r), m = null;
+  nhMembers(r).forEach(function(x){ if(x.row === row) m = x; });
+  document.getElementById('gititle').textContent = D.names[row] || '—';
+  var url = (D.urls && D.urls[row]) || '';
+  document.getElementById('gimeta').innerHTML =
+    (c[row] ? 'Ticked: same scribe' : 'Unticked: not this scribe') +
+    (m && !m.central ? ' · cosine distance to the central page '+fmt(m.dist) : ' · the most central page') +
+    (url ? ' · <a href="'+esc(url)+'" target="_blank">open original</a>' : '') +
+    (!img(row) ? ' · <i>no image in this file</i>' : '');
+  var im = document.getElementById('giimg');
+  if(im.getAttribute('data-row') !== String(row)){
+    im.setAttribute('data-row', String(row));
+    showPage(im, row, null, null);
+    if(window.moleResetZoom) window.moleResetZoom(im.closest('.zoombox'));
+  }
+  document.querySelectorAll('#grid .card').forEach(function(card){
+    card.classList.toggle('sel', card.getAttribute('data-row') === String(row));
+  });
+}
+function inspectStep(delta){
+  var r = rows()[selected]; if(!isGrid(r)) return;
+  var M = nhMembers(r), cur = nhInspected(r), k = 0;
+  for(var i=0;i<M.length;i++) if(M[i].row === cur) k = i;
+  k = (k + delta + M.length) % M.length;
+  inspect(r, M[k].row);
+  var card = document.querySelector('#grid .card[data-row="'+M[k].row+'"]');
+  if(card && card.scrollIntoView) card.scrollIntoView({block:'nearest'});
+}
+function toggleInspected(){
+  var r = rows()[selected]; if(!isGrid(r)) return;
+  var c = nhChecks(r), row = nhInspected(r);
+  c[row] = !c[row];
+  render();
+}
+function renderGrid(r){
+  var box = document.getElementById('grid'), c = nhChecks(r);
+  box.innerHTML = '';
+  nhMembers(r).forEach(function(m){
+    var card = document.createElement('div');
+    card.className = 'card ' + (c[m.row] ? 'in' : 'out');
+    card.setAttribute('data-row', String(m.row));
+    var thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    var im = document.createElement('img');
+    var uri = img(m.row);
+    if(uri) im.src = uri;
+    im.alt = D.names[m.row] || '';
+    thumb.appendChild(im);
+    thumb.addEventListener('click', function(){ inspect(r, m.row); });
+    card.appendChild(thumb);
+    var lab = document.createElement('label');
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = !!c[m.row];
+    cb.addEventListener('change', function(){ c[m.row] = cb.checked; inspect(r, m.row); render(); });
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode('Same scribe'));
+    if(m.central){
+      var b = document.createElement('span'); b.className = 'badge';
+      b.textContent = '· most central'; lab.appendChild(b);
+    }
+    card.appendChild(lab);
+    var meta = document.createElement('p'); meta.className = 'cmeta';
+    var url = (D.urls && D.urls[m.row]) || '';
+    meta.innerHTML = esc(D.names[m.row]||'') +
+      (m.central ? '' : ' · distance to central '+fmt(m.dist)) +
+      (url ? ' · <a href="'+esc(url)+'" target="_blank">original</a>' : '') +
+      (!uri ? ' · <i>no image in this file</i>' : '');
+    card.appendChild(meta);
+    box.appendChild(card);
+  });
+  inspect(r, nhInspected(r));
+}
+function fmt(x){
+  if(x == null || x === '' || (typeof x === 'number' && !isFinite(x))) return '—';
+  return Number(x).toFixed(3);
+}
+function showPage(el, i, metaEl, dist){
+  if(i == null || i < 0){
+    el.removeAttribute('src'); el.alt = '';
+    if(window.moleResetZoom) window.moleResetZoom(el.closest('.zoombox'));
+    if(metaEl) metaEl.innerHTML = '';
+    return;
+  }
+  var uri = img(i);
+  el.src = uri || '';
+  el.alt = D.names[i] || '';
+  var url = (D.urls && D.urls[i]) || '';
+  if(metaEl) metaEl.innerHTML = esc(D.names[i]||'') +
+    (D.hands[i] ? ' · recorded as '+esc(D.hands[i]) : ' · unattributed') +
+    (dist != null ? ' · cosine distance '+fmt(dist) : '') +
+    (url ? ' · <a href="'+esc(url)+'" target="_blank">open original</a>' : '') +
+    (!uri ? ' · <i>no image in this file</i>' : '');
+}
+function renderDots(n, states){
+  var box = document.getElementById('exdots');
+  box.innerHTML = '';
+  for(var k=0;k<n;k++){
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = ((k===exi) ? 'on ' : '') + ((states && states[k]) || '');
+    b.title = 'Neighbour '+(k+1);
+    b.setAttribute('data-k', k);
+    b.addEventListener('click', function(){ exi = +this.getAttribute('data-k'); render(); });
+    box.appendChild(b);
+  }
+}
+function renderNums(r){
+  var box = document.getElementById('nums');
+  if(!r){ box.innerHTML = ''; return; }
+  var dists = distFor(r), L = listFor(r);
+  var bits = [];
+  if(L.length && dists && dists[exi] != null)
+    bits.push('<b>cosine distance to this page</b> '+fmt(dists[exi]));
+  bits.push('<span class="dim">to hand '+esc(r.hand)+' (top-2 mean)</span> '+fmt(r.hand_dist));
+  if(r.kind === 'outliers' && r.closer_hand)
+    bits.push('<span class="dim">closer to '+esc(r.closer_hand)+'</span> '+fmt(r.closer_dist));
+  if(r.kind === 'attributions' && r.runner_up)
+    bits.push('<span class="dim">next best '+esc(r.runner_up)+'</span> '+fmt(r.runner_dist));
+  if(isGrid(r)){
+    bits = [];
+    bits.push('<b>ticked</b> '+nhCount(r)+' of '+r.members.length);
+    bits.push('<span class="dim">group cohesion</span> '+fmt(r.hand_cos));
+    var s = nhDecided(r);
+    if(s.done) bits.push('<span class="dim">recorded</span> '+s.done+' / '+s.total);
+  }
+  else if(r.kind === 'new_hands')
+    bits.push('<span class="dim">cluster cohesion</span> '+fmt(r.hand_cos));
+  if(r.calibrated_p != null)
+    bits.push('<span class="dim">calibrated</span> '+Math.round(r.calibrated_p*100)+'%');
+  box.innerHTML = bits.join('<span class="dim"> · </span>');
+}
+function caseDecided(r){
+  if(isGrid(r)){ var s = nhDecided(r); return s.total === 0 || s.done >= s.total; }
+  return !!decisions[r.id];
+}
+function tabDecided(){
+  var n = 0, R = rows();
+  for(var i=0;i<R.length;i++) if(caseDecided(R[i])) n++;
+  return n;
+}
+function render(){
+  var R = rows(), r = R[selected];
+  var heading = (section().heading || 'this tab').toLowerCase();
+  var done = tabDecided(), left = Math.max(0, R.length - done);
+  var inner = '';
+  if(r && isGrid(r)){ inner = ' · <b>'+nhCount(r)+'</b> of <b>'+r.members.length+'</b> pages ticked'; }
+  document.getElementById('progress').innerHTML = R.length
+    ? ('Case <b>'+(selected+1)+'</b> of <b>'+R.length+'</b> · <b>'+done+'</b> decided · <b>'+left+'</b> left'+inner)
+    : ('No '+heading+' for this archive.');
+  var bar = document.getElementById('workbar');
+  var fill = document.getElementById('workfill');
+  var pct = R.length ? Math.round(100 * done / R.length) : 0;
+  if(bar){ bar.setAttribute('aria-valuenow', pct); bar.setAttribute('aria-valuemax', '100'); }
+  if(fill) fill.style.width = pct + '%';
+  var sl = document.getElementById('caseslider');
+  if(sl){
+    sl.disabled = !R.length;
+    sl.max = String(Math.max(1, R.length));
+    sl.value = String(R.length ? selected + 1 : 1);
+  }
+  if(!r){
+    document.getElementById('ask').textContent = 'Nothing to review in this tab.';
+    document.getElementById('how').textContent = '';
+    renderNums(null);
+    return;
+  }
+  document.getElementById('ask').textContent = r.ask || ('Does this charter belong with hand '+r.hand+'?');
+  document.getElementById('how').textContent = r.text;
+  document.getElementById('qtitle').textContent = r.document || 'This page';
+  document.getElementById('exhand').textContent = r.hand || '—';
+  document.getElementById('exrole').textContent = (r.hand_role === 'proposed')
+    ? 'Proposed as' : (r.hand_role === 'cluster' ? 'Possible unnamed hand' : 'Recorded as');
+  document.querySelector('#querypane .kicker').textContent = r.query_kicker || 'Charter in question';
+  var keepH = document.querySelector('.dec .keep small');
+  var rejH = document.querySelector('.dec .reject small');
+  if(keepH) keepH.textContent = r.keep_hint || 'Same scribe · 1';
+  if(rejH) rejH.textContent = r.reject_hint || 'Unattribute · 2';
+  document.getElementById('exkicker').textContent = (function(){
+    var who = (r.hand_role === 'cluster') ? 'this possible unnamed hand'
+                                         : ('pages of '+r.hand);
+    return (sort === 'furthest' ? 'Least' : 'Most')+' like this charter among '+who;
+  })();
+  var grid = isGrid(r);
+  document.getElementById('selall').hidden = !grid;
+  document.getElementById('querypane').hidden = grid;
+  document.getElementById('exempane').hidden = grid;
+  document.getElementById('gridpane').hidden = !grid;
+  if(grid){
+    document.getElementById('gtitle').textContent = r.hand || 'unnamed hand';
+    document.getElementById('gmeta').textContent = r.members.length+' unattributed pages · ordered by distance to the most central page';
+    renderGrid(r);
+    renderNums(r);
+    var first = decisions[nhKey(r, r.members[0])];
+    var state = first ? first.decision : '';
+    if(state === 'keep' || state === 'reject'){
+      // whole-group verdict: all rejected reads as "reject", otherwise "keep"
+      state = (nhDecided(r).done && r.members.every(function(row){
+        var d = decisions[nhKey(r, row)]; return d && d.decision === 'reject'; })) ? 'reject' : 'keep';
+    }
+    document.querySelectorAll('.dec button[data-v]').forEach(function(b){
+      b.classList.toggle('on', state === b.getAttribute('data-v'));
+    });
+    document.getElementById('note').value = (first && first.note) || '';
+    var nAllG = Object.keys(decisions).length;
+    document.getElementById('tally').innerHTML = nAllG ? ('<b>'+nAllG+'</b> recorded') : '';
+    return;
+  }
+  var qi = (r.focus||[])[0];
+  showPage(document.getElementById('qimg'), qi, null, null);
+  var qurl = (qi != null && D.urls && D.urls[qi]) || '';
+  var qlab = (r.hand_role === 'proposed') ? 'Unattributed · proposed as '
+           : (r.hand_role === 'cluster') ? 'Unattributed · reference page of '
+           : 'Recorded as ';
+  document.getElementById('qmeta').innerHTML = qlab+esc(r.hand||'—') +
+    (r.hand_dist != null ? ' · cosine distance to hand '+fmt(r.hand_dist) : '') +
+    (qurl ? ' · <a href="'+esc(qurl)+'" target="_blank">open original</a>' : '') +
+    ((qi == null || !img(qi)) ? ' · <i>no image in this file</i>' : '');
+  var L = listFor(r), dists = distFor(r), states = null;
+  var prevEx = document.getElementById('prevEx');
+  var nextEx = document.getElementById('nextEx');
+  if(!L.length){
+    exi = 0;
+    document.getElementById('excount').textContent = 'none';
+    document.getElementById('eximg').removeAttribute('src');
+    document.getElementById('exmeta').innerHTML = 'This hand has no other charter to compare against.';
+    renderDots(0);
+    prevEx.disabled = nextEx.disabled = true;
+  } else {
+    if(exi >= L.length) exi = 0;
+    if(exi < 0) exi = L.length - 1;
+    document.getElementById('excount').textContent = (exi+1)+' / '+L.length;
+    showPage(document.getElementById('eximg'), L[exi], document.getElementById('exmeta'), dists[exi]);
+    renderDots(L.length, states);
+    prevEx.disabled = nextEx.disabled = false;
+  }
+  renderNums(r);
+  var prev = decisions[r.id];
+  document.querySelectorAll('.dec button[data-v]').forEach(function(b){
+    b.classList.toggle('on', !!(prev && prev.decision === b.getAttribute('data-v')));
+  });
+  document.getElementById('note').value = (prev && prev.note) || '';
+  var nAll = Object.keys(decisions).length;
+  document.getElementById('tally').innerHTML = nAll ? ('<b>'+nAll+'</b> recorded') : '';
+}
+function decide(v){
+  var r = rows()[selected]; if(!r) return;
+  var note = document.getElementById('note').value || '';
+  if(isGrid(r)){
+    // keep = record the ticks (ticked pages keep, the rest reject);
+    // reject = none of them is a hand; unsure = every page unsure
+    var c = nhChecks(r);
+    if(v === 'reject') r.members.forEach(function(row){ c[row] = false; });
+    r.members.forEach(function(row){
+      var d = (v === 'unsure') ? 'unsure' : (c[row] ? 'keep' : 'reject');
+      decisions[nhKey(r, row)] = {kind:'new_hand', document:D.names[row]||'',
+                                  hand:r.hand||'', decision:d, note:note};
+    });
+    render();
+    if(v !== 'unsure' && selected < rows().length - 1){ select(selected + 1); }
+    return;
+  }
+  decisions[r.id] = {kind:r.csv_kind || r.kind, document:r.document||'',
+                     hand:r.hand||'', decision:v, note:note};
+  render();
+  if(v !== 'unsure' && selected < rows().length - 1){ select(selected + 1); }
+}
+function selectAll(on){
+  var r = rows()[selected]; if(!isGrid(r)) return;
+  var c = nhChecks(r);
+  r.members.forEach(function(row){ c[row] = !!on; });
+  render();
+}
+function select(i){
+  var R = rows();
+  if(!R.length){ selected = 0; render(); return; }
+  selected = Math.max(0, Math.min(R.length-1, i));
+  sel[TAB] = selected;
+  sort = 'closest'; exi = 0;
+  document.getElementById('sort-closest').classList.add('on');
+  document.getElementById('sort-furthest').classList.remove('on');
+  render();
+}
+function setTab(kind){
+  TAB = kind;
+  document.querySelectorAll('.tabs button[data-tab]').forEach(function(b){
+    b.classList.toggle('on', b.getAttribute('data-tab') === kind);
+  });
+  selected = sel[kind] || 0;
+  sort = 'closest'; exi = 0;
+  document.getElementById('sort-closest').classList.add('on');
+  document.getElementById('sort-furthest').classList.remove('on');
+  render();
+}
+(function(){
+  var nav = document.getElementById('tabs');
+  (D.sections || []).forEach(function(s){
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('data-tab', s.kind);
+    b.className = (s.kind === TAB) ? 'on' : '';
+    b.textContent = (s.heading || s.kind) + ' (' + (s.rows||[]).length + ')';
+    b.addEventListener('click', function(){ setTab(s.kind); });
+    nav.appendChild(b);
+  });
+})();
+document.getElementById('selAll').addEventListener('click', function(){ selectAll(true); });
+document.getElementById('selNone').addEventListener('click', function(){ selectAll(false); });
+
+document.getElementById('sort-closest').addEventListener('click', function(){
+  sort='closest'; exi=0;
+  document.getElementById('sort-closest').classList.add('on');
+  document.getElementById('sort-furthest').classList.remove('on');
+  render();
+});
+document.getElementById('sort-furthest').addEventListener('click', function(){
+  sort='furthest'; exi=0;
+  document.getElementById('sort-furthest').classList.add('on');
+  document.getElementById('sort-closest').classList.remove('on');
+  render();
+});
+document.getElementById('prevEx').addEventListener('click', function(){ exi -= 1; render(); });
+document.getElementById('nextEx').addEventListener('click', function(){ exi += 1; render(); });
+document.getElementById('prevCase').addEventListener('click', function(){ select(selected-1); });
+document.getElementById('nextCase').addEventListener('click', function(){ select(selected+1); });
+document.getElementById('caseslider').addEventListener('input', function(){
+  select(parseInt(this.value, 10) - 1);
+});
+document.querySelectorAll('.dec button[data-v]').forEach(function(b){
+  b.addEventListener('click', function(){ decide(b.getAttribute('data-v')); });
+});
+document.getElementById('note').addEventListener('input', function(){
+  var r = rows()[selected]; if(!r) return;
+  var v = this.value;
+  if(isGrid(r)){
+    r.members.forEach(function(row){ if(decisions[nhKey(r, row)]) decisions[nhKey(r, row)].note = v; });
+    return;
+  }
+  if(decisions[r.id]) decisions[r.id].note = v;
+});
+document.addEventListener('keydown', function(e){
+  var tag = (e.target && e.target.tagName) || '';
+  if(tag === 'INPUT' || tag === 'TEXTAREA') return;
+  var g = isGrid(rows()[selected]);
+  if(e.key === 'ArrowLeft'){ e.preventDefault(); if(g) inspectStep(-1); else { exi -= 1; render(); } }
+  if(e.key === 'ArrowRight'){ e.preventDefault(); if(g) inspectStep(1); else { exi += 1; render(); } }
+  if(e.key === ' ' && g){ e.preventDefault(); toggleInspected(); }
+  if(e.key === 'j' || e.key === 'n'){ e.preventDefault(); select(selected+1); }
+  if(e.key === 'k' || e.key === 'p'){ e.preventDefault(); select(selected-1); }
+  if(e.key === '1') decide('keep');
+  if(e.key === '2') decide('reject');
+  if(e.key === '3') decide('unsure');
+  if(e.key === 'a') selectAll(true);
+  if(e.key === 'x') selectAll(false);
+});
+document.getElementById('dl').addEventListener('click', function(){
+  var out = ['kind,document,hand,decision,note'];
+  Object.keys(decisions).forEach(function(k){
+    var d = decisions[k];
+    out.push([d.kind, d.document, d.hand, d.decision, d.note||''].map(function(v){
+      return '"'+String(v).replace(/"/g,'""')+'"';}).join(','));
+  });
+  var blob = new Blob([out.join('\n')], {type:'text/csv'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'decisions.csv'; a.click();
+});
+render();
+</script></body></html>
+"""
+
+_REVIEW_CHROME = r"""
+<div class="bar">
+  <button id="dl">Download my decisions (CSV)</button>
+  <label><input type="checkbox" id="nums"> show the numbers</label>
+  <span class="sub" id="tally"></span>
+  <span class="sub">Keep / Reject / Unsure — never writes labels.csv</span>
+</div>
+<nav class="tabs" id="tabs">
+  <button type="button" class="on" data-tab="outliers">False positives</button>
+  <button type="button" disabled title="Stage 2">False negatives</button>
+  <button type="button" disabled title="Stage 3">New hands</button>
+</nav>
+<div class="hsplit" id="hsplit" title="Drag to resize the panels"></div>
+<div class="panel dock" id="panel">
+  <div class="queue" id="queue"></div>
+  <div class="case" id="casepane"><div class="ph">Highest-confidence first. Select a case.</div></div>
+</div>
+"""
+
+_REVIEW_JS = r"""
+var TAB = 'outliers', selected = 0;
+var rowsByTab = {};
+(D.sections || []).forEach(function(sec){ rowsByTab[sec.kind] = sec.rows; });
+function currentRows(){ return rowsByTab[TAB] || []; }
+function renderQueue(){
+  var rows = currentRows();
+  var q = document.getElementById('queue');
+  if(!q) return;
+  if(!rows.length){
+    q.innerHTML = '<div class="ph">No false-positive suggestions for this archive.</div>';
+    return;
+  }
+  q.innerHTML = rows.map(function(r,i){
+    return '<div class="qrow'+(i===selected?' on':'')+'" data-i="'+i+'">'+
+           '<div class="t">'+r.title+'</div><div class="x">'+esc(r.text)+'</div>'+
+           '<div class="num">'+esc(r.numbers||'')+'</div></div>';
+  }).join('');
+  q.querySelectorAll('.qrow').forEach(function(el){
+    el.addEventListener('click', function(){ select(+el.getAttribute('data-i')); });
+  });
+}
+function renderCase(r){
+  var box = document.getElementById('casepane'); if(!box || !r) return;
+  var out = '<div class="x">'+r.text+'</div><div class="num">'+esc(r.numbers||'')+'</div>';
+  out += '<div class="imgs">';
+  var list = (r.focus||[]).concat(r.docs||[]), seen = {}, shown = 0;
+  for(var n=0;n<list.length && shown<4;n++){
+    var i = list[n]; if(seen[i]) continue; seen[i] = 1;
+    if(!D.images[i]) continue;
+    out += '<figure><img loading="lazy" src="'+D.images[i]+'">'+
+           '<figcaption>'+esc(D.names[i])+
+           (D.hands[i] ? ' — '+esc(D.hands[i]) : ' — not attributed')+
+           (shown===0 ? ' — subject' : ' — recorded hand')+
+           '</figcaption></figure>';
+    shown++;
+  }
+  out += '</div>';
+  out += '<div class="dec">'+
+    '<button data-v="keep">Keep</button>'+
+    '<button data-v="reject">Reject</button>'+
+    '<button data-v="unsure">Unsure</button>'+
+    '<input type="text" placeholder="note (optional)">'+
+    '<span class="sub">j/k next · 1 keep · 2 reject · 3 unsure</span></div>';
+  box.innerHTML = out;
+  var prev = decisions[r.id];
+  box.querySelectorAll('button[data-v]').forEach(function(b){
+    if(prev && prev.decision === b.getAttribute('data-v')) b.classList.add('on');
+    b.addEventListener('click', function(){
+      decide(r, b.getAttribute('data-v'), box.querySelector('input').value);
+      renderCase(r);
+    });
+  });
+  var note = box.querySelector('input');
+  if(prev) note.value = prev.note || '';
+  note.addEventListener('input', function(){
+    if(decisions[r.id]) decisions[r.id].note = note.value;
+  });
+}
+function decide(r, v, note){
+  decisions[r.id] = {kind:'false_positive', document:r.document||'',
+                     hand:r.hand||'', decision:v, note:note||''};
+  tally();
+}
+function select(i){
+  var rows = currentRows();
+  if(!rows.length) return;
+  selected = Math.max(0, Math.min(rows.length-1, i));
+  var r = rows[selected];
+  light(r);
+  if((r.focus||[]).length) showDoc(r.focus[0]);
+  renderQueue();
+  renderCase(r);
+}
+function tally(){
+  var el = document.getElementById('tally');
+  if(!el) return;
+  var n = Object.keys(decisions).length;
+  el.textContent = n ? n + ' recorded' : '';
+}
+renderQueue();
+if(currentRows().length) select(0);
+document.addEventListener('keydown', function(e){
+  var tag = (e.target && e.target.tagName) || '';
+  if(tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if(e.key === 'j' || e.key === 'ArrowDown'){ e.preventDefault(); select(selected+1); }
+  if(e.key === 'k' || e.key === 'ArrowUp'){ e.preventDefault(); select(selected-1); }
+  var rows = currentRows();
+  if(!rows.length) return;
+  if(e.key === '1') decide(rows[selected], 'keep', '');
+  if(e.key === '2') decide(rows[selected], 'reject', '');
+  if(e.key === '3') decide(rows[selected], 'unsure', '');
+  if(e.key === '1' || e.key === '2' || e.key === '3') renderCase(rows[selected]);
+});
+var nums = document.getElementById('nums');
+if(nums) nums.addEventListener('change', function(e){
+  document.body.classList.toggle('nums', e.target.checked);
+});
+var dl = document.getElementById('dl');
+if(dl) dl.addEventListener('click', function(){
+  var out = ['kind,document,hand,decision,note'];
+  Object.keys(decisions).forEach(function(k){
+    var d = decisions[k];
+    out.push([d.kind, d.document, d.hand, d.decision, d.note||''].map(function(v){
+      return '"'+String(v).replace(/"/g,'""')+'"';}).join(','));
+  });
+  var blob = new Blob([out.join('\n')], {type:'text/csv'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'decisions.csv'; a.click();
+});
+"""
+
 _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Scribe review — __TITLE__</title>
+<title>__KIND__ — __TITLE__</title>
 <style>__BOKEH_CSS__</style>
 <style>
  /* Cursor-app feel: near-black canvas, quiet elevated panels, one cool accent,
@@ -591,7 +1644,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     map and the charter fill the window instead of a hard-coded pixel box. */
  .card.figbox{height:var(--fig-h);min-height:180px;overflow:hidden}
  .card.figbox>div{width:100%;height:100%}
- body.expert{--fig-h:84vh}
+ body.viz{--fig-h:84vh}
  /* publication light theme (toggle): same layout, inverted palette */
  body.light{--bg:#f6f7f9;--panel:#ffffff;--elev:#ffffff;--line:#e2e5ea;
    --fg:#1a1c22;--dim:#5b616e;--accent:#2563eb;--accent-weak:rgba(37,99,235,.10);
@@ -635,43 +1688,37 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
  .inspect .figwrap{height:calc(var(--fig-h) - 54px);min-height:126px;
    border-radius:10px;overflow:hidden;background:var(--bg)}
  .inspect .figwrap>div{width:100%;height:100%}
- #pageimg{width:100%;max-height:70vh;object-fit:contain;border-radius:8px;background:#0c0c0e}
- .panel{display:flex;flex-direction:column;gap:10px;width:100%;margin-top:16px}
- body.expert .panel,body.expert .bar{display:none}
- details.sec{border:1px solid var(--line);border-radius:13px;background:var(--panel);
-   box-shadow:var(--shadow);overflow:hidden}
- details.sec>summary{cursor:pointer;padding:11px 14px;font-weight:600;list-style:none;
-   transition:background .12s ease}
- details.sec>summary:hover{background:var(--accent-weak)}
- details.sec>summary::-webkit-details-marker{display:none}
- .count{background:var(--accent-weak);color:var(--accent);border-radius:20px;
-   padding:1px 9px;font-size:11.5px;margin-left:7px;font-weight:600}
- .blurb{padding:0 14px 9px;font-size:12.5px;color:var(--dim)}
- .row{padding:9px 14px;border-top:1px solid var(--line);cursor:pointer;transition:background .1s}
- .row:hover{background:var(--accent-weak)}
- .row .t{font-size:13.5px} .row .x{font-size:12.5px;color:var(--dim)}
- .row .num{font-size:11.5px;color:var(--dim);font-family:ui-monospace,monospace;display:none}
- body.nums .row .num{display:block}
- .detail{display:none;padding:8px 0 4px} .row.open .detail{display:block}
+ .inspect .figwrap .zoombox{width:100%;height:100%;border-radius:10px}
+__ZOOM_CSS__
+ .tabs{display:flex;gap:6px;margin:14px 0 8px;flex-wrap:wrap}
+ .tabs button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+ .tabs button:disabled{opacity:.45;cursor:not-allowed}
+ .panel.dock{display:flex;gap:14px;width:100%;margin-top:8px;align-items:flex-start}
+ .queue{flex:0 0 34%;min-width:220px;max-height:52vh;overflow:auto;border:1px solid var(--line);
+   border-radius:13px;background:var(--panel);box-shadow:var(--shadow)}
+ .case{flex:1 1 66%;min-width:240px;border:1px solid var(--line);border-radius:13px;
+   background:var(--panel);box-shadow:var(--shadow);padding:12px 14px}
+ .qrow{padding:9px 12px;border-top:1px solid var(--line);cursor:pointer;transition:background .1s}
+ .qrow:first-child{border-top:none}
+ .qrow:hover,.qrow.on{background:var(--accent-weak)}
+ .qrow .t{font-size:13.5px} .qrow .x,.case .x{font-size:12.5px;color:var(--dim)}
+ .qrow .num,.case .num{font-size:11.5px;color:var(--dim);font-family:ui-monospace,monospace;display:none}
+ body.nums .qrow .num,body.nums .case .num{display:block}
  .imgs{display:flex;flex-direction:column;gap:8px;margin:8px 0}
  .imgs figure{margin:0} .imgs img{width:100%;border:1px solid var(--line);border-radius:9px}
  .imgs figcaption{font-size:12px;color:var(--dim)}
  .dec{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
  .dec button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
  .dec input{flex:1;min-width:150px}
+ @media(max-width:900px){.panel.dock{flex-direction:column}.queue{flex:1 1 auto;max-height:28vh;width:100%}}
  .dot{stroke:#0006;stroke-width:.5} .dot.sel{stroke:var(--accent);stroke-width:2}
  svg#map{background:var(--bg);border:1px solid var(--line);border-radius:13px;
    width:100%;height:auto}
  @media(max-width:900px){.wrap{flex-direction:column;gap:12px}
    .mapcol,.viewcol{flex:1 1 auto !important;width:100%}.split{display:none}}
 </style></head><body class="__BODYCLASS__">
-<h1>Scribe review — __TITLE__</h1>
+<h1>__KIND__ — __TITLE__</h1>
 <div class="sub">__SUBTITLE__</div>
-<div class="bar">
-  <button id="dl">Download my decisions (CSV)</button>
-  <label><input type="checkbox" id="nums"> show the numbers</label>
-  <span class="sub" id="tally"></span>
-</div>
 <div class="ctl">
   <label title="Publication light background"><input type="checkbox" id="theme"__THEMECHK__> light theme</label>
   <label title="Print the active category id inside each point"><input type="checkbox" id="labels"__LABELCHK__> class IDs</label>
@@ -693,11 +1740,11 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     </div>
   </div>
 </div>
-<div class="hsplit" id="hsplit" title="Drag to resize the panels"></div>
-<div class="panel" id="panel"></div>
+__REVIEW_CHROME__
 <script>__BOKEH_JS__</script>
 __BOKEH_SCRIPT__
 <script>__MOLE_JS__</script>
+<script>__ZOOM_JS__</script>
 <script>
 var D = __PAYLOAD__, decisions = {}, active = D.first, N = D.names.length;
 var isolatedCat = null;                // category click-isolated (hull + dimmed others)
@@ -969,84 +2016,5 @@ function syncUnl(){
   for(var j=0;j<keys.length;j++) keys[j].classList.toggle('off', !vis);
 }
 if(unl) unl.addEventListener('change', syncUnl);
-var showLists = document.getElementById('showlists');
-if(showLists) showLists.addEventListener('change', function(){
-  document.body.classList.toggle('expert', !showLists.checked);
-  window.dispatchEvent(new Event('resize'));   // the figures grow/shrink with it
-});
-
-var panel = document.getElementById('panel');
-D.sections.forEach(function(sec){
-  var d = document.createElement('details'); d.className = 'sec';
-  var rowsHtml = sec.rows.map(function(r){
-    return '<div class="row" data-id="'+r.id+'"><div class="t">'+r.title+'</div>'+
-           '<div class="x">'+esc(r.text)+'</div><div class="num">'+esc(r.numbers||'')+'</div>'+
-           '<div class="detail"></div></div>';
-  }).join('');
-  d.innerHTML = '<summary>'+esc(sec.heading)+'<span class="count">'+sec.rows.length+
-                '</span></summary><div class="blurb">'+esc(sec.blurb)+'</div>'+rowsHtml;
-  panel.appendChild(d);
-  var map = {}; sec.rows.forEach(function(r){ map[r.id] = r; });
-  d.querySelectorAll('.row').forEach(function(el){
-    var r = map[el.getAttribute('data-id')];
-    el.addEventListener('mouseenter', function(){ light(r); });
-    el.addEventListener('mouseleave', unlight);
-    el.addEventListener('click', function(ev){
-      if(ev.target.closest('.dec') || ev.target.tagName === 'A') return;
-      if((r.focus||[]).length) showDoc(r.focus[0]);
-      var det = el.querySelector('.detail'), open = el.classList.toggle('open');
-      if(open && !det.innerHTML){
-        var out = '<div class="imgs">', shown = 0;
-        var list = (r.focus||[]).concat(r.docs||[]), seen = {};
-        for(var n=0;n<list.length && shown<4;n++){
-          var i = list[n]; if(seen[i]) continue; seen[i] = 1;
-          if(!D.images[i]) continue;
-          out += '<figure><img loading="lazy" src="'+D.images[i]+'">'+
-                 '<figcaption>'+esc(D.names[i])+
-                 (D.hands[i] ? ' — '+esc(D.hands[i]) : ' — not attributed')+
-                 '</figcaption></figure>';
-          shown++;
-        }
-        out += '</div>' + (shown ? '' : '<div class="x">(no images for this row)</div>');
-        det.innerHTML = out + '<div class="dec">' +
-          ['yes','no','unsure'].map(function(v){
-            return '<button data-v="'+v+'">'+(v==='yes'?'Looks right':
-                   v==='no'?'Not right':'Not sure')+'</button>';}).join('') +
-          '<input type="text" placeholder="note (optional)"></div>';
-        det.querySelectorAll('button').forEach(function(b){
-          b.addEventListener('click', function(){
-            det.querySelectorAll('button').forEach(function(o){o.classList.remove('on')});
-            b.classList.add('on');
-            decisions[r.id] = {kind:r.kind, title:r.title.replace(/<[^>]+>/g,''),
-                               decision:b.getAttribute('data-v'),
-                               note:det.querySelector('input').value};
-            tally();
-          });
-        });
-        det.querySelector('input').addEventListener('input', function(e){
-          if(decisions[r.id]) decisions[r.id].note = e.target.value;
-        });
-      }
-    });
-  });
-});
-if(D.sections.length) panel.querySelector('details').open = true;
-function tally(){
-  var n = Object.keys(decisions).length;
-  document.getElementById('tally').textContent = n ? n + ' recorded' : '';
-}
-document.getElementById('nums').addEventListener('change', function(e){
-  document.body.classList.toggle('nums', e.target.checked);
-});
-document.getElementById('dl').addEventListener('click', function(){
-  var out = [['kind','suggestion','decision','note'].join(',')];
-  Object.keys(decisions).forEach(function(k){
-    var d = decisions[k];
-    out.push([d.kind,d.title,d.decision,d.note||''].map(function(v){
-      return '"'+String(v).replace(/"/g,'""')+'"';}).join(','));
-  });
-  var blob = new Blob([out.join('\n')], {type:'text/csv'});
-  var a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = 'decisions.csv'; a.click();
-});
+__REVIEW_JS__
 </script></body></html>"""

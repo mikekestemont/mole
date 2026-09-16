@@ -9,7 +9,8 @@ def test_canonical_archive_matches_folder_variants():
     assert canonical_archive("antwerp-bin") == "antwerp"
     assert canonical_archive("flanders-set-bin") == "flanders"
     assert canonical_archive("brackley-2350") == "brackley"
-    assert canonical_archive("utrecht") == "utrecht"
+    assert canonical_archive("utrecht-charters") == "utrecht"
+    assert canonical_archive("utrecht-legacy") == "utrecht"
     assert canonical_archive("leroy-bin") == "leroy"
     assert canonical_archive("some-new-archive") == "?"
 
@@ -20,12 +21,23 @@ def test_doc_id_for_filename_rules():
     # Flanders: siblings share the leading number
     assert doc_id_for("134_2_RAGent K21_98.jpeg", "flanders-set-bin") == "134"
     assert doc_id_for("134_3_RAGent K21_98.jpeg", "flanders-set-bin") == "134"
-    # Utrecht: drop a trailing " adjusted"
-    assert doc_id_for("0985.06.26a adjusted.jpg", "utrecht") == "0985.06.26a"
+    # Utrecht / utrecht-charters: date-id, strip " adjusted" and scan notes
+    assert doc_id_for("0985.06.26a adjusted.jpg", "utrecht-charters") == "0985.06.26a"
+    assert doc_id_for("1131.08.23c boven adjusted.png", "utrecht-charters") == "1131.08.23c"
+    assert doc_id_for("1131.08.23c onder adjusted.png", "utrecht-charters") == "1131.08.23c"
+    assert doc_id_for("1247.08.08a-boven adjusted.png", "utrecht-charters") == "1247.08.08a"
     # Brackley: whole stem
     assert doc_id_for("Brackley_D4.jpg", "brackley-set") == "Brackley_D4"
     # Unknown archive: safe fallback to the whole stem (each image its own doc)
     assert doc_id_for("weird_name_1.tif", "mystery") == "weird_name_1"
+
+
+def test_utrecht_siblings_group_but_same_day_letters_do_not():
+    a = doc_id_for("1131.08.23c boven adjusted.png", "utrecht-charters")
+    b = doc_id_for("1131.08.23c onder adjusted.png", "utrecht-charters")
+    c = doc_id_for("1131.08.23a adjusted.jpg", "utrecht-charters")
+    assert a == b
+    assert a != c
 
 
 def test_flanders_siblings_group_but_distinct_charters_do_not():

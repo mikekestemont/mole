@@ -1,10 +1,11 @@
-"""Bokeh map + image viewer for the review sheet (dark, full-width, zoomable).
+"""Bokeh map for the embedding viz (dark, full-width, zoomable).
 
 Why Bokeh: wheel-zoom, box-zoom, pan and reset are the tools people already know
 from every plotting tool, and getting them right by hand in SVG is a lot of
-fiddly code that would still behave subtly differently. The charter viewer uses
-the *same* toolbar, so zooming into a hand on the map and zooming into the ink on
-the page feel identical.
+fiddly code that would still behave subtly differently.
+
+The charter itself is a plain HTML zoom pane (wheel / drag / double-click), not
+a second Bokeh figure — letterforms need pixel-true zoom, not a plot glyph.
 
 The cost is honest and worth stating: ``INLINE`` resources embed ~3.9 MB of
 BokehJS in the file. That is the price of staying a SINGLE offline document — a
@@ -13,16 +14,7 @@ train, which is exactly when a colleague reads it. :func:`bokehjs_bytes` reports
 the cost so the image budget can subtract it and ``--max-mb`` keeps meaning what
 it says.
 
-Two figures, one document:
-
-* **map** — one point per charter, coloured by the active scheme. Tap a point and
-  the viewer loads that page; hovering shows filename and hand.
-* **viewer** — the page as an ``image_url`` glyph in data space, so the same
-  zoom/pan tools apply and the aspect ratio is preserved.
-
-Both are driven from plain JS through ``window.MOLE`` (see :func:`glue_js`), so
-the suggestion lists — ordinary HTML — can recolour and highlight the map without
-Bokeh needing to know they exist.
+The map is driven from plain JS through ``window.MOLE`` (see :func:`glue_js`).
 """
 
 from __future__ import annotations
@@ -59,11 +51,14 @@ THEME = {
 
 
 def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float = 9.0,
-          show_labels: bool = False, label_cats=None, theme: str = "dark"):
-    """Return ``(script, map_div, view_div, css, js)`` ready to drop into a page.
+          show_labels: bool = False, label_cats=None, theme: str = "dark",
+          highlight_labels: bool = True):
+    """Return ``(script, map_div, css, js)`` ready to drop into a page.
 
     ``highlight_idx`` marks target documents with a thick red stroke + slightly
     larger marker on the main scatter (plus a stem label) — the Sluis pattern.
+    ``highlight_labels=False`` keeps the red ring but drops the name next to
+    it, for maps with many long-named targets where the labels drown the map.
     Highlights are NOT a second overlay circle: those used to sit on top and
     swallow taps. ``point_size`` sets the base marker size. ``show_labels``
     prints the active category id inside each circle (initial state; toggled
@@ -76,7 +71,6 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
         HoverTool,
         LabelSet,
         LassoSelectTool,
-        Range1d,
         TapTool,
     )
     from bokeh.plotting import figure
@@ -170,7 +164,7 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
     # stacked hollow ring used to sit on top and eat taps even with TapTool
     # pinned to ``r``.
     hi = list(highlight_idx or [])
-    if hi:
+    if hi and highlight_labels:
         hl_src = ColumnDataSource(dict(
             x=[xs[i] for i in hi], y=[ys[i] for i in hi],
             label=[f"  {names[i]}" for i in hi]), name="highlights")
@@ -180,29 +174,12 @@ def build(coords, names, hands, colors, *, highlight_idx=None, point_size: float
 
     tap.renderers = [r]
     lasso.renderers = [r]
-    # the viewer: an image in data space, so zoom/pan behave like the map
-    # every column must start empty: a url=[] beside x=[0] trips a BokehUserWarning
-    img = ColumnDataSource(dict(url=[], x=[], y=[], w=[], h=[]), name="page")
-    # match_aspect governs AUTO-ranging only; these ranges are set explicitly from
-    # the frame's pixel size in glue_js (`fit`), which is the only way to letterbox
-    # a page of arbitrary shape without distorting it.
-    v = figure(name="viewer", sizing_mode="stretch_both",
-               tools="pan,wheel_zoom,box_zoom,reset,save",
-               active_scroll="wheel_zoom", toolbar_location="above",
-               x_axis_location=None, y_axis_location=None,
-               background_fill_color=pal["bg"], border_fill_color=pal["bg"],
-               outline_line_color=pal["border"])
-    v.grid.grid_line_color = None
-    v.x_range = Range1d(0, 1)
-    v.y_range = Range1d(0, 1)
-    v.image_url(url="url", x="x", y="y", w="w", h="h", source=img,
-                anchor="top_left")
 
     bokeh_theme = built_in_themes["caliber" if theme == "light" else "dark_minimal"]
-    script, divs = components({"map": p, "view": v}, theme=bokeh_theme)
+    script, divs = components({"map": p}, theme=bokeh_theme)
     css = "\n".join(INLINE.css_raw)
     js = "\n".join(INLINE.js_raw)
-    return script, divs["map"], divs["view"], css, js
+    return script, divs["map"], css, js
 
 
 def glue_js() -> str:
@@ -216,15 +193,13 @@ def glue_js() -> str:
     return r"""
 window.MOLE = (function(){
   var THEME = __THEME__;
-  var scatter=null, page=null, viewer=null, mapf=null, classLabels=null;
+  var scatter=null, mapf=null, classLabels=null;
   var nnSeg=null, nnPts=null, hull=null;
   var ready=false, queue=[], baseSize=9;
   function grab(){
     if(!window.Bokeh || !Bokeh.documents || !Bokeh.documents.length) return false;
     var doc = Bokeh.documents[0];
     scatter     = doc.get_model_by_name('scatter');
-    page        = doc.get_model_by_name('page');
-    viewer      = doc.get_model_by_name('viewer');
     mapf        = doc.get_model_by_name('map');
     classLabels = doc.get_model_by_name('class_labels');
     nnSeg       = doc.get_model_by_name('nn_seg');
@@ -236,18 +211,10 @@ window.MOLE = (function(){
       baseSize = scatter.data.size[0] - hl0;
     }
     ready = true;
-    watchFrame();
     while(queue.length) queue.shift()();
     return true;
   }
   (function wait(n){ if(grab()||n>200) return; setTimeout(function(){wait(n+1)}, 50); })(0);
-  // the pane is resizable (the divider) — re-letterbox whenever the frame changes
-  function watchFrame(){
-    if(!viewer) return;
-    ['inner_width','inner_height'].forEach(function(prop){
-      viewer.properties[prop].change.connect(function(){ fit(); });
-    });
-  }
   function later(fn){ ready ? fn() : queue.push(fn); }
   // highlighted points are drawn slightly larger on the same scatter (no overlay ring)
   function sized(i, d, px){ return px + ((d.hl && d.hl[i]) ? 6 : 0); }
@@ -302,7 +269,7 @@ window.MOLE = (function(){
   function setTheme(dark){
     later(function(){
       var pal = dark ? THEME.dark : THEME.light;
-      [mapf, viewer].forEach(function(f){
+      [mapf].forEach(function(f){
         if(!f) return;
         f.background_fill_color = pal.bg;
         f.border_fill_color = pal.bg;
@@ -467,32 +434,12 @@ window.MOLE = (function(){
   function select(i){
     later(function(){ scatter.selected.indices = [i]; });
   }
-  var shownAspect = 1.0;
-  function fit(){
-    // The page occupies x 0..1 and y 0..ar in data space. To show it undistorted
-    // the DATA aspect must equal the FRAME's pixel aspect, so letterbox along
-    // whichever axis has room instead of stretching the image to the ranges.
-    if(!viewer) return;
-    var W = viewer.inner_width || 0, H = viewer.inner_height || 0;
-    if(!W || !H) return;
-    var P = H / W, ar = shownAspect;
-    if(ar > P){                       // page relatively taller: fit its height
-      var half = (ar / P) / 2;
-      viewer.x_range.start = 0.5 - half; viewer.x_range.end = 0.5 + half;
-      viewer.y_range.start = 0;          viewer.y_range.end = ar;
-    } else {                          // fit its width, centre it vertically
-      viewer.x_range.start = 0;          viewer.x_range.end = 1;
-      viewer.y_range.start = ar / 2 - P / 2;
-      viewer.y_range.end   = ar / 2 + P / 2;
-    }
-  }
   function showImage(uri, w, h){
-    later(function(){
-      if(!page) return;
-      shownAspect = (h && w) ? h / w : 1.0;
-      page.data = {url:[uri], x:[0], y:[shownAspect], w:[1], h:[shownAspect]};
-      fit();
-    });
+    var img = document.getElementById('pageimg');
+    if(!img) return;
+    img.style.display = uri ? '' : 'none';
+    if(uri) img.src = uri;
+    if(window.moleResetZoom) window.moleResetZoom(img.closest('.zoombox'));
   }
   function onTap(cb){
     later(function(){

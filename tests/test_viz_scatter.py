@@ -90,7 +90,7 @@ def test_nearest_neighbors_cosine_excludes_self():
 
 
 def test_review_svg_map_rings_highlights():
-    """The shared review map (used by ``mole viz``) rings highlighted indices."""
+    """The shared SVG map (used by ``mole viz``) rings highlighted indices."""
     from mole.review.render import _svg
 
     coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 0.5]], dtype=np.float32)

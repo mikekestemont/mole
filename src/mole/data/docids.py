@@ -11,8 +11,11 @@ below were resolved against the real filenames (see ``SUPERVISED_PLAN.md`` D3,
   counter; ``XX_XX`` marks an undated day/month and ``-NN`` ranks *distinct*
   undated charters, NOT scans of one charter). doc id = filename stem; no
   sibling collapsing.
-* **utrecht**  — one image per doc; doc id = stem minus a trailing
-  ``" adjusted"`` (all stems already unique).
+* **utrecht** / **utrecht-charters** — ``YYYY.MM.DDx`` is the charter
+  (letter distinguishes different acts on the same day). Strip a trailing
+  ``" adjusted"`` and any scan note (``boven``, ``onder``, ``detail``, …).
+  ``1131.08.23c boven`` and ``1131.08.23c onder`` → doc ``1131.08.23c``.
+  A dataset folder may still override with ``doc_ids.csv``.
 * **brackley** — one image per charter; doc id = stem.
 * **flanders** — ``<n>_<scan>_<shelfmark>``; siblings share the leading ``<n>``
   (e.g. ``134_2_RAGent K21_98`` and ``134_3_RAGent K21_98`` → doc ``134``).
@@ -29,13 +32,14 @@ metric (a safe no-op, never a false collapse).
 from __future__ import annotations
 
 import csv
+import re
 from collections.abc import Callable
 from pathlib import Path
 
 DOC_IDS_FILENAME = "doc_ids.csv"
 
 # substring of the dataset folder name -> canonical archive key. Folder names
-# vary (antwerp-bin, flanders-set-bin, brackley-2350, utrecht, leroy-bin), so we
+# vary (antwerp-bin, flanders-set-bin, brackley-2350, utrecht-charters, leroy-bin), so we
 # match on a stable substring rather than the exact name.
 _ARCHIVE_ALIASES: tuple[tuple[str, str], ...] = (
     ("antwerp", "antwerp"),
@@ -47,6 +51,9 @@ _ARCHIVE_ALIASES: tuple[tuple[str, str], ...] = (
 
 # archives whose doc id comes from a labels.csv column, not the filename.
 _DOC_ID_COLUMN: dict[str, str] = {"leroy": "gysseling_nr"}
+
+_ADJUSTED = " adjusted"
+_UTRECHT_DOC = re.compile(r"^(\d{4}\.\d{2}\.\d{2}[a-z])(?:[\s-].+)?$", re.I)
 
 
 def canonical_archive(archive: str) -> str:
@@ -71,8 +78,10 @@ def doc_id_for(filename: str, archive: str) -> str:
     if key == "flanders":
         return stem.split("_", 1)[0] or stem
     if key == "utrecht":
-        suffix = " adjusted"
-        return stem[: -len(suffix)] if stem.endswith(suffix) else stem
+        if stem.endswith(_ADJUSTED):
+            stem = stem[: -len(_ADJUSTED)]
+        m = _UTRECHT_DOC.match(stem)
+        return m.group(1) if m else stem
     # antwerp, brackley, leroy (filename fallback), unknown -> whole stem
     return stem
 

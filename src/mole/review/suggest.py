@@ -1,18 +1,23 @@
 """Label-review suggestions from a partially labeled embedding.
 
 Archives arrive with *some* hands identified and most documents untouched. This
-module turns one ``mole embed`` output plus whatever ``labels.csv`` exists into
-ranked, human-checkable hypotheses of six kinds:
+module turns one ``mole embed`` output plus the existing ``labels.csv`` into
+ranked, human-checkable hypotheses. ``labels.csv`` is the sole reference and is
+never written here — accepted suggestions leave as a CSV the reviewer downloads.
 
-* **attributions** — an unlabeled document that sits with a known hand;
-* **merges**       — two labeled hands that may be one scribe;
-* **splits**       — one labeled hand whose documents form two separate groups;
-* **new hands**    — a tight group of unlabeled documents unlike any known hand;
-* **doubts**       — a labeled document that sits with a *different* hand;
-* **duplicates**   — two documents that are near-identical (same charter twice).
+Three review tasks (built in consecutive stages):
 
-Nothing here writes labels: the output is a report for a human to read
-(``SUPERVISED_PLAN.md`` D5). Two rules keep the numbers honest:
+* **outliers**       — a labeled document that does not sit with its recorded
+                       hand (stage 1: false positives to reject);
+* **attributions**   — an unlabeled document that sits with a known hand
+                       (stage 2: false negatives; never overwrites a recorded hand);
+* **new hands**      — unlabeled FINCH clusters at the ARI-best cut vs recorded
+                       hands (stage 3: a scribe who is not yet named);
+
+Parked (still scored, not shown in the review sheet): merges, splits,
+duplicates, isolated.
+
+Two rules keep the numbers honest:
 
 **Sibling scans are not evidence.** Every score excludes documents sharing the
 query's ``doc_id`` (:mod:`mole.data.docids`), so "this page looks like hand B"
@@ -21,10 +26,10 @@ can never rest on another scan of the very same charter — the scan-shortcut th
 
 **Only attributions are calibrated.** Hiding each labeled document in turn and
 scoring it as if unlabeled gives real ground truth, so attribution scores are
-mapped through isotonic regression to an empirical P(top-1 correct). The other
-five kinds have no ground truth available and carry a *relative* strength
-instead (a percentile against a null), which the UI must word as a question
-rather than a claim.
+mapped through isotonic regression to an empirical P(top-1 correct). Outliers
+have no such ground truth; they enter only when both isolation and a closer
+hand clear a high bar (recorded labels are mostly right). New hands carry a
+*relative* strength, which the UI must word as a question rather than a claim.
 """
 
 from __future__ import annotations
@@ -37,8 +42,21 @@ import numpy as np
 
 # a hand needs this many documents before "is it really two hands?" is askable
 MIN_DOCS_FOR_SPLIT = 4
+# isolation z needs a within-hand distribution (leave-one-out median/MAD)
+MIN_DOCS_FOR_OUTLIER = 3
 # cosine above which two different documents are treated as the same image
 DUPLICATE_SIM = 0.98
+# a dominant hand (KA_8) must not flood a review tab
+OUTLIER_PER_HAND_CAP = 8
+ATTRIB_PER_HAND_CAP = 8
+# Stage 1 (false positives): recorded labels are mostly right, so a
+# misidentification needs both a real alternative hand and a real isolation
+# from the recorded one. z=1 / any positive gap is expected noise.
+OUTLIER_Z_MIN = 3.0
+OUTLIER_GAP_MIN = 0.05          # cosine; a hair closer to another hand is not a misID
+# Stage 2 (false negatives): unlabeled pages are the common case. Skip a
+# proposal only if it would already look like a mild outlier inside that hand.
+JOIN_Z_MAX = 1.0
 
 
 @dataclass
@@ -54,7 +72,7 @@ class ReviewReport:
     merges: list[dict] = field(default_factory=list)
     splits: list[dict] = field(default_factory=list)
     new_hands: list[dict] = field(default_factory=list)
-    doubts: list[dict] = field(default_factory=list)
+    outliers: list[dict] = field(default_factory=list)
     duplicates: list[dict] = field(default_factory=list)
     isolated: list[dict] = field(default_factory=list)
     calibration: dict = field(default_factory=dict)
@@ -63,6 +81,7 @@ class ReviewReport:
     # {level, n_clusters, labels, silhouette}; `silhouette` is None where it is
     # undefined (fewer than 2 clusters, or one cluster per document).
     cluster_levels: list[dict] = field(default_factory=list)
+    new_hand_level: dict = field(default_factory=dict)
 
     @property
     def cluster_labels(self) -> list[int]:
@@ -129,8 +148,36 @@ def _cohesion(sim: np.ndarray, idx: np.ndarray, doc_ids: np.ndarray) -> float:
 
 
 # -------------------------------------------------------------- the six lists
-def _attributions(scores, hands, unlabeled, names, hand_names, limit):
-    """Unlabeled document -> the known hand it sits with (ranked by score)."""
+def _per_hand_take(items: list[dict], cap: int, key: str = "hand") -> list[dict]:
+    """Keep ranking, but at most ``cap`` items per hand."""
+    counts: dict[str, int] = {}
+    out = []
+    for d in items:
+        h = d[key]
+        if counts.get(h, 0) >= cap:
+            continue
+        counts[h] = counts.get(h, 0) + 1
+        out.append(d)
+    return out
+
+
+def _attributions(scores, hands, unlabeled, names, members, limit,
+                  z_min: float = JOIN_Z_MAX):
+    """Unlabeled document -> the known hand it sits with.
+
+    A page that would immediately be an outlier *inside* the proposed hand is
+    not offered: Keep would just recreate a false positive. Ranked later by
+    calibrated probability; ``limit`` is applied by the caller after that.
+    """
+    idx = {h: j for j, h in enumerate(hands)}
+    own_by_hand: dict[str, np.ndarray] = {}
+    for h, mems in members.items():
+        j = idx.get(h)
+        if j is None:
+            continue
+        vals = [float(scores[int(i), j]) for i in mems if np.isfinite(scores[int(i), j])]
+        own_by_hand[h] = np.asarray(vals, dtype=np.float64)
+
     out = []
     for i in unlabeled:
         row = scores[i]
@@ -138,42 +185,107 @@ def _attributions(scores, hands, unlabeled, names, hand_names, limit):
             continue
         order = np.argsort(-row)
         best = int(order[0])
+        hand = hands[best]
+        score = float(row[best])
         second = float(row[order[1]]) if len(order) > 1 and np.isfinite(row[order[1]]) else float("nan")
+        others = own_by_hand.get(hand, np.zeros(0, dtype=np.float64))
+        z = _mad_z(score, others) if others.size >= MIN_DOCS_FOR_OUTLIER else 0.0
+        if others.size >= MIN_DOCS_FOR_OUTLIER and z >= z_min:
+            continue
         out.append({
-            "row": int(i), "document": names[i], "hand": hands[best],
-            "score": float(row[best]),
-            "margin": float(row[best] - second) if np.isfinite(second) else None,
+            "row": int(i), "document": names[i], "hand": hand,
+            "score": score,
+            "margin": float(score - second) if np.isfinite(second) else None,
             "runner_up": hands[int(order[1])] if len(order) > 1 else None,
-            "n_support": int(len(hand_names[hands[best]])),
+            "runner_up_score": float(second) if np.isfinite(second) else None,
+            "n_support": int(len(members.get(hand, []))),
+            "join_z": float(z),
         })
     out.sort(key=lambda d: -d["score"])
-    return out[:limit]
+    return out[:limit] if limit else out
 
 
-def _doubts(scores, hands, labeled, hand_of, names, limit):
-    """Labeled document that resembles some OTHER hand more than its own."""
+def _mad_z(value: float, others: np.ndarray) -> float:
+    """Positive z = ``value`` is below the median of ``others`` (worse own-hand match).
+
+    MAD scale; a degenerate hand (everyone identical) yields 0 unless ``value``
+    itself is the odd one out, in which case it is a large positive z.
+    """
+    if others.size < 2:
+        return 0.0
+    med = float(np.median(others))
+    mad = float(np.median(np.abs(others - med)))
+    if mad < 1e-8:
+        if abs(value - med) < 1e-6:
+            return 0.0
+        return 10.0 if value < med else -10.0
+    return float((med - value) / mad)
+
+
+def _outliers(scores, hands, labeled, hand_of, names, members, limit,
+              per_hand_cap: int = OUTLIER_PER_HAND_CAP,
+              z_min: float = OUTLIER_Z_MIN):
+    """Labeled documents that should perhaps be rejected from their recorded hand.
+
+    Two leave-one-out signals, both read off the existing ``labels.csv`` (never
+    modified): isolation within the recorded hand (robust z of own-hand score)
+    and a closer *other* known hand. Both are required, and each has a high
+    bar: the prior that a recorded identification is wrong is much lower than
+    the prior that an unlabeled page belongs to a known hand. Ranked by z then
+    gap, then capped per hand so a dominant scribe cannot flood the list.
+    """
     idx = {h: j for j, h in enumerate(hands)}
-    out = []
+    own: dict[int, float] = {}
     for i in labeled:
-        own = hand_of[i]
-        if own not in idx:
+        h = hand_of[i]
+        if h not in idx:
             continue
-        own_score = float(scores[i, idx[own]])
-        row = scores[i].copy()
-        row[idx[own]] = -np.inf
-        if not np.isfinite(row).any():
-            continue
-        best = int(np.argmax(row))
-        gap = float(row[best]) - own_score
-        if not np.isfinite(own_score):
-            # its hand has no other document to compare against: not a doubt,
-            # just an unverifiable label. Leave it out rather than cry wolf.
-            continue
-        if gap > 0:
-            out.append({"row": int(i), "document": names[i], "hand": own,
-                        "own_score": own_score, "closer_hand": hands[best],
-                        "closer_score": float(row[best]), "gap": gap})
-    out.sort(key=lambda d: -d["gap"])
+        s = float(scores[i, idx[h]])
+        if np.isfinite(s):
+            own[i] = s
+
+    by_hand: dict[str, list[int]] = {}
+    for i in own:
+        by_hand.setdefault(hand_of[i], []).append(i)
+
+    cands = []
+    for h, idxs in by_hand.items():
+        scores_h = np.array([own[i] for i in idxs], dtype=np.float64)
+        can_z = len(idxs) >= MIN_DOCS_FOR_OUTLIER
+        for k, i in enumerate(idxs):
+            others = np.delete(scores_h, k) if can_z else scores_h
+            z = _mad_z(own[i], others) if can_z else 0.0
+            row = scores[i].copy()
+            row[idx[h]] = -np.inf
+            closer_hand = None
+            closer_score = None
+            gap = 0.0
+            if np.isfinite(row).any():
+                best = int(np.argmax(row))
+                closer_score = float(row[best])
+                gap = closer_score - own[i]
+                if gap > 0:
+                    closer_hand = hands[best]
+                else:
+                    gap = 0.0
+                    closer_score = None
+            if (closer_hand is None or gap < OUTLIER_GAP_MIN or z < z_min):
+                continue
+            cands.append({
+                "row": int(i), "document": names[i], "hand": h,
+                "own_score": own[i], "z": z,
+                "closer_hand": closer_hand, "closer_score": closer_score,
+                "gap": float(gap), "n_support": int(len(members[h])),
+            })
+
+    by: dict[str, list[dict]] = {}
+    for d in cands:
+        by.setdefault(d["hand"], []).append(d)
+    out = []
+    for items in by.values():
+        items.sort(key=lambda d: (-d["z"], -d["gap"]))
+        out.extend(items[:per_hand_cap])
+    out.sort(key=lambda d: (-d["z"], -d["gap"]))
     return out[:limit]
 
 
@@ -267,26 +379,91 @@ def _splits(sim, members, doc_ids, names, seed, limit):
     return out[:limit]
 
 
+def _medoid(sim: np.ndarray, idx: np.ndarray, doc_ids: np.ndarray) -> int:
+    """Most central document in ``idx`` (mean cosine to the others, siblings out)."""
+    idx = np.asarray(idx, dtype=int)
+    if len(idx) == 1:
+        return int(idx[0])
+    sub = sim[np.ix_(idx, idx)].astype(np.float64).copy()
+    np.fill_diagonal(sub, np.nan)
+    for a, i in enumerate(idx):
+        for b, j in enumerate(idx):
+            if a < b and doc_ids[i] == doc_ids[j]:
+                sub[a, b] = sub[b, a] = np.nan
+    means = np.nanmean(sub, axis=1)
+    if not np.isfinite(means).any():
+        return int(idx[0])
+    return int(idx[int(np.nanargmax(means))])
+
+
+def _pick_partition_for_new_hands(levels: list[dict]
+                                  ) -> tuple[np.ndarray | None, dict]:
+    """FINCH level whose partition best recovers the recorded hands (ARI).
+
+    That granularity is what "a hand" means in this archive. New-hand proposals
+    are then the clusters at that cut which contain *no* labeled document.
+    Silhouette is the fallback when nothing is labeled. Ties go to the finer
+    cut so a two-document unnamed hand is not merged away.
+    """
+    finch = [lv for lv in levels if str(lv.get("level", "")).startswith("FINCH")]
+    pool = finch or list(levels)
+    if not pool:
+        return None, {}
+    use_ari = any(lv.get("ari") is not None for lv in pool)
+
+    def key(lv):
+        score = lv.get("ari") if use_ari else lv.get("silhouette")
+        if score is None:
+            score = -2.0
+        return (float(score), int(lv.get("n_clusters") or 0))
+
+    best = max(pool, key=key)
+    return np.asarray(best["labels"], dtype=int), {
+        "level": best.get("level"),
+        "n_clusters": best.get("n_clusters"),
+        "ari": best.get("ari"),
+        "silhouette": best.get("silhouette"),
+        "criterion": "ari" if use_ari else "silhouette",
+    }
+
+
 def _new_hands(sim, cluster_labels, is_labeled, scores, doc_ids, names,
-               hand_cohesions, limit):
-    """Tight clusters of mostly-unlabeled documents that match no known hand."""
+               hand_cohesions, limit, *, level: dict | None = None):
+    """Unlabeled FINCH clusters at the ARI-chosen cut — candidate unnamed hands.
+
+    A cluster that shares even one recorded label is not "missed": it already
+    overlaps a known scribe (stage 2's problem). A cluster closer to a named
+    hand than to itself is the same. Ranked by size, then cohesion.
+    """
     ref = float(np.nanmedian(hand_cohesions)) if len(hand_cohesions) else 0.0
+    meta = level or {}
     out = []
     for c in sorted(set(int(v) for v in cluster_labels) - {NOISE}):
         idx = np.where(cluster_labels == c)[0]
         if len(idx) < 3:
             continue
-        frac_unlabeled = float((~is_labeled[idx]).mean())
-        if frac_unlabeled < 0.8:
-            continue                                  # mostly known: not new
+        if bool(is_labeled[idx].any()):
+            continue                                  # overlaps a recorded hand
         coh = _cohesion(sim, idx, doc_ids)
-        if not np.isfinite(coh) or coh < ref:
+        if not np.isfinite(coh) or (np.isfinite(ref) and coh < ref):
             continue                                  # looser than a typical hand
-        best_known = float(np.nanmax(scores[idx])) if scores.size else float("-inf")
+        if scores.ndim == 2 and scores.shape[1]:
+            per = []
+            for i in idx:
+                row = scores[int(i)]
+                per.append(float(np.nanmax(row)) if np.isfinite(row).any() else np.nan)
+            best_known = float(np.nanmedian(np.asarray(per, dtype=np.float64)))
+        else:
+            best_known = float("-inf")
+        if np.isfinite(best_known) and best_known >= coh:
+            continue                                  # sits with a named hand
+        q = _medoid(sim, idx, doc_ids)
         out.append({"cluster": c, "n_docs": int(len(idx)), "cohesion": coh,
                     "reference_cohesion": ref, "closest_known_score": best_known,
+                    "row": q, "document": names[q],
                     "documents": [names[i] for i in idx],
-                    "rows": [int(i) for i in idx]})
+                    "rows": [int(i) for i in idx],
+                    "level": meta.get("level"), "ari": meta.get("ari")})
     out.sort(key=lambda d: (-d["n_docs"], -d["cohesion"]))
     return out[:limit]
 
@@ -488,13 +665,16 @@ def document_table(embeddings: str | Path):
 
 def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
                  limit: int = 100, seed: int = 0,
-                 cluster_method: str = "both") -> ReviewReport:
-    """Build every suggestion list for one embedding file.
+                 cluster_method: str = "both", lists: bool = True,
+                 per_hand_cap: int = OUTLIER_PER_HAND_CAP) -> ReviewReport:
+    """Build suggestion lists for one embedding file from the existing labels.csv.
 
-    ``clusters`` is an optional ``mole cluster`` report; without one, FINCH's
-    finest partition is computed here so the "possible new hand" list always
-    exists. ``limit`` caps each list — these are for human review, and a list
-    nobody can finish reading is a list nobody reads.
+    ``labels.csv`` is only read. ``clusters`` is an optional ``mole cluster``
+    report; without one, FINCH's finest partition is computed here so the
+    "possible new hand" list always exists. ``lists=False`` (``mole viz``)
+    still computes colour-scheme partitions and skips the suggestion engine.
+    ``limit`` caps each list — these are for human review, and a list nobody
+    can finish reading is a list nobody reads.
     """
     X, meta, rows, names, paths, hand_of, doc_ids = document_table(embeddings)
     parents = [p.parent for p in paths]
@@ -510,7 +690,6 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
         members[h] = np.where(hand_of_arr == h)[0]
 
     Xn = _l2(X)
-    sim = (Xn @ Xn.T).astype(np.float32)
 
     report = ReviewReport(
         n_documents=len(rows), n_labeled=int(is_labeled.sum()), n_hands=len(members),
@@ -544,25 +723,34 @@ def build_review(embeddings: str | Path, *, clusters: str | Path | None = None,
 
     if not members:
         return report      # nothing labeled: no hand to reason from, clusters only
+    if not lists:
+        return report      # viz: colour schemes only; no suggestion lists
 
+    sim = (Xn @ Xn.T).astype(np.float32)
     scores, hands = hand_score_matrix(sim, members, doc_arr)
     cal = _calibrate(scores, hands, labeled, hand_of_arr)
     report.calibration = cal
 
-    report.attributions = _attributions(scores, hands, unlabeled, names, members, limit)
-    for a in report.attributions:
+    report.outliers = _outliers(scores, hands, labeled, hand_of_arr, names, members,
+                                limit, per_hand_cap=per_hand_cap)
+    attrib = _attributions(scores, hands, unlabeled, names, members, limit=None)
+    for a in attrib:
         a["calibrated_p"] = _apply_calibration(cal, a["score"])
-    report.doubts = _doubts(scores, hands, labeled, hand_of_arr, names, limit)
+    attrib.sort(key=lambda d: (
+        -(d["calibrated_p"] if d["calibrated_p"] is not None else -1.0),
+        -d["score"]))
+    report.attributions = _per_hand_take(attrib, ATTRIB_PER_HAND_CAP)[:limit]
     report.merges = _merges(sim, members, doc_arr, limit)
     report.splits = _splits(sim, members, doc_arr, names, seed, limit)
     report.duplicates = _duplicates(sim, doc_arr, names, limit)
     report.isolated = _isolated(sim, doc_arr, names, limit)
 
 
-    cl = np.asarray(report.cluster_labels, dtype=int) if report.cluster_levels \
-        else np.zeros(0, dtype=int)
-    if len(cl) == len(rows):
+    cl, meta = _pick_partition_for_new_hands(report.cluster_levels)
+    report.new_hand_level = meta
+    if cl is not None and len(cl) == len(rows):
         cohesions = [_cohesion(sim, idx, doc_arr) for idx in members.values()]
         report.new_hands = _new_hands(sim, cl, is_labeled, scores, doc_arr, names,
-                                      [c for c in cohesions if np.isfinite(c)], limit)
+                                      [c for c in cohesions if np.isfinite(c)], limit,
+                                      level=meta)
     return report

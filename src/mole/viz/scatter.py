@@ -576,8 +576,8 @@ def plot_embeddings(embeddings: str | Path, out: str | Path | None = None,
 
     This is the dependency-free helper used programmatically and as the ``svg``
     fallback. The user-facing ``mole viz`` command renders the full map + charter
-    viewer bipanel through :func:`mole.review.render.render_review` (same renderer
-    as ``mole review``), so the two commands share one interactive interface.
+    viewer bipanel through :func:`mole.review.render.render_review` with
+    ``mode="viz"`` (no suggestion lists).
 
     Returns ``(output_path, method_used)``. Default projection is PCA(``pca_dim``)
     → UMAP. ``color`` is ``dataset`` | ``hand`` | ``none``; ``color_regex`` overrides
