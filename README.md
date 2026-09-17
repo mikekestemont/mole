@@ -51,9 +51,23 @@ commands, and **[ARCHITECTURE.md](ARCHITECTURE.md)** for design/decisions/build 
 
 ## Acknowledgements
 
-- **AttMask** — Kakogeorgiou et al., *What to Hide from Your Students:
-  Attention-Guided Masked Image Modeling* (ECCV 2022).
-- **iBOT** — Zhou et al. · **DINO** — Caron et al.
+- **AttMask** — Kakogeorgiou, Gidaris, Psomas, Avrithis, Bursuc, Karantzalos &
+  Komodakis, *What to Hide from Your Students: Attention-Guided Masked Image
+  Modeling*, ECCV 2022 ([arXiv:2203.12719](https://arxiv.org/abs/2203.12719)).
+- **iBOT** — Zhou, Wei, Wang, Shen, Xie, Yuille & Kong, *iBOT: Image BERT
+  Pre-Training with Online Tokenizer*, ICLR 2022
+  ([arXiv:2111.07832](https://arxiv.org/abs/2111.07832)).
+- **DINO** — Caron, Touvron, Misra, Jégou, Mairal, Bojanowski & Joulin, *Emerging
+  Properties in Self-Supervised Vision Transformers*, ICCV 2021
+  ([arXiv:2104.14294](https://arxiv.org/abs/2104.14294)).
+- **VLAD** — Jégou, Douze, Schmid & Pérez, *Aggregating Local Descriptors into a
+  Compact Image Representation*, CVPR 2010; intra-normalisation and vocabulary
+  adaptation from Arandjelović & Zisserman, *All About VLAD*, CVPR 2013.
+- **CSLS** (cross-archive page pairs) — Conneau, Lample, Ranzato, Denoyer & Jégou,
+  *Word Translation Without Parallel Data*, ICLR 2018
+  ([arXiv:1710.04087](https://arxiv.org/abs/1710.04087)).
+- **SGR reranking** — Peer, Kleber & Sablatnig, *Towards Writer Retrieval for
+  Historical Datasets*, ICDAR 2023.
 - **Raven, Matei & Fink** — *Self-Supervised Vision Transformers for Writer
   Retrieval*, ICDAR 2024 ([doi:10.1007/978-3-031-70536-6_23](https://doi.org/10.1007/978-3-031-70536-6_23),
   [arXiv:2409.00751](https://arxiv.org/abs/2409.00751); TU Dortmund).
