@@ -961,6 +961,12 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
         meta["window_foreground"] = True
         meta["window_foreground_threshold"] = float(window_foreground_threshold)
         meta["window_kept_fraction"] = (n_win_kept / n_win_total) if n_win_total else 0.0
+    # record the geometry ACTUALLY used (after --set / --invert), not the checkpoint's
+    meta["checkpoint_geometry"] = {k: meta[k] for k in ("window_size", "overlap", "use_zones", "invert")
+                                   if k in meta}
+    for k in ("window_size", "overlap", "use_zones", "invert"):
+        meta[k] = settings[k]
+    meta["stride"] = max(1, round(settings["window_size"] * (1.0 - settings["overlap"])))
     if project_head is not None:                 # Tier-1 head-projected space (versioned artifact)
         meta["head"] = str(head)
         meta["head_id"] = head_id
