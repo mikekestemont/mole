@@ -1,0 +1,59 @@
+# PHASE B of CROSS_ARCHIVE_PLAN.md: one SSL finetune over the four LIVE Low-Countries
+# charter archives at ONE script module, so the cross-archive index (`mole cross`)
+# gets a backbone that has seen all four at the scale it embeds them.
+#
+# Pool = scale-materialised copies (scripts/materialize_scale.py --target 41.16, the
+# module the Phase A codebook pinned): antwerp-bin-s41 470 + utrecht-charters-s41 748 +
+# leroy-sauvola-s41 1304 + comital-s41 313 = 2835 pages. No Brackley (no overlap possible).
+#
+#   python scripts/materialize_scale.py --target 41.16 --suffix=-s41 \
+#       data/antwerp-bin data/utrecht-charters data/leroy-sauvola data/comital
+#   POOL=data/cross-pool-s41 bash scripts/assemble_pooled.sh \
+#       data/antwerp-bin-s41 data/utrecht-charters-s41 data/leroy-sauvola-s41 data/comital-s41
+#   CUDA_VISIBLE_DEVICES=5 mole train configs/cross_pool.yaml --init-from checkpoints/raven_checkpoint.pth
+#
+# Same recipe as the September specialists (raven warm start, 20 epochs) except
+# overlap 0.25: at one shared scale the pool is ~500k windows/epoch at stride 128,
+# which is ~70 h on this CPU-bound box; stride 192 gives ~220k windows/epoch ≈ 30 h
+# for 20 epochs (checkpoints at 5/10/15). Same warm-started adaptation, fewer
+# near-duplicate windows. Eval the epoch-10 checkpoint before waiting for 20.
+#
+# After training, repeat Phase A steps 2-5 with runs/cross_pool_ssl/checkpoint.pth
+# and compare `mole cross` headers: own-scribe-masked purity (Phase A: 74 %) and the
+# per-archive within-archive macro-mAP (0.851 / 0.620 / 0.667 / 0.784).
+
+data:
+  path: data/cross-pool-s41   # symlink dir assembled by scripts/assemble_pooled.sh
+  window_size: 256
+  model_size: 224
+  overlap: 0.25               # stride 192 (see above)
+  use_zones: false            # binarized copies; zones.json is not carried by materialize_scale
+  invert: true                # all four are Sauvola black-on-white -> raven's white-on-black
+  foreground_min: 0.05
+  num_workers: 6
+aug:
+  preset: mild
+  overrides:
+    local_crops_number: 8
+    local_size: 96
+    global_crops_scale: [0.4, 1.0]
+    local_crops_scale: [0.05, 0.4]
+    erosion_dilation_prob: 0.5
+    color_jitter_prob: 0.0
+    grayscale_prob: 0.0
+    jpeg_prob: 0.0
+    rotation_prob: 0.0
+model:
+  arch: vit_small
+  patch_size: 16
+optim:
+  lr: 5.0e-4
+  warmup_epochs: 5
+  batch_size: 48
+train:
+  epochs: 20
+  fp16: true
+  output_dir: runs/cross_pool_ssl
+  save_every_steps: 500
+  saveckp_epoch_freq: 5
+  projector_every_epochs: 5

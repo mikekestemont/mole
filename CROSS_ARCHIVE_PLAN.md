@@ -208,7 +208,29 @@ Then `scp mike:~/mole/outputs/cross/pool.cross.html ~/Downloads/mole-cross/`.
    `hand_aliases.csv` rows (`comital/KA_8,utrecht-charters/KaD`), which `mole eval`
    can then score as true cross-dataset positives — the first real ground truth.
 
-## 5. Phase B — the weekend model
+## 5. Phase B — the weekend model (launched 2026-09-17; config `configs/cross_pool.yaml`)
+
+Mike's verdict on the Phase A sheet: interesting matches at the top, fuzzy quickly
+below — worth a backbone that has seen all four sets at one scale.
+
+Runbook (server, in `screen -S crossB`):
+```bash
+cd ~/mole && git pull && conda activate mole
+# 1. materialise the Phase A scale (41.16 px) on disk — training has no load-time
+#    scaler; this repeats exactly what `mole embed` did (bitmap resample, no re-threshold)
+python scripts/materialize_scale.py --target 41.16 --suffix=-s41 \
+    data/antwerp-bin data/utrecht-charters data/leroy-sauvola data/comital
+# 2. pool the copies
+POOL=data/cross-pool-s41 bash scripts/assemble_pooled.sh \
+    data/antwerp-bin-s41 data/utrecht-charters-s41 data/leroy-sauvola-s41 data/comital-s41
+# 3. train (raven warm start, 20 epochs, overlap 0.25 ≈ 30 h; ckpts at 5/10/15)
+CUDA_VISIBLE_DEVICES=5 mole train configs/cross_pool.yaml --init-from checkpoints/raven_checkpoint.pth
+```
+Then Phase A steps 2–5 with `runs/cross_pool_ssl/checkpoint_epoch0010.pth` (Saturday)
+and `checkpoint.pth` (Sunday), into `outputs/crossB/`, on `data/cross-pool-s41`
+(already at scale, so `mole codebook --scale-target auto` records 41 px and resamples
+nothing).
+
 
 "Larger" should mean **more data in one space**, not a bigger ViT: raven is a
 `vit_small` and the only pretrained weights we have; a bigger backbone from scratch on
