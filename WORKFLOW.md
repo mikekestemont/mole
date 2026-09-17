@@ -105,8 +105,8 @@ wildly different scales. Note that normalizing may **upscale** pages past `--max
 To bring several corpora into one shared scale, measure them first and pass one target:
 
 ```bash
-mole scale-target data/leroy-bin data/utrecht-bin data/sluis-bin     # prints a pooled median
-mole prep data/utrecht --binarize sauvola --binarize-out data/utrecht-bin \
+mole scale-target data/leroy data/sluis-bin data/brackley-2350   # prints a pooled median
+mole prep data/leroy --binarize sauvola --binarize-out data/leroy-bin \
     --normalize-scale profile --target-module 22.0
 ```
 
@@ -132,12 +132,12 @@ Measured on 60-page samples of three corpora, normalized to 45.4px:
 | corpus | median before | after | spread before | after |
 |---|---:|---:|---:|---:|
 | leroy-bin | 27.8 | 45.5 | 0.31 | 0.02 |
-| utrecht | 45.4 | 45.4 | 0.45 | 0.03 |
+| legacy utrecht | 45.4 | 45.4 | 0.45 | 0.03 |
 | brackley-set | 58.2 | 45.5 | 0.23 | 0.01 |
 
 A 2.1× spread between corpora becomes 1.00×, and — the part that matters more — the
 variation *within* each corpus drops by an order of magnitude, so it is genuinely
-per-page, not a per-corpus constant. Note that `utrecht` was the median corpus and so
+per-page, not a per-corpus constant. Note that the (now retired) Utrecht dump was the median corpus and so
 barely moves overall, yet its internal spread still falls from 0.45 to 0.03.
 
 Then confirm retrieval did not regress, comparing like with like
@@ -311,6 +311,34 @@ mole embed <ckpt> data/new-bin outputs/new.npy --pooling vlad \
 
 On the one-dominant-hand Flanders set this stack ran macro 0.397 → 0.598 end to end.
 Skip `--vlad-intra-norm` for balanced collections (macro ≈ micro, no dominant hand).
+
+## 8. `cross` — the same scribe in more than one archive? ✅
+
+Several archives embedded in ONE space (one checkpoint, one codebook with a pinned
+script module, one intra-norm setting — `mole embed` over a symlink pool, or several
+`.npy` from the same run) are searched for cross-archive hand candidates. There is no
+ground truth for that, so the sheet asks and the reviewer decides. Full design and
+the Phase A runbook: `CROSS_ARCHIVE_PLAN.md`.
+
+```bash
+POOL=data/cross-pool bash scripts/assemble_pooled.sh data/a-bin data/b-bin data/c-bin
+mole codebook <ckpt> data/cross-pool --out outputs/cross/fit.codebook.npy --scale-target auto
+mole embed <ckpt> data/cross-pool outputs/cross/pool.npy --pooling vlad \
+    --codebook-from outputs/cross/fit.codebook.npy --vlad-intra-norm
+mole cross outputs/cross/pool.npy --limit 50 --min-confidence 0.5      # → pool.cross.html + .json
+mole cross a.npy b.npy c.npy --out x.cross.html                        # or stack files (same model)
+```
+
+The header reports the **domain gap**: how often a page's nearest neighbour comes
+from its own archive, raw and after per-archive centering, once over all pages and
+once with the page's own scribe masked (the archive signature proper). Three tabs,
+the document pair as the unit: **page pairs** (mutual cross-archive nearest
+neighbours by CSLS), **page → foreign hand** (top-2 mean to a hand of another
+archive, the best hand at home beside it), **hand pairs** (ranked by their two
+strongest cross-document matches; flip the left hand's pages with `[` / `]`). Every
+score stands beside the within-archive reference — the share of same-hand and of
+different-hand pairs inside an archive it exceeds — as a yardstick, never a filter.
+Sibling scans never vouch; near-identical images land in a separate duplicates tab.
 
 ---
 

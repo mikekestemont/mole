@@ -46,6 +46,7 @@ _ARCHIVE_ALIASES: tuple[tuple[str, str], ...] = (
     ("utrecht", "utrecht"),
     ("brackley", "brackley"),
     ("flanders", "flanders"),
+    ("comital", "flanders"),      # the Sept-2026 re-prep of the Flanders set: same filenames
     ("leroy", "leroy"),
 )
 

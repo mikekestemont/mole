@@ -8,6 +8,7 @@ from mole.data.docids import canonical_archive, doc_id_for, doc_id_resolver
 def test_canonical_archive_matches_folder_variants():
     assert canonical_archive("antwerp-bin") == "antwerp"
     assert canonical_archive("flanders-set-bin") == "flanders"
+    assert canonical_archive("comital") == "flanders"          # same charters, re-prepped
     assert canonical_archive("brackley-2350") == "brackley"
     assert canonical_archive("utrecht-charters") == "utrecht"
     assert canonical_archive("utrecht-legacy") == "utrecht"

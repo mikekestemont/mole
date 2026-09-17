@@ -498,6 +498,7 @@ def _render_cases(embeddings: Path, *, out, clusters, limit, max_mb, image_cache
     }
     title = escape(", ".join(report.datasets) or "archive")
     html = _CASE_HTML.replace("__TITLE__", title) \
+                     .replace("__KIND__", "Hand review") \
                      .replace("__ZOOM_CSS__", _ZOOM_CSS) \
                      .replace("__ZOOM_JS__", _ZOOM_JS) \
                      .replace("__PAYLOAD__", json.dumps(payload))
@@ -505,6 +506,276 @@ def _render_cases(embeddings: Path, *, out, clusters, limit, max_mb, image_cache
     out_path.write_text(html, encoding="utf-8")
     mb = out_path.stat().st_size / (1024 * 1024)
     return out_path, f"{budget.summary()} · {mb:.1f} MB total"
+
+
+
+_CROSS_SECTIONS = [
+    ("page_pairs", "Page pairs",
+     "Two pages in different archives that are each other's closest foreign page."),
+    ("page_to_hand", "Page → foreign hand",
+     "A page that sits with a recorded hand of another archive."),
+    ("hand_pairs", "Hand pairs",
+     "Two recorded hands in different archives whose pages match."),
+    ("duplicates", "Possible duplicates",
+     "Near-identical images in two archives — the same charter twice?"),
+]
+
+
+def _pct_text(d: dict) -> str:
+    """'above 71% of same-hand / 99% of different-hand pairs' (within-archive)."""
+    s, f = d.get("same_hand_pct"), d.get("diff_hand_pct")
+    if s is None and f is None:
+        return "no within-archive reference"
+    parts = []
+    if s is not None:
+        parts.append(f"{100 * s:.0f}% of same-hand")
+    if f is not None:
+        parts.append(f"{100 * f:.0f}% of different-hand")
+    return "above " + " / ".join(parts) + " pairs within an archive"
+
+
+def _cross_rows(report, table, limit: int) -> list[tuple[str, str, str, list[dict]]]:
+    """One UI row per candidate, in the case-sheet vocabulary.
+
+    The left pane is the query page (with [/] flipping through a hand's pages for
+    hand pairs); the right pane lists the foreign pages, closest first. Every
+    number the reviewer sees is a cosine distance in the centered space plus the
+    within-archive reference shares.
+    """
+    Xn, sim, csls = table["Xn"], table["sim"], table["csls"]
+    names, hands, archives = table["names"], table["hands"], table["archives"]
+    members = table["members"]
+
+    def by_sim(query: int, cand, k: int = CLASS_NEIGHBOR_CAP) -> tuple[list[int], list[float]]:
+        cand = [int(j) for j in cand if int(j) != query and np.isfinite(sim[query, j])]
+        cand.sort(key=lambda j: -float(sim[query, j]))
+        cand = cand[:k]
+        return cand, [float(sim[query, j]) for j in cand]
+
+    def pack(closest: list[int], cs: list[float]) -> dict:
+        return {"closest": closest, "furthest": list(reversed(closest)),
+                "closest_cos": cs, "furthest_cos": list(reversed(cs)),
+                "closest_dist": [1.0 - c for c in cs],
+                "furthest_dist": [1.0 - c for c in reversed(cs)],
+                "n_other": len(closest)}
+
+    def medoid_order(idx) -> list[int]:
+        idx = [int(i) for i in idx]
+        if len(idx) == 1:
+            return idx
+        sub = Xn[idx] @ Xn[idx].T
+        return [idx[i] for i in np.argsort(-sub.mean(axis=1))]
+
+    sections = []
+    for kind, heading, blurb in _CROSS_SECTIONS:
+        items = getattr(report, kind, [])[:limit]
+        rows = []
+        for n, it in enumerate(items):
+            r = {"kind": kind, "id": f"{kind}-{n}", "numbers": "", "extra_only": True,
+                 "calibrated_p": None, "closer_hand": None, "closer_dist": None,
+                 "runner_up": None, "runner_dist": None, "z": 0.0}
+            if kind in ("page_pairs", "duplicates"):
+                i, j = int(it["row_a"]), int(it["row_b"])
+                # the partner first, then the query's next-closest pages in the
+                # partner's archive, so the reviewer sees the alternatives too
+                others = [int(k) for k in np.where(archives == archives[j])[0]
+                          if int(k) != j and np.isfinite(csls[i, k])]
+                others.sort(key=lambda k: -float(csls[i, k]))
+                closest = [j] + others[:CLASS_NEIGHBOR_CAP - 1]
+                cs = [float(sim[i, k]) for k in closest]
+                home_a = it.get("home_best_a")
+                home_b = it.get("home_best_b")
+                if kind == "duplicates":
+                    text = (f"These two images from {it['archive_a']} and {it['archive_b']} "
+                            f"are nearly identical (cosine {it['similarity']:.4f}) — probably "
+                            f"the same charter photographed twice. Keep = same charter; "
+                            f"Reject = two different charters (then it is a very strong "
+                            f"hand match instead).")
+                    ask = "Is this the same charter in two archives?"
+                    keep, reject = "Same charter · 1", "Different charters · 2"
+                else:
+                    text = (f"Left: a page from {it['archive_a']}. Right, first: its closest "
+                            f"page in {it['archive_b']} — and that page's closest page in "
+                            f"{it['archive_a']} is the left one (mutual). Further right pages "
+                            f"are the runners-up in {it['archive_b']}. Keep if the two are "
+                            f"the same scribe. Neither page's own archive is consulted: a "
+                            f"page from a loose hand is as eligible as any other.")
+                    ask = f"Same scribe in {it['archive_a']} and {it['archive_b']}?"
+                    keep, reject = "Same scribe · 1", "Different scribes · 2"
+                extra = [("cosine", f"{it['similarity']:.3f}")]
+                if kind == "page_pairs":
+                    extra.append(("csls", f"{it['csls']:.3f}"))
+                if home_a is not None:
+                    extra.append((f"closest at home ({it['archive_a']})", f"{home_a:.3f}"))
+                if home_b is not None:
+                    extra.append((f"closest at home ({it['archive_b']})", f"{home_b:.3f}"))
+                extra.append(("reference", _pct_text(it)))
+                r.update(title=f"{escape(names[i])} ↔ {escape(names[j])}",
+                         text=text, ask=ask, keep_hint=keep, reject_hint=reject,
+                         query_kicker=f"Page from {it['archive_a']}",
+                         query_label="",
+                         hand_role="foreign", exrole="Closest page in",
+                         hand=it["archive_b"], exwho=f"pages of {it['archive_b']}",
+                         csv_kind=("cross_duplicate" if kind == "duplicates" else "cross_page_pair"),
+                         focus=[i], docs=[i, *closest],
+                         document=f"{names[i]} ↔ {names[j]}",
+                         n_class=len(closest), hand_cos=float(it["similarity"]),
+                         hand_dist=None,
+                         extra=extra, **pack(closest, cs))
+            elif kind == "page_to_hand":
+                i = int(it["row"])
+                hand = it["hand"]
+                closest, cs = by_sim(i, members.get(hand, []))
+                rec = it.get("recorded_hand") or ""
+                own = it.get("own_hand") or ""
+                own_s = it.get("own_score")
+                text = (f"Left: a page from {it['archive']}"
+                        + (f", recorded as {rec}" if rec else ", unattributed")
+                        + f". Right: the pages of hand {hand} (another archive) it matches "
+                        f"best — two of them agree (top-2 mean {it['score']:.3f})"
+                        + (f", against {own_s:.3f} for the best hand at home ({own})"
+                           if own_s is not None and own else "")
+                        + ". Keep if the page is by that scribe.")
+                extra = [("top-2 to hand", f"{it['score']:.3f}")]
+                if own_s is not None and own:
+                    extra.append((f"best at home ({_short(own) if own.startswith(it['archive']) else own})",
+                                  f"{own_s:.3f}"))
+                if it.get("runner_up"):
+                    extra.append(("next foreign hand", f"{it['runner_up']} {it['runner_up_score']:.3f}"))
+                extra.append(("reference", _pct_text(it)))
+                r.update(title=f"{escape(names[i])} → {escape(hand)}",
+                         text=text,
+                         ask=f"Is this {it['archive']} page by {hand}?",
+                         keep_hint="Same scribe · 1", reject_hint="Not this scribe · 2",
+                         query_kicker=f"Page from {it['archive']}", query_label="",
+                         hand_role="foreign", exrole="Foreign hand", hand=hand,
+                         exwho=f"pages of {hand}",
+                         csv_kind="cross_page_to_hand",
+                         focus=[i], docs=[i, *closest],
+                         document=names[i], n_class=int(it["n_support"]),
+                         hand_cos=float(it["score"]), hand_dist=float(1.0 - it["score"]),
+                         extra=extra, **pack(closest, cs))
+            elif kind == "hand_pairs":
+                a, b = it["hand_a"], it["hand_b"]
+                alts = medoid_order(members.get(a, []))
+                q = int(it["best_row_a"]) if it.get("best_row_a") is not None else alts[0]
+                # start on the page that carries the strongest match, then the rest by centrality
+                alts = [q] + [x for x in alts if x != q]
+                closest, cs = by_sim(q, members.get(b, []))
+                own = it.get("own_similarity")
+                text = (f"Left: pages recorded as {a} ({it['n_a']}; flip with [ and ]). Right: "
+                        f"pages recorded as {b} ({it['n_b']}), closest to the left page first. "
+                        f"The two strongest cross-archive matches between these hands average "
+                        f"{it['score']:.3f}"
+                        + (f"; all pairs average {it['cross_mean']:.3f} against {own:.3f} within "
+                           f"each hand" if own is not None else "")
+                        + f". Ranks: {b} is #{it['rank_ab']} of its archive's hands for {a}, "
+                        f"{a} is #{it['rank_ba']} for {b}. Keep if these are one scribe.")
+                extra = [("top-2 pair", f"{it['score']:.3f}"),
+                         (f"all {it['n_pairs']} pairs", f"{it['cross_mean']:.3f}")]
+                if own is not None:
+                    extra.append(("within each hand", f"{own:.3f}"))
+                extra.append(("ranks", f"{it['rank_ab']} / {it['rank_ba']}"))
+                extra.append(("reference", _pct_text(it)))
+                r.update(title=f"<b>{escape(a)}</b> and <b>{escape(b)}</b>",
+                         text=text, ask=f"Are {a} and {b} one scribe?",
+                         keep_hint="One scribe · 1", reject_hint="Two scribes · 2",
+                         query_kicker=f"Recorded hand in {it['archive_a']}", query_label="Recorded as ",
+                         query_alts=alts,
+                         hand_role="foreign", exrole="Recorded hand", hand=b,
+                         exwho=f"pages of {b}",
+                         csv_kind="cross_hand_pair",
+                         focus=[q], docs=[*alts, *closest],
+                         document=f"{a} ↔ {b}", n_class=int(it["n_b"]),
+                         hand_cos=float(it["score"]), hand_dist=float(1.0 - it["score"]),
+                         extra=extra, **pack(closest, cs))
+            rows.append(r)
+        if rows or kind != "duplicates":
+            sections.append((kind, heading, blurb, rows))
+    return sections
+
+
+def render_cross(embeddings: list[str | Path], *, out: str | Path | None = None,
+                 limit: int = 50, max_mb: float = 0.0, image_cache: str | Path | None = None,
+                 image_url: str | None = None, images: bool = True, center: bool = True,
+                 min_confidence: float | None = None, seed: int = 0,
+                 report_out: str | Path | None = None) -> tuple[Path, str]:
+    """Cross-archive review sheet: the three candidate lists as review cases.
+
+    Same single-file, decisions-as-CSV contract as ``mole review``; the JSON
+    report (``<out>.cross.json`` beside the sheet) carries every number.
+    """
+    from mole.review.cross import build_cross, format_report
+    from mole.review.images import ImageBudget
+
+    embeddings = [Path(e) for e in embeddings]
+    out_path = Path(out) if out else embeddings[0].with_suffix(".cross.html")
+    report_path = Path(report_out) if report_out else out_path.with_suffix(".json")
+    report, table = build_cross(embeddings, limit=limit, center=center,
+                                min_confidence=min_confidence, seed=seed, out=report_path)
+    print(format_report(report))
+    names, paths, hands = table["names"], table["paths"], table["hands"]
+    sections = _cross_rows(report, table, limit)
+
+    room = int(max_mb * 1024 * 1024) if max_mb else 0
+    budget = ImageBudget(room, cache_dir=image_cache)
+    if images:
+        wanted: list[int] = []
+        for _k, _h, _b, rws in sections:
+            for r in rws:
+                wanted.extend(r.get("focus") or [])
+                wanted.extend((r.get("query_alts") or [])[:4])
+                wanted.extend((r.get("closest") or [])[:4])
+        for _k, _h, _b, rws in sections:
+            for r in rws:
+                wanted.extend(r.get("query_alts") or [])
+                wanted.extend(r.get("closest") or [])
+        seen = set()
+        for i in wanted:
+            if i is None or i in seen:
+                continue
+            seen.add(i)
+            budget.add(str(i), paths[i])
+
+    g0, g1 = report.gap_raw, report.gap_centered
+    ref = report.reference
+    gap = (f"Nearest neighbour from the same archive: {100 * g0['purity@1']:.0f}% raw → "
+           f"{100 * g1['purity@1']:.0f}% after centering (chance {100 * g0['chance']:.0f}%)")
+    if "purity_other_hand@1" in g1:
+        gap += (f"; with a page's own scribe excluded: {100 * g0['purity_other_hand@1']:.0f}% → "
+                f"{100 * g1['purity_other_hand@1']:.0f}%")
+    gap += "."
+    if ref.get("same_hand_quartiles"):
+        s, d = ref["same_hand_quartiles"], ref["diff_hand_quartiles"]
+        gap += (f" Within an archive, same-hand pairs sit at cosine {s[1]:.2f} (Q1–Q3 "
+                f"{s[0]:.2f}–{s[2]:.2f}), different-hand pairs at {d[1]:.2f}.")
+    payload = {
+        "mode": "review",
+        "dims": {k: list(v) for k, v in budget.dims.items()},
+        "sections": [{"kind": k, "heading": h, "blurb": b, "rows": r}
+                     for k, h, b, r in sections],
+        "images": budget.uris,
+        "names": names,
+        "hands": [str(h) for h in hands],
+        "urls": ([image_url.replace("{filename}", Path(n).name) for n in names] if image_url
+                 else [p.resolve().as_uri() if p.is_file() else "" for p in paths]),
+        "n_documents": report.n_documents,
+        "n_labeled": report.n_labeled,
+        "n_hands": len(table["members"]),
+        "gap": gap,
+    }
+    title = escape(", ".join(f"{a} ({n})" for a, n in report.archives.items()))
+    html = _CASE_HTML.replace("__TITLE__", title) \
+                     .replace("__KIND__", "Cross-archive review") \
+                     .replace("__ZOOM_CSS__", _ZOOM_CSS) \
+                     .replace("__ZOOM_JS__", _ZOOM_JS) \
+                     .replace("__PAYLOAD__", json.dumps(payload))
+    html = html.replace('<p class="ask" id="ask">Look at one charter at a time.</p>',
+                        f'<p class="gap">{escape(gap)}</p>\n'
+                        '  <p class="ask" id="ask">Look at one charter at a time.</p>')
+    out_path.write_text(html, encoding="utf-8")
+    mb = out_path.stat().st_size / (1024 * 1024)
+    return out_path, f"{budget.summary()} · {mb:.1f} MB total · report {report_path}"
 
 
 def render_review(embeddings: str | Path, *, out: str | Path | None = None,
@@ -837,7 +1108,7 @@ document.querySelectorAll('.zoombox').forEach(bindZoom);
 
 _CASE_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Hand review — __TITLE__</title>
+<title>__KIND__ — __TITLE__</title>
 <style>
 :root{--bg:#121214;--panel:#1a1a1e;--elev:#24242a;--line:#32323a;--fg:#f0f0f4;
   --dim:#9a9aa4;--accent:#7eb0ff;--accent-weak:rgba(126,176,255,.16);
@@ -942,10 +1213,12 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
   .pane{min-height:40vh}
   .dec button[data-v]{flex:1 1 30%;min-width:0;min-height:64px;font-size:17px;padding:10px 8px}
 }
+.gap{margin:6px 0 0;font-size:13px;color:var(--dim)}
+#qtools[hidden]{display:none}
 </style></head><body>
 <header>
   <div class="top">
-    <h1>Hand review — __TITLE__</h1>
+    <h1>__KIND__ — __TITLE__</h1>
     <div class="work">
       <div class="workbar" id="workbar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
            aria-valuenow="0" aria-label="Decisions in this tab">
@@ -967,6 +1240,13 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
   <section class="pane" id="querypane">
     <p class="kicker">Charter in question</p>
     <h2 id="qtitle">This page</h2>
+    <div class="tools" id="qtools" hidden>
+      <div class="flip">
+        <button type="button" id="prevQ" title="Previous page of this hand ([)">←</button>
+        <span class="count" id="qcount">—</span>
+        <button type="button" id="nextQ" title="Next page of this hand (])">→</button>
+      </div>
+    </div>
     <p class="meta" id="qmeta"></p>
     <div class="page zoombox" title="Scroll to zoom, drag to pan, double-click to reset">
       <div class="zoomstage"><img id="qimg" alt="charter in question"></div>
@@ -1027,14 +1307,14 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
     </span>
     <span id="tally"></span>
     <button type="button" id="dl">Download my decisions (CSV)</button>
-    <span>Never writes labels.csv · ←/→ flip pages · j/k cases · 1/2/3 decide · space tick · a/x all/none</span>
+    <span>Never writes labels.csv · ←/→ flip pages · [/] flip the left page · j/k cases · 1/2/3 decide · space tick · a/x all/none</span>
   </div>
 </footer>
 <script>
 __ZOOM_JS__
 var D = __PAYLOAD__, decisions = {}, sel = {}, checks = {}, insp = {},
     TAB = ((D.sections || [])[0] || {}).kind || 'attributions', selected = 0,
-    sort = 'closest', exi = 0;
+    sort = 'closest', exi = 0, qai = 0;
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function section(){
   var ss = D.sections || [];
@@ -1212,6 +1492,10 @@ function renderNums(r){
     bits.push('<span class="dim">cluster cohesion</span> '+fmt(r.hand_cos));
   if(r.calibrated_p != null)
     bits.push('<span class="dim">calibrated</span> '+Math.round(r.calibrated_p*100)+'%');
+  if(r.extra){
+    if(r.extra_only) bits = bits.slice(0, (L.length && dists && dists[exi] != null) ? 1 : 0);
+    r.extra.forEach(function(e){ bits.push('<span class="dim">'+esc(e[0])+'</span> '+esc(String(e[1]))); });
+  }
   box.innerHTML = bits.join('<span class="dim"> · </span>');
 }
 function caseDecided(r){
@@ -1253,16 +1537,16 @@ function render(){
   document.getElementById('how').textContent = r.text;
   document.getElementById('qtitle').textContent = r.document || 'This page';
   document.getElementById('exhand').textContent = r.hand || '—';
-  document.getElementById('exrole').textContent = (r.hand_role === 'proposed')
-    ? 'Proposed as' : (r.hand_role === 'cluster' ? 'Possible unnamed hand' : 'Recorded as');
+  document.getElementById('exrole').textContent = r.exrole || ((r.hand_role === 'proposed')
+    ? 'Proposed as' : (r.hand_role === 'cluster' ? 'Possible unnamed hand' : 'Recorded as'));
   document.querySelector('#querypane .kicker').textContent = r.query_kicker || 'Charter in question';
   var keepH = document.querySelector('.dec .keep small');
   var rejH = document.querySelector('.dec .reject small');
   if(keepH) keepH.textContent = r.keep_hint || 'Same scribe · 1';
   if(rejH) rejH.textContent = r.reject_hint || 'Unattribute · 2';
   document.getElementById('exkicker').textContent = (function(){
-    var who = (r.hand_role === 'cluster') ? 'this possible unnamed hand'
-                                         : ('pages of '+r.hand);
+    var who = r.exwho || ((r.hand_role === 'cluster') ? 'this possible unnamed hand'
+                                                      : ('pages of '+r.hand));
     return (sort === 'furthest' ? 'Least' : 'Most')+' like this charter among '+who;
   })();
   var grid = isGrid(r);
@@ -1290,13 +1574,23 @@ function render(){
     document.getElementById('tally').innerHTML = nAllG ? ('<b>'+nAllG+'</b> recorded') : '';
     return;
   }
-  var qi = (r.focus||[])[0];
+  var alts = r.query_alts || [];
+  var qtools = document.getElementById('qtools');
+  qtools.hidden = alts.length < 2;
+  if(alts.length){
+    if(qai >= alts.length) qai = 0;
+    if(qai < 0) qai = alts.length - 1;
+    document.getElementById('qcount').textContent = (qai+1)+' / '+alts.length;
+  }
+  var qi = alts.length ? alts[qai] : (r.focus||[])[0];
   showPage(document.getElementById('qimg'), qi, null, null);
   var qurl = (qi != null && D.urls && D.urls[qi]) || '';
-  var qlab = (r.hand_role === 'proposed') ? 'Unattributed · proposed as '
+  var qlab = (r.query_label != null) ? r.query_label
+           : (r.hand_role === 'proposed') ? 'Unattributed · proposed as '
            : (r.hand_role === 'cluster') ? 'Unattributed · reference page of '
            : 'Recorded as ';
-  document.getElementById('qmeta').innerHTML = qlab+esc(r.hand||'—') +
+  var qhand = (r.query_label != null) ? (D.hands[qi] || 'unattributed') : (r.hand||'—');
+  document.getElementById('qmeta').innerHTML = qlab+esc(qhand) +
     (r.hand_dist != null ? ' · cosine distance to hand '+fmt(r.hand_dist) : '') +
     (qurl ? ' · <a href="'+esc(qurl)+'" target="_blank">open original</a>' : '') +
     ((qi == null || !img(qi)) ? ' · <i>no image in this file</i>' : '');
@@ -1360,7 +1654,7 @@ function select(i){
   if(!R.length){ selected = 0; render(); return; }
   selected = Math.max(0, Math.min(R.length-1, i));
   sel[TAB] = selected;
-  sort = 'closest'; exi = 0;
+  sort = 'closest'; exi = 0; qai = 0;
   document.getElementById('sort-closest').classList.add('on');
   document.getElementById('sort-furthest').classList.remove('on');
   render();
@@ -1405,6 +1699,8 @@ document.getElementById('sort-furthest').addEventListener('click', function(){
 });
 document.getElementById('prevEx').addEventListener('click', function(){ exi -= 1; render(); });
 document.getElementById('nextEx').addEventListener('click', function(){ exi += 1; render(); });
+document.getElementById('prevQ').addEventListener('click', function(){ qai -= 1; render(); });
+document.getElementById('nextQ').addEventListener('click', function(){ qai += 1; render(); });
 document.getElementById('prevCase').addEventListener('click', function(){ select(selected-1); });
 document.getElementById('nextCase').addEventListener('click', function(){ select(selected+1); });
 document.getElementById('caseslider').addEventListener('input', function(){
@@ -1431,6 +1727,8 @@ document.addEventListener('keydown', function(e){
   if(e.key === ' ' && g){ e.preventDefault(); toggleInspected(); }
   if(e.key === 'j' || e.key === 'n'){ e.preventDefault(); select(selected+1); }
   if(e.key === 'k' || e.key === 'p'){ e.preventDefault(); select(selected-1); }
+  if(e.key === '['){ e.preventDefault(); qai -= 1; render(); }
+  if(e.key === ']'){ e.preventDefault(); qai += 1; render(); }
   if(e.key === '1') decide('keep');
   if(e.key === '2') decide('reject');
   if(e.key === '3') decide('unsure');

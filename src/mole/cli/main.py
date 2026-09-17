@@ -745,6 +745,54 @@ def review(
     console.print(f"[green]✓ review sheet → {path}[/green]\n  {summary}")
 
 
+# -------------------------------------------------------------------- cross
+@app.command()
+def cross(
+    embeddings: list[Path] = typer.Argument(
+        ..., help="One pooled embeddings .npy (several dataset folders embedded together), "
+                  "or several .npy files from the SAME checkpoint and codebook to stack."),
+    out: Optional[Path] = typer.Option(None, help="Output HTML (default: <first>.cross.html; "
+                                                  "the JSON report lands beside it)."),
+    limit: int = typer.Option(50, help="Candidates per list."),
+    center: bool = typer.Option(
+        True, "--center/--no-center",
+        help="Subtract each archive's mean vector before comparing (default on: removes "
+             "the shared 'how this repository scans' component). --no-center to see "
+             "the raw space."),
+    min_confidence: Optional[float] = typer.Option(
+        None, "--min-confidence",
+        help="Treat labels whose confidence column is below this as unlabeled "
+             "(e.g. Leroy auto-matches)."),
+    max_mb: float = typer.Option(
+        0.0, "--max-mb", help="Cap the finished file (MB); 0 = no cap (local use)."),
+    image_cache: Optional[Path] = typer.Option(
+        None, "--image-cache", help="Reuse encoded pages between builds (build-time only)."),
+    image_url: Optional[str] = typer.Option(
+        None, "--image-url", help="Link template for the original scan, e.g. "
+                                  "'https://archive.example/{filename}'."),
+    images: bool = typer.Option(True, "--images/--no-images", help="Embed the page images."),
+    seed: int = typer.Option(0, help="Seed for the reference subsample."),
+) -> None:
+    """Cross-archive hand candidates: which scribes appear in more than one collection?
+
+    Needs pages from ≥2 dataset folders in ONE embedding space (one checkpoint,
+    one codebook, one intra-norm setting). Measures how much the space still
+    ranks archives rather than hands (neighbour purity vs chance), centers each
+    archive, then lists mutual cross-archive page pairs (CSLS), pages that sit
+    with a hand of another archive, and cross-archive hand pairs — every score
+    beside the within-archive same-hand / different-hand reference. There is
+    no ground truth here; the sheet asks, the reviewer decides, decisions leave
+    as a CSV. labels.csv is never written.
+    """
+    from mole.review.render import render_cross
+
+    path, summary = render_cross(
+        embeddings, out=out, limit=limit, max_mb=max_mb, image_cache=image_cache,
+        image_url=image_url, images=images, center=center,
+        min_confidence=min_confidence, seed=seed)
+    console.print(f"[green]✓ cross-archive sheet → {path}[/green]\n  {summary}")
+
+
 # ---------------------------------------------------------------------- sup
 @sup_app.command("cache")
 def sup_cache(
