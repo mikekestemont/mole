@@ -133,7 +133,31 @@ normalization): 3 092 pages, 1 466 labeled.
   here.
 * Sheet: `outputs/cross0/july.cross.html` (server, scratch copy `~/mole-cross-tmp`).
 
-### 3.2 Phase A proper — the live sets (server, ~1 h GPU inference + CPU)
+### 3.2 Phase A proper — DONE 2026-09-17 (server: codebook ~15 min, embed 21 min, cross ~5 min)
+
+Measured script modules: antwerp-bin 39.3 px (IQR/median 0.47), utrecht-charters 48.4
+(0.01), leroy-sauvola 29.1 (0.34), comital 43.0 (0.02) → pinned **41.2 px**; 2 612 of
+2 835 pages resampled (70 unmeasurable, left at native scale).
+
+* **Shared-space price = none.** Within-archive macro-mAP (cross-doc) in the one
+  index: Antwerp **0.851** (own-codebook ref 0.817), comital **0.620** (0.598 with
+  the adapt+intra-norm stack), utrecht-charters 0.667, leroy-sauvola 0.784 (0.816 on
+  the retired leroy-bin, auto-labels unfiltered). `outputs/cross/pool.eval.json`.
+* **Gap:** own-scribe-masked purity@1 93 % raw → **74 % centered** (July 97 → 83);
+  @10 67 % (July 75 %). Scale pinning did real work; the rest is mostly legitimate.
+* **Reference:** same-hand Q1/med/Q3 0.07/0.16/0.29; different-hand −0.08/−0.02/0.06.
+  The top cross pairs (cos 0.36–0.53) sit above the same-hand Q3.
+* **Survived the re-prep (in both runs):** `antwerp-bin/0-0150 (1300)` ↔
+  `leroy-sauvola/671o` (#1 page pair twice); `comital/141_2_RAGent K72_29` ↔
+  `utrecht-charters/1249.99.99b` (cos 0.525, and that page's best foreign hand is
+  `comital/KA_10` 0.49 vs 0.37 at home); `antwerp-bin/0-0317 (1306)` → `leroy/20`.
+* **New:** comital↔Utrecht dominates the page pairs (19/50), Utrecht partners in
+  1245–1250; hand pairs rank-1 both ways: `comital/KA_10 ~ utrecht/DevB`,
+  `KA_10 ~ leroy/102`, `KA_9 ~ utrecht/MiC`, `KA_7 ~ leroy/86`. No duplicates.
+* Sheet: `outputs/cross/pool.cross.html` (76 MB; image cache `outputs/cross/imgcache`
+  makes rebuilds fast). Under review by Mike.
+
+Runbook as run (`mole codebook` needs the four folders, not the pool root):
 
 Model: `runs/pooled_bin_ft/checkpoint.pth` — the only checkpoint trained on all
 collections at once (July: one general model ≈ five specialists). The September
@@ -149,7 +173,8 @@ POOL=data/cross-pool bash scripts/assemble_pooled.sh \
 # 2. one codebook, one pinned script module, over the whole pool
 #    (comital 42.9 px, utrecht-charters 48.4 px, antwerp/leroy un-normalized ->
 #     every archive is rescaled to the pooled median at embed time)
-mole codebook runs/pooled_bin_ft/checkpoint.pth data/cross-pool \
+mole codebook runs/pooled_bin_ft/checkpoint.pth data/cross-pool/antwerp-bin \
+    data/cross-pool/utrecht-charters data/cross-pool/leroy-sauvola data/cross-pool/comital \
     --out outputs/cross/fit.codebook.npy --scale-target auto --device cuda:5
 # 3. one embedding file for the whole pool (intra-norm ON for the whole index)
 mole embed runs/pooled_bin_ft/checkpoint.pth data/cross-pool outputs/cross/pool.npy \
@@ -161,9 +186,7 @@ mole eval outputs/cross/pool.npy data/cross-pool --cross-doc-only --per-hand
 mole cross outputs/cross/pool.npy --limit 50 --min-confidence 0.5 \
     --out outputs/cross/pool.cross.html
 ```
-Then `scp mike:~/mole/outputs/cross/pool.cross.html ~/Downloads/ && open ~/Downloads/pool.cross.html`.
-Compare the header's purity numbers with §3.1: if the scale-pinned codebook did its
-job, "own scribe excluded" purity falls well below 98 %.
+Then `scp mike:~/mole/outputs/cross/pool.cross.html ~/Downloads/mole-cross/`.
 
 ## 4. Validation without ground truth
 
