@@ -295,24 +295,23 @@ def _page_tokens(model, crops, device, batch_size: int):
 def _foreground_mask(crops, patch_size: int, threshold: float, method: str = "intensity"):
     """Per-patch foreground mask, aligned with :func:`patch_descriptors` order.
 
-    CAUTION — Raven's PAPER and his RELEASED CODE specify different rules here, so
-    "Raven-parity" is ambiguous and the two are offered separately. Which one produced
-    the published 82.6% mAP is an open question for the author.
-
-    ``intensity`` — Raven's ``get_foreground_mask`` **verbatim**, as released in
-    ``attmask/extract_embeddings.py``::
+    ``intensity`` — legacy rule inherited from ``attmask/extract_embeddings.py``. That
+    script is of unclear provenance (it carries no trace of Raven et al. and is most
+    likely a local derivation, NOT their code), so it is kept only for reproducing old
+    runs::
 
         pooled = avg_pool2d(patches_tensor[:, 0:1], patch_size)
-        foreground_mask = pooled < (1.0 - threshold)          # his default threshold=0.02
+        foreground_mask = pooled < (1.0 - threshold)          # threshold=0.02
 
-    i.e. keep patches whose mean intensity is below ``1 - threshold``. His code counts
-    DARK pixels as foreground throughout (``np.sum(patch < 255)`` at window level), so
-    it assumes black-ink-on-white. Consequently it is useless on parchment (background
+    i.e. keep patches whose mean intensity is below ``1 - threshold``. It counts DARK
+    pixels as foreground throughout (``np.sum(patch < 255)`` at window level), so it
+    assumes black-ink-on-white. Consequently it is useless on parchment (background
     sits well below white, so nothing is dropped) and backwards on white-on-black
-    (it would keep the background and drop the ink).
+    (it would keep the background and drop the ink) — which is how Historical-WI is
+    distributed and how Raven et al. trained (foreground = 1, eq. 2 of the paper).
 
-    ``raven`` — the rule as stated in the PAPER (arXiv:2409.00751), which his code does
-    NOT implement: keep patch tokens whose FOREGROUND-PIXEL FRACTION is at least
+    ``raven`` — the rule as stated in the PAPER (Raven, Matei & Fink, ICDAR 2024,
+    arXiv:2409.00751): keep patch tokens whose FOREGROUND-PIXEL FRACTION is at least
     ``threshold``, with ``t_fg = 10`` foreground *pixels* per patch token (10/256 = 3.9%
     for ViT/16 — not to be confused with the paper's separate 2.5% *window* rule, see
     :func:`_window_foreground_mask`). On binarized input the per-patch mean is that
@@ -409,14 +408,14 @@ def _window_foreground_mask(crops, threshold: float, method: str = "raven"):
     """Raven's inference-time WINDOW pre-filter, applied to the crops *before* the ViT,
     so discarded windows cost no forward pass ("to save computation", per the paper).
 
-    Both the paper and his released code filter windows, at slightly different values:
-    the paper says keep windows with **>2.5%** foreground pixels; his
-    ``attmask/extract_embeddings.py`` uses **>=2%**::
+    The paper says keep windows with **>2.5%** foreground pixels. The legacy
+    ``attmask/extract_embeddings.py`` (provenance unclear, likely not Raven et al.'s
+    code) uses **>=2%**::
 
         foreground_ratio = np.sum(patch < 255) / (patch_size * patch_size)
-        if foreground_ratio >= foreground_threshold:   # his default 0.02
+        if foreground_ratio >= foreground_threshold:   # default 0.02
 
-    Note his ``patch < 255`` counts DARK pixels as foreground, i.e. black-ink-on-white.
+    Note its ``patch < 255`` counts DARK pixels as foreground, i.e. black-ink-on-white.
     Here polarity is instead auto-detected once per page (the minority tone is ink), so
     either convention works; each window's foreground fraction is then its own mean.
     This threshold is separate from the per-patch rule (the paper's ``t_fg = 10`` px) —
