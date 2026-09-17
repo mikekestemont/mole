@@ -5,7 +5,9 @@
 Named after *mole*, the Mexican sauce continually remade from the previous day's
 leftovers — the model is continually re-pretrained on a mix of old and new data.
 
-MOLE is a clean, packaged rewrite of Tim Raven's adaptation of **AttMask**
+MOLE is a clean, packaged rewrite of the writer-retrieval method of **Raven,
+Matei & Fink** (*Self-Supervised Vision Transformers for Writer Retrieval*,
+[arXiv:2409.00751](https://arxiv.org/abs/2409.00751)), which adapts **AttMask**
 (Kakogeorgiou et al.), itself in the **DINO** / **iBOT** lineage. The end goal is
 extracting embeddings for handwriting identification on premodern documents, and
 later a similarity-search engine over large image collections.
@@ -56,4 +58,6 @@ Sauvola by default — the same tone equalisation used on the Sluis/Leroy scans.
 - **AttMask** — Kakogeorgiou et al., *What to Hide from Your Students:
   Attention-Guided Masked Image Modeling* (ECCV 2022).
 - **iBOT** — Zhou et al. · **DINO** — Caron et al.
-- Tim Raven's writer-identification adaptation, which MOLE is refactored from.
+- **Raven, Matei & Fink** — *Self-Supervised Vision Transformers for Writer
+  Retrieval* ([arXiv:2409.00751](https://arxiv.org/abs/2409.00751), TU Dortmund).
+  MOLE is refactored from their code and checkpoint; the method is theirs.
