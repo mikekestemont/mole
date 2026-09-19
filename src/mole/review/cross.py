@@ -63,6 +63,34 @@ HAND_PAIR_CAP = 3
 REFERENCE_MAX_PAIRS = 200_000
 
 
+def _pair_key(a: str, b: str) -> str:
+    """Canonical 'archiveA|archiveB' name for an archive pair."""
+    return "|".join(sorted((str(a), str(b))))
+
+
+def _take_per_pair(items: list[dict], limit: int, *, cap_key: str | None = None,
+                   cap: int = 0) -> list[dict]:
+    """Keep the top ``limit`` items of EVERY archive pair (items already ranked).
+
+    One dominant pair (comital ↔ Utrecht in Phase A: 19 of 50 page pairs) must
+    not crowd the others out — the reviewer reads the sheet per pair. An optional
+    per-``cap_key`` cap (per hand) applies on top.
+    """
+    n_pair: dict[str, int] = {}
+    n_cap: dict[str, int] = {}
+    out = []
+    for d in items:
+        if n_pair.get(d["pair"], 0) >= limit:
+            continue
+        if cap_key and n_cap.get(d[cap_key], 0) >= cap:
+            continue
+        n_pair[d["pair"]] = n_pair.get(d["pair"], 0) + 1
+        if cap_key:
+            n_cap[d[cap_key]] = n_cap.get(d[cap_key], 0) + 1
+        out.append(d)
+    return out
+
+
 @dataclass
 class CrossReport:
     """Everything `mole cross` computed, JSON-serialisable."""
@@ -355,6 +383,7 @@ def hand_pairs(sim: np.ndarray, members: dict[str, np.ndarray], archive_of_hand:
         bp, ra, rb = best[(a, b)]
         out.append({"hand_a": a, "hand_b": b,
                     "archive_a": archive_of_hand[a], "archive_b": archive_of_hand[b],
+                    "pair": _pair_key(archive_of_hand[a], archive_of_hand[b]),
                     "score": c, "cross_mean": mean[(a, b)],
                     "own_similarity": own,
                     "closeness": (mean[(a, b)] - own) if own is not None else None,
@@ -368,15 +397,17 @@ def hand_pairs(sim: np.ndarray, members: dict[str, np.ndarray], archive_of_hand:
                     **_anchor(same, diff, c)})
     out.sort(key=lambda d: -d["score"])
     taken: dict[str, int] = {}
+    n_pair: dict[str, int] = {}
     kept = []
     for d in out:
+        if n_pair.get(d["pair"], 0) >= limit:
+            continue
         if taken.get(d["hand_a"], 0) >= HAND_PAIR_CAP or taken.get(d["hand_b"], 0) >= HAND_PAIR_CAP:
             continue
         taken[d["hand_a"]] = taken.get(d["hand_a"], 0) + 1
         taken[d["hand_b"]] = taken.get(d["hand_b"], 0) + 1
+        n_pair[d["pair"]] = n_pair.get(d["pair"], 0) + 1
         kept.append(d)
-        if len(kept) >= limit:
-            break
     return kept
 
 
@@ -415,6 +446,7 @@ def page_to_hand(sim: np.ndarray, members: dict[str, np.ndarray], archive_of_han
             k = int(np.argmax(hs))
             own_hand, own_s = (hand_list[k], float(hs[k])) if np.isfinite(hs[k]) else ("", float("nan"))
         out.append({"row": i, "document": names[i], "archive": str(archives[i]),
+                    "pair": _pair_key(archives[i], hand_arch[j]),
                     "recorded_hand": hands[i] or "",
                     "hand": hand_list[j], "score": s,
                     "runner_up": hand_list[runner] if np.isfinite(runner_s) else None,
@@ -425,16 +457,7 @@ def page_to_hand(sim: np.ndarray, members: dict[str, np.ndarray], archive_of_han
                     "n_support": int(support[hand_list[j]]),
                     **_anchor(same, diff, s)})
     out.sort(key=lambda d: -d["score"])
-    taken: dict[str, int] = {}
-    kept = []
-    for d in out:
-        if taken.get(d["hand"], 0) >= PER_HAND_CAP:
-            continue
-        taken[d["hand"]] = taken.get(d["hand"], 0) + 1
-        kept.append(d)
-        if len(kept) >= limit:
-            break
-    return kept
+    return _take_per_pair(out, limit, cap_key="hand", cap=PER_HAND_CAP)
 
 
 def csls_matrix(sim: np.ndarray, archives: np.ndarray, k: int = CSLS_K) -> np.ndarray:
@@ -484,6 +507,7 @@ def page_pairs(sim: np.ndarray, archives: np.ndarray, hands: np.ndarray, names: 
         cos = float(sim[i, j])
         rec = {"row_a": i, "row_b": j, "document_a": names[i], "document_b": names[j],
                "archive_a": str(archives[i]), "archive_b": str(archives[j]),
+               "pair": _pair_key(archives[i], archives[j]),
                "hand_a": hands[i] or "", "hand_b": hands[j] or "",
                "similarity": cos, "csls": float(cs[i, j]),
                "home_best_a": float(home_best[i]) if np.isfinite(home_best[i]) else None,
@@ -492,16 +516,19 @@ def page_pairs(sim: np.ndarray, archives: np.ndarray, hands: np.ndarray, names: 
         (dups if cos >= DUPLICATE_SIM else pairs).append(rec)
     pairs.sort(key=lambda d: -d["csls"])
     dups.sort(key=lambda d: -d["similarity"])
-    return pairs[:limit], dups, cs
+    return _take_per_pair(pairs, limit), dups, cs
 
 
 # ------------------------------------------------------------------ driver
 
 
-def build_cross(embeddings: list[str | Path], *, limit: int = 50, center: bool = True,
+def build_cross(embeddings: list[str | Path], *, limit: int = 12, center: bool = True,
                 min_confidence: float | None = None, seed: int = 0,
                 out: str | Path | None = None) -> tuple[CrossReport, dict]:
     """Run the whole analysis. Returns ``(report, table)``.
+
+    ``limit`` is per list AND per archive pair: every pair of archives keeps its
+    own top ``limit`` candidates, so the sheet can be read pair by pair.
 
     ``table`` holds what the renderer needs beyond the report: the centered,
     normalised vectors ``Xn``, the masked similarity, the CSLS matrix, paths,
@@ -579,6 +606,11 @@ def format_report(r: CrossReport) -> str:
                      f"different-hand {d[0]:.3f}/{d[1]:.3f}/{d[2]:.3f} (n={ref['n_diff_hand_pairs']})")
     lines.append(f"  page pairs {len(r.page_pairs)} · page→foreign hand {len(r.page_to_hand)} · "
                  f"hand pairs {len(r.hand_pairs)} · possible duplicates {len(r.duplicates)}")
+    pairs = sorted({d["pair"] for d in r.page_pairs + r.page_to_hand + r.hand_pairs})
+    for pk in pairs:
+        n = [sum(1 for d in lst if d["pair"] == pk)
+             for lst in (r.page_pairs, r.page_to_hand, r.hand_pairs)]
+        lines.append(f"    {pk.replace('|', ' ↔ ')}: {n[0]} / {n[1]} / {n[2]}")
     for d in r.page_pairs[:5]:
         lines.append(f"    {d['document_a']} ↔ {d['document_b']}: cos {d['similarity']:.3f}, "
                      f"csls {d['csls']:.3f}, home {d['home_best_a']:.3f}/{d['home_best_b']:.3f}, "

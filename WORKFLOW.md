@@ -325,7 +325,7 @@ POOL=data/cross-pool bash scripts/assemble_pooled.sh data/a-bin data/b-bin data/
 mole codebook <ckpt> data/cross-pool --out outputs/cross/fit.codebook.npy --scale-target auto
 mole embed <ckpt> data/cross-pool outputs/cross/pool.npy --pooling vlad \
     --codebook-from outputs/cross/fit.codebook.npy --vlad-intra-norm
-mole cross outputs/cross/pool.npy --limit 50 --min-confidence 0.5      # → pool.cross.html + .json
+mole cross outputs/cross/pool.npy --limit 12 --min-confidence 0.5      # → pool.cross.html + .json
 mole cross a.npy b.npy c.npy --out x.cross.html                        # or stack files (same model)
 ```
 
@@ -338,7 +338,10 @@ archive, the best hand at home beside it), **hand pairs** (ranked by their two
 strongest cross-document matches; flip the left hand's pages with `[` / `]`). Every
 score stands beside the within-archive reference — the share of same-hand and of
 different-hand pairs inside an archive it exceeds — as a yardstick, never a filter.
-Sibling scans never vouch; near-identical images land in a separate duplicates tab.
+`--limit` is per list **per archive pair** (every pair keeps its own top N, so one
+dominant pair cannot crowd out the rest) and the sheet has an archive-pair selector
+under the tabs. Sibling scans never vouch; near-identical images land in a separate
+duplicates tab.
 
 ---
 

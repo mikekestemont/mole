@@ -568,14 +568,16 @@ def _cross_rows(report, table, limit: int) -> list[tuple[str, str, str, list[dic
 
     sections = []
     for kind, heading, blurb in _CROSS_SECTIONS:
-        items = getattr(report, kind, [])[:limit]
+        items = getattr(report, kind, [])          # already capped per archive pair
         rows = []
         for n, it in enumerate(items):
             r = {"kind": kind, "id": f"{kind}-{n}", "numbers": "", "extra_only": True,
+                 "pair": it.get("pair") or "",
                  "calibrated_p": None, "closer_hand": None, "closer_dist": None,
                  "runner_up": None, "runner_dist": None, "z": 0.0}
             if kind in ("page_pairs", "duplicates"):
                 i, j = int(it["row_a"]), int(it["row_b"])
+                r["pair"] = r["pair"] or "|".join(sorted((it["archive_a"], it["archive_b"])))
                 # the partner first, then the query's next-closest pages in the
                 # partner's archive, so the reviewer sees the alternatives too
                 others = [int(k) for k in np.where(archives == archives[j])[0]
@@ -763,6 +765,7 @@ def render_cross(embeddings: list[str | Path], *, out: str | Path | None = None,
         "n_labeled": report.n_labeled,
         "n_hands": len(table["members"]),
         "gap": gap,
+        "pairs": sorted({r["pair"] for _k, _h, _b, rws in sections for r in rws if r.get("pair")}),
     }
     title = escape(", ".join(f"{a} ({n})" for a, n in report.archives.items()))
     html = _CASE_HTML.replace("__TITLE__", title) \
@@ -1137,6 +1140,9 @@ h1{font-size:15px;font-weight:650;margin:0;letter-spacing:-.02em;color:var(--dim
   border-radius:8px;padding:5px 11px;font:inherit;cursor:pointer}
 .tabs button.on{background:var(--accent-weak);border-color:var(--accent)}
 .tabs button:disabled{opacity:.4;cursor:not-allowed}
+.pairs{margin-top:6px}
+.pairs button{font-size:12px;padding:3px 9px}
+.pairs[hidden]{display:none}
 main{flex:1 1 auto;min-height:0;display:flex}
 .pane{flex:1 1 50%;min-width:0;display:flex;flex-direction:column;padding:12px 16px 8px}
 .pane + .pane{border-left:1px solid var(--line)}
@@ -1235,6 +1241,7 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
     Furthest = the range.</p>
   <p class="nums" id="nums"></p>
   <nav class="tabs" id="tabs"></nav>
+  <nav class="tabs pairs" id="pairs" hidden></nav>
 </header>
 <main>
   <section class="pane" id="querypane">
@@ -1314,14 +1321,37 @@ a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
 __ZOOM_JS__
 var D = __PAYLOAD__, decisions = {}, sel = {}, checks = {}, insp = {},
     TAB = ((D.sections || [])[0] || {}).kind || 'attributions', selected = 0,
-    sort = 'closest', exi = 0, qai = 0;
+    sort = 'closest', exi = 0, qai = 0, PAIR = '';
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function section(){
   var ss = D.sections || [];
   for(var i=0;i<ss.length;i++) if(ss[i].kind === TAB) return ss[i];
   return {rows:[], heading:''};
 }
-function rows(){ return section().rows || []; }
+function rows(){
+  var R = section().rows || [];
+  if(!PAIR) return R;
+  return R.filter(function(r){ return r.pair === PAIR; });
+}
+function pairLabel(p){ return p ? p.split('|').join(' \u2194 ') : 'all archive pairs'; }
+function setPair(p){
+  PAIR = p; selected = 0; sel = {};
+  document.querySelectorAll('#pairs button[data-pair]').forEach(function(b){
+    b.classList.toggle('on', b.getAttribute('data-pair') === p);
+  });
+  renderPairCounts();
+  sort = 'closest'; exi = 0; qai = 0;
+  render();
+}
+function renderPairCounts(){
+  var R = section().rows || [];
+  document.querySelectorAll('#pairs button[data-pair]').forEach(function(b){
+    var p = b.getAttribute('data-pair');
+    var n = p ? R.filter(function(r){ return r.pair === p; }).length : R.length;
+    b.textContent = pairLabel(p) + ' (' + n + ')';
+    b.disabled = !n;
+  });
+}
 function listFor(r){ return (sort === 'furthest' ? r.furthest : r.closest) || []; }
 function distFor(r){ return (sort === 'furthest' ? r.furthest_dist : r.closest_dist) || []; }
 function img(i){ return (D.images && D.images[i]) || ''; }
@@ -1668,6 +1698,7 @@ function setTab(kind){
   sort = 'closest'; exi = 0;
   document.getElementById('sort-closest').classList.add('on');
   document.getElementById('sort-furthest').classList.remove('on');
+  renderPairCounts();
   render();
 }
 (function(){
@@ -1681,6 +1712,19 @@ function setTab(kind){
     b.addEventListener('click', function(){ setTab(s.kind); });
     nav.appendChild(b);
   });
+  if(D.pairs && D.pairs.length){
+    var pn = document.getElementById('pairs');
+    pn.hidden = false;
+    [''].concat(D.pairs).forEach(function(p){
+      var pb = document.createElement('button');
+      pb.type = 'button';
+      pb.setAttribute('data-pair', p);
+      pb.className = (p === PAIR) ? 'on' : '';
+      pb.addEventListener('click', function(){ setPair(p); });
+      pn.appendChild(pb);
+    });
+    renderPairCounts();
+  }
 })();
 document.getElementById('selAll').addEventListener('click', function(){ selectAll(true); });
 document.getElementById('selNone').addEventListener('click', function(){ selectAll(false); });

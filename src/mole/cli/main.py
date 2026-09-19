@@ -753,7 +753,9 @@ def cross(
                   "or several .npy files from the SAME checkpoint and codebook to stack."),
     out: Optional[Path] = typer.Option(None, help="Output HTML (default: <first>.cross.html; "
                                                   "the JSON report lands beside it)."),
-    limit: int = typer.Option(50, help="Candidates per list."),
+    limit: int = typer.Option(
+        12, help="Candidates per list PER ARCHIVE PAIR (every pair of archives keeps its "
+                 "own top N; the sheet has a pair selector)."),
     center: bool = typer.Option(
         True, "--center/--no-center",
         help="Subtract each archive's mean vector before comparing (default on: removes "

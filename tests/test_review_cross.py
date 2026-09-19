@@ -188,3 +188,25 @@ def test_sheet_is_self_contained_and_carries_all_tabs(tmp_path):
         for r in s["rows"]:
             assert r["ask"].endswith("?")
     assert "labels.csv" not in summary
+
+
+def test_every_archive_pair_keeps_its_own_quota(tmp_path):
+    import re
+    from mole.review.render import render_cross
+
+    npy = _pool_with_images(tmp_path)
+    report, _ = build_cross([npy], limit=2)
+    for lst in (report.page_pairs, report.page_to_hand, report.hand_pairs):
+        counts: dict = {}
+        for d in lst:
+            assert d["pair"] == "|".join(sorted(d["pair"].split("|")))
+            counts[d["pair"]] = counts.get(d["pair"], 0) + 1
+        assert all(n <= 2 for n in counts.values())
+    path, _ = render_cross([npy], limit=2, out=tmp_path / "p.cross.html")
+    D = json.loads(re.search(r"var D = (\{.*\}), decisions", path.read_text(), re.S).group(1))
+    assert D["pairs"] and all("|" in p for p in D["pairs"])
+    assert all(r["pair"] in D["pairs"] for s in D["sections"] for r in s["rows"])
+    # the sheet carries every per-pair candidate, not a global slice
+    n_pp = next(len(s["rows"]) for s in D["sections"] if s["kind"] == "page_pairs")
+    assert n_pp == len(report.page_pairs)
+    assert 'id="pairs"' in path.read_text()
