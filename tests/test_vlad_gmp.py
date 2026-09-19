@@ -127,3 +127,27 @@ def test_guard_treats_old_sidecars_as_sum(tmp_path, capsys):
     _warn_on_version_mismatch(tmp_path, "m@abcd1234+step0", pooling=Pooling.VLAD,
                               vlad_intra_norm=False, vlad_pooling="sum")
     assert capsys.readouterr().out == ""
+
+
+# ------------------------------------------------------------ k-means knobs
+def test_fit_codebook_batch_size_and_n_init_are_knobs():
+    from mole.embed.vlad import (KMEANS_BATCH_SIZE_RAVEN, KMEANS_N_INIT_RAVEN,
+                                 fit_codebook)
+    pytest.importorskip("sklearn")
+    rng = np.random.default_rng(5)
+    x = np.vstack([rng.normal(loc=c, scale=0.1, size=(200, 4))
+                   for c in (-3.0, 0.0, 3.0)]).astype(np.float32)
+    default = fit_codebook(x, n_clusters=3, seed=0)
+    raven = fit_codebook(x, n_clusters=3, seed=0, batch_size=KMEANS_BATCH_SIZE_RAVEN,
+                         n_init=KMEANS_N_INIT_RAVEN)
+    # Both recover the three blobs; the knob is accepted and changes the fit path.
+    for cb in (default, raven):
+        assert sorted(np.round(cb.mean(1)).astype(int)) == [-3, 0, 3]
+    assert KMEANS_BATCH_SIZE_RAVEN == 1_000_000 and KMEANS_N_INIT_RAVEN == 1
+
+
+def test_cli_kmeans_defaults_unchanged():
+    from mole.cli.main import embed as cli_embed
+    params = inspect.signature(cli_embed).parameters
+    assert params["kmeans_batch_size"].default.default == 10_000
+    assert params["kmeans_n_init"].default.default == 3

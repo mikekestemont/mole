@@ -336,6 +336,15 @@ def embed(
              "+0.06 Utrecht) — but it mildly HURTS balanced ones (e.g. Leroy), so it is "
              "opt-in, not the default. See the recipe in VLAD_ADAPTATION_RESULTS.md / "
              "WORKFLOW.md. All embeddings in one index must agree on this flag."),
+    kmeans_batch_size: int = typer.Option(
+        10_000, "--kmeans-batch-size",
+        help="MiniBatchKMeans batch for the VLAD codebook fit. mole's default 10,000 is a "
+             "real minibatch fit; Raven's released code uses 1,000,000 with n_init 1 — on a "
+             "pool of that size it is effectively full-batch Lloyd and gives different "
+             "centres. Use --kmeans-batch-size 1000000 --kmeans-n-init 1 for parity runs "
+             "(needs RAM for one batch: 1e6 x 384 float64 = 3 GB)."),
+    kmeans_n_init: int = typer.Option(
+        3, "--kmeans-n-init", help="MiniBatchKMeans restarts (best inertia kept). Raven: 1."),
     vlad_pooling: str = typer.Option(
         "sum", "--vlad-pooling",
         help="How each cluster's residuals are pooled: 'sum' (plain VLAD, the paper) or "
@@ -400,6 +409,7 @@ def embed(
     _embed(checkpoint, input_dir, output, pooling=pooling, whiten=whiten, head=head,
            overrides=list(set_), batch_size=batch_size, vlad_clusters=vlad_clusters,
            vlad_max_descriptors=vlad_max_descriptors,
+           kmeans_batch_size=kmeans_batch_size, kmeans_n_init=kmeans_n_init,
            seed=seed, device=device, foreground=foreground,
            foreground_threshold=foreground_threshold, foreground_method=foreground_method,
            window_foreground=window_foreground,

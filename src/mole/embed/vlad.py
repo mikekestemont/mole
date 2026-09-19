@@ -15,8 +15,18 @@ from __future__ import annotations
 import numpy as np
 
 
+KMEANS_BATCH_SIZE_DEFAULT = 10_000
+KMEANS_N_INIT_DEFAULT = 3
+# Raven's released code: MiniBatchKMeans(n_clusters=100, n_init=1, batch_size=1_000_000)
+# on ~1.2M train tokens — a batch that large makes it effectively full-batch Lloyd.
+KMEANS_BATCH_SIZE_RAVEN = 1_000_000
+KMEANS_N_INIT_RAVEN = 1
+
+
 def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
-                 max_iter: int = 100, max_descriptors: int = 0):
+                 max_iter: int = 100, max_descriptors: int = 0,
+                 batch_size: int = KMEANS_BATCH_SIZE_DEFAULT,
+                 n_init: int = KMEANS_N_INIT_DEFAULT):
     """Fit a reproducible k-means codebook on patch descriptors.
 
     ``descriptors`` is a ``[N, dim]`` float array. Returns the ``[K, dim]``
@@ -28,6 +38,12 @@ def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
     little beyond the memory already holding it. Set ``max_descriptors`` to a positive
     N to cap the pool at a seeded random subsample of N (a tractability escape hatch —
     note it *is* a deviation from the paper).
+
+    ``batch_size``/``n_init`` are MiniBatchKMeans's. mole's defaults (10k, 3 inits) are
+    a genuine minibatch fit; Raven's released code uses ``batch_size=1_000_000,
+    n_init=1`` — with a pool of about that size the "minibatch" is the whole pool, i.e.
+    plain Lloyd on every step, which yields different (less noisy) centres. Pass
+    ``KMEANS_BATCH_SIZE_RAVEN``/``KMEANS_N_INIT_RAVEN`` for parity runs.
     """
     x = np.asarray(descriptors, dtype=np.float32)
     if x.ndim != 2:
@@ -41,8 +57,8 @@ def fit_codebook(descriptors, n_clusters: int = 100, seed: int = 0,
     except ModuleNotFoundError:
         return _numpy_kmeans(x, k, seed, max_iter)
 
-    km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=10_000,
-                         n_init=3, max_iter=max_iter)
+    km = MiniBatchKMeans(n_clusters=k, random_state=seed, batch_size=int(batch_size),
+                         n_init=int(n_init), max_iter=max_iter)
     _fit_with_heartbeat(km, x, f"Fitting VLAD codebook (K={k}, {len(x):,} pts)")
     return km.cluster_centers_.astype(np.float32)
 

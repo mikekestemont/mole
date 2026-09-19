@@ -740,6 +740,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           head: str | Path | None = None,
           overrides: list[str] | None = None, *, batch_size: int = 32,
           vlad_clusters: int = 100, vlad_max_descriptors: int = 0,
+          kmeans_batch_size: int = _vlad.KMEANS_BATCH_SIZE_DEFAULT,
+          kmeans_n_init: int = _vlad.KMEANS_N_INIT_DEFAULT,
           seed: int = 0, device: str | None = None,
           foreground: bool = True, foreground_threshold: float | None = None,
           foreground_method: str = "contrast",
@@ -939,7 +941,9 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                                      vlad_clusters, seed, intra_norm=vlad_intra_norm,
                                      vlad_pooling=vlad_pooling, gmp_gamma=gmp_gamma,
                                      codebook_from=codebook_from,
-                                     max_descriptors=vlad_max_descriptors)
+                                     max_descriptors=vlad_max_descriptors,
+                                     kmeans_batch_size=kmeans_batch_size,
+                                     kmeans_n_init=kmeans_n_init)
 
     whiten_transform = None
     did_whiten = (whiten or whiten_dim or whiten_from) and pooling is not Pooling.PATCHES
@@ -956,6 +960,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             meta["whiten_source"] = "fitted"
         meta["whitened"] = True
         meta["whiten_dim"] = int(matrix.shape[1])
+
+    if pooling is Pooling.VLAD and codebook_from is None:   # codebook fitted here
+        meta["vlad_kmeans_batch_size"] = int(kmeans_batch_size)
+        meta["vlad_kmeans_n_init"] = int(kmeans_n_init)
 
     if scaler is not None:
         print(f"[mole] {scaler.note()}", flush=True)
@@ -988,7 +996,9 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
 def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed,
               *, intra_norm: bool = True, vlad_pooling: str = "sum",
               gmp_gamma: float = 1000.0, codebook_from: str | Path | None = None,
-              max_descriptors: int = 0):
+              max_descriptors: int = 0,
+              kmeans_batch_size: int = _vlad.KMEANS_BATCH_SIZE_DEFAULT,
+              kmeans_n_init: int = _vlad.KMEANS_N_INIT_DEFAULT):
     """Turn per-page results into the final matrix (+ codebook for vlad).
 
     ``rows`` is already filled for mean/cls/patches; for vlad it is empty and
@@ -1021,10 +1031,12 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
               f"{len(page_descriptors)} pages…", flush=True)
         all_desc = np.vstack(page_descriptors)
         print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
-              f"patch descriptors (seed {seed})…", flush=True)
+              f"patch descriptors (seed {seed}, k-means batch {kmeans_batch_size:,}, "
+              f"n_init {kmeans_n_init})…", flush=True)
         t0 = time.perf_counter()
         codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed,
-                                      max_descriptors=max_descriptors)
+                                      max_descriptors=max_descriptors,
+                                      batch_size=kmeans_batch_size, n_init=kmeans_n_init)
         print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
     mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm,
                                        pooling=vlad_pooling, gmp_gamma=gmp_gamma)
