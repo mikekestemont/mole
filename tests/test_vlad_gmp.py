@@ -151,3 +151,14 @@ def test_cli_kmeans_defaults_unchanged():
     params = inspect.signature(cli_embed).parameters
     assert params["kmeans_batch_size"].default.default == 10_000
     assert params["kmeans_n_init"].default.default == 3
+
+
+def test_gather_descriptor_sample_matches_stacked_choice():
+    from mole.embed.extract import _gather_descriptor_sample
+    rng = np.random.default_rng(6)
+    pages = [rng.normal(size=(n, 4)).astype(np.float32) for n in (5, 0, 17, 3)]
+    got = _gather_descriptor_sample(pages, 9, seed=1)
+    stacked = np.vstack(pages)
+    want = stacked[np.sort(np.random.default_rng(1).choice(len(stacked), 9, replace=False))]
+    np.testing.assert_array_equal(got, want)
+    assert len(_gather_descriptor_sample(pages, 1000, seed=1)) == len(stacked)

@@ -1027,22 +1027,48 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
               f"from {codebook_from}", flush=True)
     else:
         n_desc = sum(len(d) for d in page_descriptors)
-        print(f"[mole] VLAD: assembling {n_desc:,} patch descriptors from "
-              f"{len(page_descriptors)} pages…", flush=True)
-        all_desc = np.vstack(page_descriptors)
-        print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(all_desc):,} "
-              f"patch descriptors (seed {seed}, k-means batch {kmeans_batch_size:,}, "
-              f"n_init {kmeans_n_init})…", flush=True)
+        # The per-page arrays are needed again for encoding, so the fit pool is a
+        # SECOND copy of the descriptors. Build it as small as the cap allows — a
+        # subsample gathered page by page, never the full stack — and free it before
+        # encoding: on HWI (3.5M x 384) the stack alone is 5.3 GB, and with a 1M
+        # k-means batch on top the 24 GB box OOM-killed the run.
+        if max_descriptors and n_desc > max_descriptors:
+            pool = _gather_descriptor_sample(page_descriptors, max_descriptors, seed)
+        else:
+            pool = np.vstack(page_descriptors)
+        print(f"[mole] VLAD: fitting {vlad_clusters}-cluster codebook on {len(pool):,} of "
+              f"{n_desc:,} patch descriptors (seed {seed}, k-means batch "
+              f"{kmeans_batch_size:,}, n_init {kmeans_n_init})…", flush=True)
         t0 = time.perf_counter()
-        codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed,
-                                      max_descriptors=max_descriptors,
+        codebook = _vlad.fit_codebook(pool, n_clusters=vlad_clusters, seed=seed,
                                       batch_size=kmeans_batch_size, n_init=kmeans_n_init)
+        del pool
         print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
     mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm,
                                        pooling=vlad_pooling, gmp_gamma=gmp_gamma)
                      for d in track(page_descriptors, "VLAD encoding", unit="page")])
     rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
     return mat, codebook
+
+
+def _gather_descriptor_sample(page_descriptors, n: int, seed: int) -> np.ndarray:
+    """``n`` descriptors drawn uniformly (without replacement) across all pages.
+
+    Equivalent to ``vstack(pages)[rng.choice(total, n)]`` but never materialises the
+    stack: the chosen global indices are mapped back to (page, row) through the
+    page offsets, so the peak extra memory is the sample itself.
+    """
+    counts = np.array([len(d) for d in page_descriptors])
+    offsets = np.concatenate([[0], np.cumsum(counts)])
+    total = int(offsets[-1])
+    rng = np.random.default_rng(seed)
+    chosen = np.sort(rng.choice(total, size=min(n, total), replace=False))
+    out = np.empty((len(chosen), page_descriptors[0].shape[1]), dtype=np.float32)
+    page = np.searchsorted(offsets, chosen, side="right") - 1
+    for p in np.unique(page):
+        sel = chosen[page == p] - offsets[p]
+        out[page == p] = page_descriptors[p][sel]
+    return out
 
 
 def _pick_device():
