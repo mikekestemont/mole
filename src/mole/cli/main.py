@@ -461,6 +461,10 @@ def codebook(
         50, "--adapt-min-assigned",
         help="With --adapt-from: cells collecting fewer target descriptors keep their "
              "frozen centre (a noisy mean would hurt)."),
+    kmeans_batch_size: int = typer.Option(
+        10_000, "--kmeans-batch-size",
+        help="MiniBatchKMeans batch (Raven's released code: 1000000 with --kmeans-n-init 1)."),
+    kmeans_n_init: int = typer.Option(3, "--kmeans-n-init", help="k-means restarts (Raven: 1)."),
     set_: Optional[list[str]] = typer.Option(
         None, "--set", help="Geometry overrides, e.g. --set window_size=224 --set overlap=0.5."),
 ) -> None:
@@ -484,7 +488,8 @@ def codebook(
         foreground_method=foreground_method, window_foreground=window_foreground,
         window_foreground_threshold=window_foreground_threshold, invert=invert,
         scale_target=scale_target, scale_method=scale_method,
-        adapt_from=adapt_from, adapt_min_assigned=adapt_min_assigned)
+        adapt_from=adapt_from, adapt_min_assigned=adapt_min_assigned,
+        kmeans_batch_size=kmeans_batch_size, kmeans_n_init=kmeans_n_init)
     verb = "adapted" if prov.get("adapted_from") else "fitted"
     console.print(
         f"[green]✓ {prov['clusters']}-cluster codebook ({verb}) → {out}[/green]\n"

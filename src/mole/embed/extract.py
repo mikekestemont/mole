@@ -541,7 +541,9 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
                         scale_target: str | float | None = None,
                         scale_method: str = "profile",
                         adapt_from: str | Path | None = None,
-                        adapt_min_assigned: int = 50) -> dict:
+                        adapt_min_assigned: int = 50,
+                        kmeans_batch_size: int = _vlad.KMEANS_BATCH_SIZE_DEFAULT,
+                        kmeans_n_init: int = _vlad.KMEANS_N_INIT_DEFAULT) -> dict:
     """Fit ONE VLAD codebook over several datasets, in bounded memory.
 
     This is the index primitive: fit a codebook once over a pooled corpus, freeze it,
@@ -695,9 +697,11 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
               f"target descriptors)", flush=True)
     else:
         print(f"[mole] VLAD: fitting {clusters}-cluster codebook on {reservoir.filled:,} of "
-              f"{reservoir.seen:,} descriptors (seed {seed})…", flush=True)
+              f"{reservoir.seen:,} descriptors (seed {seed}, k-means batch "
+              f"{kmeans_batch_size:,}, n_init {kmeans_n_init})…", flush=True)
         t0 = time.perf_counter()
-        codebook = _vlad.fit_codebook(reservoir.sample, n_clusters=clusters, seed=seed)
+        codebook = _vlad.fit_codebook(reservoir.sample, n_clusters=clusters, seed=seed,
+                                      batch_size=kmeans_batch_size, n_init=kmeans_n_init)
         print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
 
     np.save(out, codebook)
@@ -707,6 +711,7 @@ def fit_corpus_codebook(checkpoint: str | Path, input_dirs: Sequence[str | Path]
         "datasets": [str(d) for d in dirs], "pages_per_dataset": per_dataset,
         "n_pages": len(pages), "descriptors_seen": int(reservoir.seen),
         "descriptors_sampled": int(reservoir.filled), "max_descriptors": int(max_descriptors),
+        "kmeans_batch_size": int(kmeans_batch_size), "kmeans_n_init": int(kmeans_n_init),
         "seed": seed, "geometry": {k: settings[k] for k in ("window_size", "overlap", "use_zones")},
         "invert": bool(settings["invert"]),
         "foreground": bool(foreground), "foreground_method": foreground_method,
