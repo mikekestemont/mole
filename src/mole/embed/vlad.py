@@ -155,17 +155,57 @@ def adapt_codebook(codebook, descriptors, min_assigned: int = 50):
     return adapted, counts
 
 
+VLAD_POOLINGS = ("sum", "gmp")
+GMP_GAMMA_DEFAULT = 1000.0
+
+
+def gmp_pool(residuals: np.ndarray, gamma: float = GMP_GAMMA_DEFAULT) -> np.ndarray:
+    """Generalized max pooling (Murray & Perronnin, CVPR 2014) of one cluster's residuals.
+
+    Sum pooling lets frequent descriptors dominate a cluster block (burstiness). GMP
+    instead returns the vector ``xi`` whose inner product with EVERY residual is ~1,
+    i.e. the ridge solution of ``R xi = 1``::
+
+        xi = (R^T R + gamma I)^-1 R^T 1
+
+    so each descriptor contributes equally regardless of how many near-copies it
+    has. ``gamma`` trades that off against the plain sum: as gamma → ∞ the solution
+    tends to ``R^T 1 / gamma`` (sum pooling up to a scale that the later global L2
+    removes), so a large gamma is a mild GMP, a small one an aggressive one.
+
+    Same problem Raven's ``sklearn.linear_model.Ridge(alpha=gamma, fit_intercept=False)``
+    solves (his default ``gamma=1000``), computed in closed form via the ``[dim, dim]``
+    normal equations — exact and cheap at dim=384, whatever the cluster's size.
+    """
+    r = np.asarray(residuals, dtype=np.float64)
+    n, dim = r.shape
+    if n == 0:
+        return np.zeros(dim, dtype=np.float32)
+    gram = r.T @ r
+    gram[np.diag_indices(dim)] += float(gamma)
+    xi = np.linalg.solve(gram, r.sum(0))
+    return xi.astype(np.float32)
+
+
 def vlad_encode(descriptors, codebook, powernorm: bool = True,
-                intra_norm: bool = True) -> np.ndarray:
+                intra_norm: bool = True, pooling: str = "sum",
+                gmp_gamma: float = GMP_GAMMA_DEFAULT) -> np.ndarray:
     """VLAD-encode a page's descriptors against a fitted codebook.
 
-    Aggregates residuals (descriptor - nearest centre) per cluster, optionally
-    intra-normalises each cluster block, then optional signed power-norm and a
-    final global L2. Returns a flat ``[K * dim]`` float32 vector.
+    Aggregates residuals (descriptor - nearest centre) per cluster — by plain
+    sum (``pooling="sum"``) or generalized max pooling (``pooling="gmp"``, see
+    :func:`gmp_pool`) — optionally intra-normalises each cluster block, then
+    optional signed power-norm and a final global L2. Returns a flat
+    ``[K * dim]`` float32 vector.
 
     ``intra_norm=False`` reproduces Raven et al.'s plain VLAD (residual sum →
-    power-norm → global L2, no per-cluster normalisation).
+    power-norm → global L2, no per-cluster normalisation). ``pooling="gmp"`` with
+    ``intra_norm=False`` reproduces the GMP variant of his ``VLAD`` class
+    (``gmp=True, gamma=1000, powernorm=True`` — the class defaults; the released
+    inference pipeline hardcodes ``gmp=False``).
     """
+    if pooling not in VLAD_POOLINGS:
+        raise ValueError(f"pooling must be one of {VLAD_POOLINGS}, got {pooling!r}")
     x = np.asarray(descriptors, dtype=np.float32)
     c = np.asarray(codebook, dtype=np.float32)
     k, dim = c.shape
@@ -179,7 +219,9 @@ def vlad_encode(descriptors, codebook, powernorm: bool = True,
     for i in range(k):
         members = x[assign == i]
         if len(members):
-            vlad[i] = (members - c[i]).sum(0)
+            residuals = members - c[i]
+            vlad[i] = (gmp_pool(residuals, gmp_gamma) if pooling == "gmp"
+                       else residuals.sum(0))
     # Intra-normalisation (per-cluster L2). Skipped for Raven-parity plain VLAD.
     if intra_norm:
         norms = np.linalg.norm(vlad, axis=1, keepdims=True)

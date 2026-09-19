@@ -336,6 +336,19 @@ def embed(
              "+0.06 Utrecht) — but it mildly HURTS balanced ones (e.g. Leroy), so it is "
              "opt-in, not the default. See the recipe in VLAD_ADAPTATION_RESULTS.md / "
              "WORKFLOW.md. All embeddings in one index must agree on this flag."),
+    vlad_pooling: str = typer.Option(
+        "sum", "--vlad-pooling",
+        help="How each cluster's residuals are pooled: 'sum' (plain VLAD, the paper) or "
+             "'gmp' (generalized max pooling, Murray & Perronnin 2014: a ridge solve that "
+             "gives every descriptor equal say, so a burst of near-identical patches can't "
+             "dominate a cluster block). Raven's VLAD class defaults to gmp — unpublished; "
+             "his released inference script uses sum. Independent of the codebook, so "
+             "--codebook-from works with either; a PCA/whitening must be refit per "
+             "pooling. All embeddings in one index must agree on this."),
+    gmp_gamma: float = typer.Option(
+        1000.0, "--gmp-gamma",
+        help="Ridge regularisation for --vlad-pooling gmp (Raven's default 1000). Larger = "
+             "closer to plain sum; smaller = more aggressive equalisation."),
     invert: Optional[bool] = typer.Option(
         None, "--invert/--no-invert",
         help="Negate intensity at load (white-on-black -> black-on-white). Default: inherit "
@@ -391,7 +404,8 @@ def embed(
            foreground_threshold=foreground_threshold, foreground_method=foreground_method,
            window_foreground=window_foreground,
            window_foreground_threshold=window_foreground_threshold,
-           vlad_intra_norm=vlad_intra_norm,
+           vlad_intra_norm=vlad_intra_norm, vlad_pooling=vlad_pooling,
+           gmp_gamma=gmp_gamma,
            invert=invert, codebook_from=codebook_from, whiten_dim=whiten_dim,
            whiten_from=whiten_from, scale_normalize=scale_normalize,
            target_module=target_module or None, scale_method=scale_method)

@@ -744,7 +744,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
           foreground: bool = True, foreground_threshold: float | None = None,
           foreground_method: str = "contrast",
           window_foreground: bool = False, window_foreground_threshold: float = 0.025,
-          vlad_intra_norm: bool = False, invert: bool | None = None,
+          vlad_intra_norm: bool = False, vlad_pooling: str = "sum",
+          gmp_gamma: float = 1000.0, invert: bool | None = None,
           codebook_from: str | Path | None = None, whiten_dim: int | None = None,
           whiten_from: str | Path | None = None, scale_normalize: bool | None = None,
           target_module: float | None = None, scale_method: str = "profile"):
@@ -807,8 +808,10 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
             raise KeyError(f"embed override {key!r} not in {sorted(_OVERRIDABLE)}")
         settings[key] = _OVERRIDABLE[key](raw)
 
+    if vlad_pooling not in _vlad.VLAD_POOLINGS:
+        raise ValueError(f"vlad_pooling must be one of {_vlad.VLAD_POOLINGS}, got {vlad_pooling!r}")
     _warn_on_version_mismatch(output.parent, meta["model_id"], pooling=pooling,
-                              vlad_intra_norm=vlad_intra_norm)
+                              vlad_intra_norm=vlad_intra_norm, vlad_pooling=vlad_pooling)
 
     pages = _page_index(Path(input_dir), settings["window_size"], settings["overlap"],
                         settings["use_zones"])
@@ -911,7 +914,8 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
                     vectors.append(_mean_pool(desc, pooling is Pooling.MEANSTD, pool_dim))
                 rows.append({"row": len(rows), "image": str(img), "n_windows": len(crops)})
             elif stream_codebook is not None:    # VLAD, external codebook: encode + discard
-                vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm))
+                vlad_vecs.append(_vlad.vlad_encode(desc, stream_codebook, intra_norm=vlad_intra_norm,
+                                                   pooling=vlad_pooling, gmp_gamma=gmp_gamma))
                 desc_images.append(str(img))
             else:                                # VLAD (transductive) / patches: retain
                 page_descriptors.append(desc)
@@ -933,6 +937,7 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     else:
         matrix, codebook = _assemble(pooling, vectors, page_descriptors, desc_images, rows,
                                      vlad_clusters, seed, intra_norm=vlad_intra_norm,
+                                     vlad_pooling=vlad_pooling, gmp_gamma=gmp_gamma,
                                      codebook_from=codebook_from,
                                      max_descriptors=vlad_max_descriptors)
 
@@ -973,14 +978,16 @@ def embed(checkpoint: str | Path, input_dir: str | Path, output: str | Path,
     _write_output(output, matrix, rows, meta, pooling, bool(did_whiten), codebook,
                   vlad_clusters, seed, foreground=foreground,
                   foreground_threshold=foreground_threshold, foreground_method=foreground_method,
-                  vlad_intra_norm=vlad_intra_norm,
+                  vlad_intra_norm=vlad_intra_norm, vlad_pooling=vlad_pooling,
+                  gmp_gamma=gmp_gamma,
                   codebook_source=str(codebook_from) if codebook_from else "fitted",
                   whiten_transform=whiten_transform)
     return output
 
 
 def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_clusters, seed,
-              *, intra_norm: bool = True, codebook_from: str | Path | None = None,
+              *, intra_norm: bool = True, vlad_pooling: str = "sum",
+              gmp_gamma: float = 1000.0, codebook_from: str | Path | None = None,
               max_descriptors: int = 0):
     """Turn per-page results into the final matrix (+ codebook for vlad).
 
@@ -1019,7 +1026,8 @@ def _assemble(pooling, vectors, page_descriptors, desc_images, rows, vlad_cluste
         codebook = _vlad.fit_codebook(all_desc, n_clusters=vlad_clusters, seed=seed,
                                       max_descriptors=max_descriptors)
         print(f"[mole] VLAD: codebook ready in {time.perf_counter() - t0:.1f}s", flush=True)
-    mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm)
+    mat = np.vstack([_vlad.vlad_encode(d, codebook, intra_norm=intra_norm,
+                                       pooling=vlad_pooling, gmp_gamma=gmp_gamma)
                      for d in track(page_descriptors, "VLAD encoding", unit="page")])
     rows.extend({"row": i, "image": img} for i, img in enumerate(desc_images))
     return mat, codebook
@@ -1074,7 +1082,8 @@ def _l2(x: np.ndarray) -> np.ndarray:
 
 # ----------------------------------------------------------------------- output
 def _warn_on_version_mismatch(out_dir: Path, model_id: str, pooling: "Pooling | None" = None,
-                              vlad_intra_norm: bool | None = None) -> None:
+                              vlad_intra_norm: bool | None = None,
+                              vlad_pooling: str | None = None) -> None:
     """Warn if the output dir already holds INCOMPARABLE embeddings.
 
     Retrieval only makes sense within one embedding space, so an index must not mix
@@ -1083,6 +1092,7 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str, pooling: "Pooling | 
     VLAD are different spaces, so opting into ``--vlad-intra-norm`` for some archives
     of an index but not others silently breaks it. (Intra-norm helps skewed
     collections — see VLAD_ADAPTATION_RESULTS.md — but the *whole* index must agree.)
+    The residual pooling (sum vs GMP) is the same kind of axis.
     """
     for sidecar in sorted(out_dir.glob("*.mapping.json")):
         try:
@@ -1103,12 +1113,21 @@ def _warn_on_version_mismatch(out_dir: Path, model_id: str, pooling: "Pooling | 
                   f"plain and intra-normalised VLAD are different spaces — mixing them in one "
                   f"index breaks retrieval. Use a separate output directory or re-embed both "
                   f"the same way.")
+        if (pooling is Pooling.VLAD and meta.get("pooling") == "vlad"
+                and vlad_pooling is not None
+                and meta.get("vlad_pooling", "sum") != vlad_pooling):
+            print(f"[mole] WARNING: {sidecar.name} used vlad_pooling="
+                  f"{meta.get('vlad_pooling', 'sum')} but this run uses {vlad_pooling}; "
+                  f"sum- and GMP-pooled VLAD are different spaces — mixing them in one "
+                  f"index breaks retrieval. Use a separate output directory or re-embed both "
+                  f"the same way.")
 
 
 def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
                   vlad_clusters, seed, *, foreground: bool = False,
                   foreground_threshold: float = 0.02, foreground_method: str = "intensity",
-                  vlad_intra_norm: bool = True, codebook_source: str = "fitted",
+                  vlad_intra_norm: bool = True, vlad_pooling: str = "sum",
+                  gmp_gamma: float = 1000.0, codebook_source: str = "fitted",
                   whiten_transform: dict | None = None) -> None:
     if output.suffix == ".parquet":
         _write_parquet(output, matrix, rows)
@@ -1134,6 +1153,9 @@ def _write_output(output: Path, matrix, rows, meta, pooling, whiten, codebook,
         sidecar["vlad_clusters"] = int(codebook.shape[0])
         sidecar["vlad_seed"] = int(seed)
         sidecar["vlad_intra_norm"] = bool(vlad_intra_norm)
+        sidecar["vlad_pooling"] = vlad_pooling
+        if vlad_pooling == "gmp":
+            sidecar["vlad_gmp_gamma"] = float(gmp_gamma)
         sidecar["vlad_codebook_source"] = codebook_source
         sidecar["codebook"] = str(cb_path.name)
     if whiten_transform is not None:             # save so a test split can --whiten-from it

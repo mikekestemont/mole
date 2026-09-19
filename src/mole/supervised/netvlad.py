@@ -248,6 +248,7 @@ def _grad_norm(p) -> float:
 # ------------------------------------------------------------- page vectors
 def vlad_page_vectors(cache: TokenCache, codebook: np.ndarray,
                       rows: list[int] | None = None, *, intra_norm: bool = False,
+                      pooling: str = "sum", gmp_gamma: float = 1000.0,
                       progress: bool = True) -> np.ndarray:
     """Plain hard-assignment VLAD from the cache — the baseline, via production code.
 
@@ -262,7 +263,8 @@ def vlad_page_vectors(cache: TokenCache, codebook: np.ndarray,
     k, d = np.asarray(codebook).shape
     out = np.zeros((len(rows), k * d), np.float32)
     for j, i in enumerate(track(rows, "VLAD (hard)", unit="page", disable=not progress)):
-        out[j] = _vlad.vlad_encode(cache.page_tokens(i), codebook, intra_norm=intra_norm)
+        out[j] = _vlad.vlad_encode(cache.page_tokens(i), codebook, intra_norm=intra_norm,
+                                   pooling=pooling, gmp_gamma=gmp_gamma)
     return out
 
 

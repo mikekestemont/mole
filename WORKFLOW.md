@@ -312,6 +312,17 @@ mole embed <ckpt> data/new-bin outputs/new.npy --pooling vlad \
 On the one-dominant-hand Flanders set this stack ran macro 0.397 → 0.598 end to end.
 Skip `--vlad-intra-norm` for balanced collections (macro ≈ micro, no dominant hand).
 
+3. **Generalized max pooling** (`mole embed --vlad-pooling gmp [--gmp-gamma 1000]`):
+   replaces each cluster's residual *sum* with the ridge solution of `R ξ = 1` (Murray &
+   Perronnin, CVPR 2014), so every descriptor gets one vote and a burst of near-identical
+   patches cannot own a cluster block. Raven's own VLAD class defaults to this
+   (`gmp=True, gamma=1000`) although the paper never mentions it and his released
+   inference script uses sum — status: **under test** (Tim's suggestion, 2026-09-19).
+   Independent of the codebook (`--codebook-from` works with either pooling), but a
+   whitening must be refit per pooling, and the whole index must agree (guarded).
+   Measure it CPU-side first: `python scripts/run_gmp_ab.py runs/sup_tokens_full
+   --gammas 10 100 1000 10000` sweeps the gamma on every archive in a token cache.
+
 ## 8. `cross` — the same scribe in more than one archive? ✅
 
 Several archives embedded in ONE space (one checkpoint, one codebook with a pinned
