@@ -105,18 +105,28 @@ released code is `Traven16/SSL_ViT_WR`; every row below matches the paper, the l
 | hwi_s56 (09-17) | + stride 56 (`overlap=0.75`), codebook/whitening reused | 0.8000 | 0.9056 | 0.9361 |
 | **hwi_parity (09-19)** | + his codebook fit (`--kmeans-batch-size 1000000 --kmeans-n-init 1`, 20 % pool = `--vlad-max-descriptors 700000`), NO window pre-filter (commented out in his `keypoints.py`), whitening refit | **0.8009** | **0.9086** | 0.9358 |
 
-Train smoke test (codebook + whitening fit on train, evaluated on train): 0.8902 / 0.9306.
-Δ across the whole ledger is +0.6 mAP; the 2.5-point gap to the paper is untouched. Also ruled out on
+| hwi_s22 (09-20) | his `run.sh` literally: stride **22** for codebook features and test (`overlap=0.9018`, 11 GPU-h) | 0.8015 | 0.9075 | 0.9361 |
+| **hwi_trans (09-20)** | **codebook + PCA-whitening fit on the TEST set** (stride 224, his k-means) | **0.8226** | **0.9156** | 0.9411 |
+
+Train smoke tests (codebook + whitening fit on train, evaluated on train): 0.8902 / 0.9306 at
+stride 224, 0.8944 / 0.9332 at stride 22.
+
+**Resolution (2026-09-20).** Stride is worth +0.6 mAP whether 56 or 22. Fitting the codebook and
+the PCA-whitening *transductively on the 3600 test pages* is worth **+2.7 mAP / +1.0 Top-1** and
+lands within 0.3 of the paper at stride 224 — the size of the stride step. The paper's 82.6 / 91.9
+is therefore consistent with a transductive fit at S_eval = 56, not with the fit-on-train protocol
+the paper states and the released code implements. Nothing else in the pipeline is the right size.
+For mole's own archives this is the regime already in use (codebook/whitening fit on the collection
+being indexed), so no downstream number changes. Reproduction closed.
+Δ across the fit-on-train rows is +0.6 mAP; the transductive row explains the rest. Also ruled out on
 the archives (`scripts/run_gmp_ab.py`, token cache): **GMP pooling** (`--vlad-pooling gmp`, the default of
 his `VLAD` class but not of his inference script) — sum wins on Antwerp/Brackley at every gamma, mild
 gain only on the skewed Flanders set; it is a per-cluster whitening of the residuals and fails the same
 way PCA-whitening does on small archives.
 
-Line-by-line diff of `mole.embed.vlad` / eval against his code (2026-09-19) left exactly one setting
-unrun: `run.sh` uses `--stride_factor_eval=0.1` → **stride 22 px** for both the codebook features and
-the test extraction (≈100× the windows of stride 224; ~15 h on one 2080 Ti). That run (`outputs/hwi_s22`)
-is the last thing the released code can tell us; beyond it the residual is in an extraction whose settings
-are not in the repo (`--extract_train=false` consumes pre-computed train features).
+Line-by-line diff of `mole.embed.vlad` / eval against his code (2026-09-19) found no other deviation
+(input scaling, fg rule, assignment, pooling, power-norm, PCA formula, cosine, AP definition all match;
+no per-image descriptor cap on either side; `self.rerank` in his `Retrieval` is never used).
 
 **Eval definition check vs the competition paper** (Fiel et al., ICDAR 2017, §IV): mole computes
 AP = Σ_k P(k)·rel(k) / |relevant| with the query removed from the gallery (4 relevant per HWI query),
