@@ -72,3 +72,5 @@ commands, and **[ARCHITECTURE.md](ARCHITECTURE.md)** for design/decisions/build 
   Retrieval*, ICDAR 2024 ([doi:10.1007/978-3-031-70536-6_23](https://doi.org/10.1007/978-3-031-70536-6_23),
   [arXiv:2409.00751](https://arxiv.org/abs/2409.00751); TU Dortmund).
   MOLE is refactored from their code and checkpoint; the method is theirs.
+
+See `HWI_REPRODUCTION.md` for the Historical-WI reproduction record.

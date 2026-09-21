@@ -94,6 +94,8 @@ _Numbers are the canonical project results (some from runs of mid-2026); re-meas
 
 ## Historical-WI parity ledger (raven checkpoint, 2026-07 → 2026-09-20)
 
+Full record with commands and the code diff: **HWI_REPRODUCTION.md**.
+
 Test split = 3600 pages / 720 writers, leave-one-out, cosine, PCA-whitening (384) fit on train.
 Paper (arXiv:2409.00751, ICDAR 2024): **82.6 mAP / 91.9 Top-1** at S_eval = 56. Tim Raven confirmed
 (2026-09-19/20) that the checkpoint we hold is the exact model and that the settings are right. His
